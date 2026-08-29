@@ -5,7 +5,6 @@ Critiq is a code review platform that scans pull/merge request **diffs only** (n
 This repository (`critiq-be`) contains the backend API for Critiq, built with **NestJS**.
 
 > Status: MVP v1.1 (in development) · Internal · Cititex Engineering
-> See [`CLAUDE.md`](./CLAUDE.md) for the detailed build roadmap, phase checkpoints, and architecture decisions.
 
 ---
 
@@ -47,7 +46,7 @@ Role checks are enforced server-side via a `RolesGuard` on every mutating endpoi
 
 ## Core Business Rules
 
-These are backend invariants, not UI details — see [`CLAUDE.md`](./CLAUDE.md) for how each maps to code:
+These are backend invariants, not UI details:
 
 - **Human-in-the-loop is absolute** — Approve/Request Changes can only be performed by a human, in every review mode. No scan job or AI job ever calls the review endpoint itself.
 - **Diff-only scanning** — one scan per PR push; Critiq never reads the full codebase.
@@ -67,12 +66,12 @@ These are backend invariants, not UI details — see [`CLAUDE.md`](./CLAUDE.md) 
 | Database | PostgreSQL | relational, fits audit log & per-branch policy modeling |
 | ORM | Prisma | type-safe client, straightforward migration workflow |
 | Queue | BullMQ + Redis | async scan/regenerate/rescan jobs, retry/backoff built in |
-| Auth | Passport.js (`@nestjs/passport`) | `passport-github2` for GitHub; GitLab uses a custom strategy on `passport-oauth2` (no well-maintained official strategy exists) — see `CLAUDE.md` for the GitLab OAuth-vs-PAT distinction |
+| Auth | Passport.js (`@nestjs/passport`) | `passport-github2` for GitHub; GitLab uses a custom strategy on `passport-oauth2` (no well-maintained official strategy exists). Note GitLab has two distinct flows: OAuth login vs. connecting a self-hosted instance via Personal Access Token |
 | Session | JWT (`@nestjs/jwt` + `passport-jwt`) | Bearer token on every authenticated endpoint |
 | Validation | `class-validator` / `class-transformer` | DTO validation at controller boundaries |
 | Config | `@nestjs/config` + `joi` | fail-fast startup if required env vars are missing |
 
-> Full phase-by-phase install list lives in `CLAUDE.md` — dependencies are added incrementally per phase, not all at once.
+> Dependencies are added incrementally per build phase, not all at once — see Build Roadmap below.
 
 ---
 
@@ -182,13 +181,11 @@ prisma/
   migrations/
 ```
 
-See `CLAUDE.md` for the full rationale and the phase in which each module gets built out.
-
 ---
 
 ## Build Roadmap
 
-Development proceeds in phases, each with a checkpoint before moving to the next — see `CLAUDE.md` for full detail:
+Development proceeds in phases, each with a checkpoint before moving to the next:
 
 1. **Fase 0 — Foundation**: `ConfigModule` + env validation, fail-fast startup
 2. **Fase 1 — Database schema**: Prisma models for users, repos, PRs, findings, reviews, audit log
