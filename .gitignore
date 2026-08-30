@@ -58,3 +58,5 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # markdown (except README.md)
 *.md
 !README.md
+
+/src/generated/prisma
