@@ -60,3 +60,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 !README.md
 
 /src/generated/prisma
+
+# AI tool configs (local-only, e.g. Prisma skills auto-installed per tool)
+.windsurf/
+.claude/
+.agents/
