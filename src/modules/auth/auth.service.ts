@@ -1,6 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { Provider, User } from '../../generated/prisma/client';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
+
+export interface JwtPayload {
+  sub: string;
+  role: User['role'];
+}
 
 export interface OAuthProfile {
   provider: Provider;
@@ -14,7 +22,16 @@ export interface OAuthProfile {
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+    @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
+  ) {}
+
+  issueSessionToken(user: User): string {
+    const payload: JwtPayload = { sub: user.id, role: user.role };
+    return this.jwtService.sign(payload);
+  }
 
   async findOrCreateFromOAuth(profile: OAuthProfile): Promise<User> {
     const existingAccount = await this.prisma.account.findUnique({
@@ -28,6 +45,9 @@ export class AuthService {
     });
 
     if (existingAccount) {
+      this.logger.info(
+        `found existing user from OAuth profile: ${JSON.stringify(profile)}`,
+      );
       await this.prisma.account.update({
         where: { id: existingAccount.id },
         data: {
@@ -38,6 +58,9 @@ export class AuthService {
       return existingAccount.user;
     }
 
+    this.logger.info(
+      `creating user from OAuth profile: ${JSON.stringify(profile)}`,
+    );
     return this.prisma.user.create({
       data: {
         email: profile.email,
