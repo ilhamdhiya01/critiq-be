@@ -7,6 +7,7 @@ import { WinstonModule } from 'nest-winston';
 import * as winston from 'winston';
 import { validationSchema } from '../config/validation.schema';
 import configuration from '../config/configuration';
+import { EncryptionService } from './encryption/encryption.service';
 
 @Global()
 @Module({
@@ -23,11 +24,12 @@ import configuration from '../config/configuration';
   ],
   providers: [
     PrismaService,
+    EncryptionService,
     {
       provide: APP_FILTER,
       useClass: HttpExceptionFilter,
     },
   ],
-  exports: [PrismaService, WinstonModule, ConfigModule],
+  exports: [PrismaService, WinstonModule, ConfigModule, EncryptionService],
 })
 export class CommonModule {}

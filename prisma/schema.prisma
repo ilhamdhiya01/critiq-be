@@ -50,3 +50,30 @@ enum Provider {
   GITHUB
   GITLAB
 }
+
+model GitlabConnection {
+  id           String   @id @default(cuid())
+  instanceUrl  String
+  encryptedPat String   @db.Text
+  connectedAt  DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repositories Repository[]
+
+  @@map("gitlab_connections")
+}
+
+model Repository {
+  id          String   @id @default(cuid())
+  provider    Provider
+  externalId  String
+  fullName    String
+  webhookId   String?
+  connectedAt DateTime @default(now())
+
+  gitlabConnectionId String?
+  gitlabConnection   GitlabConnection? @relation(fields: [gitlabConnectionId], references: [id])
+
+  @@unique([provider, externalId])
+  @@map("repositories")
+}
