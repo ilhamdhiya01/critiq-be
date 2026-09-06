@@ -13,16 +13,60 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique @db.VarChar(100)
-  name      String?  @db.VarChar(100)
+  id        String  @id @default(cuid())
+  email     String  @unique @db.VarChar(100)
+  name      String? @db.VarChar(100)
   avatarUrl String?
-  role      Role     @default(VIEWER)
-  accounts  Account[]
+
+  accounts    Account[]
+  memberships Membership[]
+  createdOrgs Organization[] @relation("OrganizationCreatedBy")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("users")
+}
+
+model Organization {
+  id        String @id @default(cuid())
+  name      String @db.VarChar(100)
+  slug      String @unique @db.VarChar(100)
+  createdBy String
+
+  creator           User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
+  memberships       Membership[]
+  gitlabConnections GitlabConnection[]
+  repositories      Repository[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("organizations")
+}
+
+model Membership {
+  id             String           @id @default(cuid())
+  userId         String
+  organizationId String
+  role           Role             @default(VIEWER)
+  status         MembershipStatus @default(ACTIVE)
+  lastAccessedAt DateTime?
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+  @@map("memberships")
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
 }
 
 enum Role {
@@ -30,15 +74,16 @@ enum Role {
   REVIEWER
   VIEWER
 }
+
 model Account {
-  id                 String   @id @default(cuid())
-  provider           Provider
-  providerAccountId  String
-  accessToken        String?  @db.Text
-  refreshToken       String?  @db.Text
-  userId             String
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                String   @id @default(cuid())
+  provider          Provider
+  providerAccountId String
+  accessToken       String?  @db.Text
+  refreshToken      String?  @db.Text
+  userId            String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -52,7 +97,11 @@ enum Provider {
 }
 
 model GitlabConnection {
-  id           String   @id @default(cuid())
+  id             String @id @default(cuid())
+  organizationId String
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
   instanceUrl  String
   encryptedPat String   @db.Text
   connectedAt  DateTime @default(now())
@@ -60,11 +109,16 @@ model GitlabConnection {
 
   repositories Repository[]
 
+  @@unique([organizationId, instanceUrl])
   @@map("gitlab_connections")
 }
 
 model Repository {
-  id          String   @id @default(cuid())
+  id             String @id @default(cuid())
+  organizationId String
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
   provider    Provider
   externalId  String
   fullName    String
@@ -74,6 +128,6 @@ model Repository {
   gitlabConnectionId String?
   gitlabConnection   GitlabConnection? @relation(fields: [gitlabConnectionId], references: [id])
 
-  @@unique([provider, externalId])
+  @@unique([organizationId, provider, externalId])
   @@map("repositories")
 }

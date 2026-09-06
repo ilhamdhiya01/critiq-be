@@ -23,10 +23,11 @@ export class IntegrationsService {
   ) {}
 
   async connectGitlab(
+    organizationId: string,
     dto: ConnectGitlabDto,
   ): Promise<GitlabConnectionResponseDto> {
     this.logger.info(
-      `attempting to connect GitLab instance: instanceUrl=${dto.instanceUrl}`,
+      `attempting to connect GitLab instance: org=${organizationId} instanceUrl=${dto.instanceUrl}`,
     );
     await this.verifyGitlabToken(dto.instanceUrl, dto.personalAccessToken);
 
@@ -34,15 +35,17 @@ export class IntegrationsService {
       dto.personalAccessToken,
     );
 
-    const existing = await this.prisma.gitlabConnection.findFirst();
+    const existing = await this.prisma.gitlabConnection.findFirst({
+      where: { organizationId, instanceUrl: dto.instanceUrl },
+    });
 
     const connection = existing
       ? await this.prisma.gitlabConnection.update({
           where: { id: existing.id },
-          data: { instanceUrl: dto.instanceUrl, encryptedPat },
+          data: { encryptedPat },
         })
       : await this.prisma.gitlabConnection.create({
-          data: { instanceUrl: dto.instanceUrl, encryptedPat },
+          data: { organizationId, instanceUrl: dto.instanceUrl, encryptedPat },
         });
 
     return new GitlabConnectionResponseDto(connection);

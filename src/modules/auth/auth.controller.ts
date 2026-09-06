@@ -2,13 +2,12 @@ import { Controller, Get, Req, Res, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
-import { User } from '../../generated/prisma/client';
+import { Role, User } from '../../generated/prisma/client';
 import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
-import { Auth } from '../../common/decorators/auth.decorator';
 
 interface AuthenticatedRequest extends Request {
-  user: User;
+  user: { user: User; activeOrgId: string; role: Role };
 }
 
 interface RequestWithSession extends Request {
@@ -54,13 +53,20 @@ export class AuthController {
   }
 
   @Get('me')
-  @Auth()
+  @UseGuards(AuthGuard('jwt'))
   me(@Req() req: RequestWithSession): JwtPayload {
     return req.user;
   }
 
-  private handleOAuthCallback(user: User, res: Response): void {
-    const token = this.authService.issueSessionToken(user);
+  private handleOAuthCallback(
+    auth: { user: User; activeOrgId: string; role: Role },
+    res: Response,
+  ): void {
+    const token = this.authService.issueSessionToken(
+      auth.user,
+      auth.activeOrgId,
+      auth.role,
+    );
 
     res.cookie('session', token, {
       httpOnly: true,

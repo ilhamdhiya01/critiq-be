@@ -56,7 +56,7 @@ export class GitlabStrategy extends PassportStrategy(Strategy, 'gitlab') {
       );
     }
 
-    return this.authService.findOrCreateFromOAuth({
+    return this.authService.loginWithOAuth({
       provider: Provider.GITLAB,
       providerAccountId: String(profile.id),
       email: profile.email,

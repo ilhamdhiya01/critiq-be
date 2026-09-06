@@ -8,6 +8,7 @@ import * as winston from 'winston';
 import { validationSchema } from '../config/validation.schema';
 import configuration from '../config/configuration';
 import { EncryptionService } from './encryption/encryption.service';
+import { SlugService } from './slug/slug.service';
 
 @Global()
 @Module({
@@ -25,6 +26,7 @@ import { EncryptionService } from './encryption/encryption.service';
   providers: [
     PrismaService,
     EncryptionService,
+    SlugService,
     {
       provide: APP_FILTER,
       useClass: HttpExceptionFilter,
@@ -37,6 +39,12 @@ import { EncryptionService } from './encryption/encryption.service';
       }),
     },
   ],
-  exports: [PrismaService, WinstonModule, ConfigModule, EncryptionService],
+  exports: [
+    PrismaService,
+    WinstonModule,
+    ConfigModule,
+    EncryptionService,
+    SlugService,
+  ],
 })
 export class CommonModule {}

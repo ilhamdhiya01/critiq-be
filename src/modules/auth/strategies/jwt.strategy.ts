@@ -16,7 +16,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   validate(payload: JwtPayload): JwtPayload {
-    if (!payload.sub || !payload.role) {
+    if (!payload.sub || !payload.activeOrgId || !payload.role) {
       throw new UnauthorizedException('Invalid session token');
     }
     return payload;

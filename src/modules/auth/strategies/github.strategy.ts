@@ -27,7 +27,7 @@ export class GithubStrategy extends PassportStrategy(Strategy, 'github') {
       );
     }
 
-    return this.authService.findOrCreateFromOAuth({
+    return this.authService.loginWithOAuth({
       provider: Provider.GITHUB,
       providerAccountId: profile.id,
       email,
