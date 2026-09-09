@@ -17,12 +17,23 @@ export class SlugService {
     );
   }
 
-  async generateUniqueOrgSlug(tx: TxClient, seed: string): Promise<string> {
+  async generateUniqueOrgSlug(
+    tx: TxClient,
+    seed: string,
+    excludeOrgId?: string,
+  ): Promise<string> {
     const base = this.slugify(seed);
     let candidate = base;
     let suffix = 0;
 
-    while (await tx.organization.findUnique({ where: { slug: candidate } })) {
+    while (
+      await tx.organization.findFirst({
+        where: {
+          slug: candidate,
+          ...(excludeOrgId && { id: { not: excludeOrgId } }),
+        },
+      })
+    ) {
       suffix += 1;
       candidate = `${base}-${suffix}`;
     }

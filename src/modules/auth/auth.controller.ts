@@ -7,7 +7,7 @@ import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
 
 interface AuthenticatedRequest extends Request {
-  user: { user: User; activeOrgId: string; role: Role };
+  user: { user: User; activeOrgId: string | null; role: Role | null };
 }
 
 interface RequestWithSession extends Request {
@@ -36,9 +36,15 @@ export class AuthController {
     // cookie), not an endpoint called via fetch/AJAX from the FE — so it
     // needs manual control over the response instead of returning a plain
     // value like the other controllers do.
-    this.handleOAuthCallback(req.user, res);
+    this.handleOAuthCallback(req.user, 'github', res);
   }
 
+  // GitLab identity login (PRD v1.4/D3): a normal static Passport strategy,
+  // same shape as GitHub — one fixed gitlab.com OAuth app, scope `read_user`
+  // only. Unlike v1.3, this is not hand-rolled: repo access is a separate
+  // concern entirely now (org-level access token via the integrations
+  // module), so there's no per-instance dynamism left to justify a manual
+  // flow here.
   @Get('gitlab')
   @UseGuards(AuthGuard('gitlab'))
   gitlabLogin(): void {
@@ -49,7 +55,7 @@ export class AuthController {
   @Get('gitlab/callback')
   @UseGuards(AuthGuard('gitlab'))
   gitlabCallback(@Req() req: AuthenticatedRequest, @Res() res: Response): void {
-    this.handleOAuthCallback(req.user, res);
+    this.handleOAuthCallback(req.user, 'gitlab', res);
   }
 
   @Get('me')
@@ -59,21 +65,28 @@ export class AuthController {
   }
 
   private handleOAuthCallback(
-    auth: { user: User; activeOrgId: string; role: Role },
+    auth: { user: User; activeOrgId: string | null; role: Role | null },
+    provider: 'github' | 'gitlab',
     res: Response,
   ): void {
     const token = this.authService.issueSessionToken(
-      auth.user,
+      auth.user.id,
       auth.activeOrgId,
       auth.role,
     );
 
+    // SameSite=None + Secure:true unconditionally: user's explicit choice to
+    // run FE/BE cross-origin locally instead of same-origin via proxy — see
+    // main.ts for the full rationale and the local HTTPS cert this depends
+    // on.
     res.cookie('session', token, {
       httpOnly: true,
-      secure: this.configService.get('nodeEnv') === 'production',
-      sameSite: 'lax',
+      secure: true,
+      sameSite: 'none',
       maxAge: 24 * 60 * 60 * 1000,
     });
-    res.redirect(this.configService.getOrThrow<string>('feUrl'));
+
+    const feUrl = this.configService.getOrThrow<string>('feUrl');
+    res.redirect(`${feUrl}/onboarding?provider=${provider}`);
   }
 }

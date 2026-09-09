@@ -18,9 +18,10 @@ model User {
   name      String? @db.VarChar(100)
   avatarUrl String?
 
-  accounts    Account[]
-  memberships Membership[]
-  createdOrgs Organization[] @relation("OrganizationCreatedBy")
+  accounts              Account[]
+  memberships           Membership[]
+  createdOrgs           Organization[] @relation("OrganizationCreatedBy")
+  connectedIntegrations Integration[]  @relation("IntegrationConnectedBy")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -34,10 +35,9 @@ model Organization {
   slug      String @unique @db.VarChar(100)
   createdBy String
 
-  creator           User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
-  memberships       Membership[]
-  gitlabConnections GitlabConnection[]
-  repositories      Repository[]
+  creator      User          @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
+  memberships  Membership[]
+  integrations Integration[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -96,38 +96,44 @@ enum Provider {
   GITLAB
 }
 
-model GitlabConnection {
-  id             String @id @default(cuid())
+model Integration {
+  id             String           @id @default(cuid())
   organizationId String
+  source         Provider
+  instanceUrl    String           @db.Text
+  credentialKind CredentialKind   @default(GROUP_TOKEN)
+  encryptedToken String           @db.Text
+  expiresAt      DateTime
+  tokenKind      TokenKind
+  tokenUsername  String           @db.Text
+  groupsCache    Json?
+  state          IntegrationState @default(ACTIVE)
+
+  connectedByUserId String?
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connectedBy  User?        @relation("IntegrationConnectedBy", fields: [connectedByUserId], references: [id], onDelete: SetNull)
 
-  instanceUrl  String
-  encryptedPat String   @db.Text
-  connectedAt  DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  repositories Repository[]
-
-  @@unique([organizationId, instanceUrl])
-  @@map("gitlab_connections")
+  @@unique([organizationId, source])
+  @@map("integrations")
 }
 
-model Repository {
-  id             String @id @default(cuid())
-  organizationId String
+enum CredentialKind {
+  GROUP_TOKEN
+  OAUTH
+}
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+enum TokenKind {
+  GROUP
+  PERSONAL
+}
 
-  provider    Provider
-  externalId  String
-  fullName    String
-  webhookId   String?
-  connectedAt DateTime @default(now())
-
-  gitlabConnectionId String?
-  gitlabConnection   GitlabConnection? @relation(fields: [gitlabConnectionId], references: [id])
-
-  @@unique([organizationId, provider, externalId])
-  @@map("repositories")
+enum IntegrationState {
+  ACTIVE
+  EXPIRING_SOON
+  TOKEN_EXPIRED
+  INVALID
 }

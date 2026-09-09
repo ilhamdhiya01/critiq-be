@@ -2,15 +2,14 @@ import { Inject, Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
-import { SlugService } from '../../common/slug/slug.service';
 import { Provider, Role, User } from '../../generated/prisma/client';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
 export interface JwtPayload {
   sub: string;
-  activeOrgId: string;
-  role: Role;
+  activeOrgId: string | null;
+  role: Role | null;
 }
 
 export interface OAuthProfile {
@@ -29,26 +28,32 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly encryptionService: EncryptionService,
-    private readonly slugService: SlugService,
     @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
   ) {}
 
-  issueSessionToken(user: User, activeOrgId: string, role: Role): string {
-    const payload: JwtPayload = { sub: user.id, activeOrgId, role };
+  issueSessionToken(
+    userId: string,
+    activeOrgId: string | null,
+    role: Role | null,
+  ): string {
+    const payload: JwtPayload = { sub: userId, activeOrgId, role };
     return this.jwtService.sign(payload);
   }
 
   async loginWithOAuth(profile: OAuthProfile): Promise<{
     user: User;
-    activeOrgId: string;
-    role: Role;
+    activeOrgId: string | null;
+    role: Role | null;
   }> {
     const user = await this.findOrCreateUser(profile);
-    const membership = await this.ensureMembership(user);
+    const membership = await this.prisma.membership.findFirst({
+      where: { userId: user.id, status: 'ACTIVE' },
+      orderBy: { lastAccessedAt: 'desc' },
+    });
     return {
       user,
-      activeOrgId: membership.organizationId,
-      role: membership.role,
+      activeOrgId: membership?.organizationId ?? null,
+      role: membership?.role ?? null,
     };
   }
 
@@ -63,12 +68,18 @@ export class AuthService {
       include: { user: true },
     });
 
-    const encryptedAccessToken = this.encryptionService.encrypt(
-      profile.accessToken,
-    );
-    const encryptedRefreshToken = profile.refreshToken
-      ? this.encryptionService.encrypt(profile.refreshToken)
-      : undefined;
+    // GitLab tokens are never persisted here: since PRD v1.4/D3, GitLab
+    // login only proves identity (scope `read_user`) and the token from that
+    // handshake has no further use afterward — repo access is a completely
+    // separate, org-level access token handled by the integrations module.
+    const encryptedAccessToken =
+      profile.provider === Provider.GITLAB
+        ? undefined
+        : this.encryptionService.encrypt(profile.accessToken);
+    const encryptedRefreshToken =
+      profile.provider === Provider.GITLAB || !profile.refreshToken
+        ? undefined
+        : this.encryptionService.encrypt(profile.refreshToken);
 
     if (existingAccount) {
       this.logger.info(
@@ -121,53 +132,6 @@ export class AuthService {
           },
         },
       },
-    });
-  }
-
-  /**
-   * D2 (self-serve): kalau user tidak punya membership aktif sama sekali,
-   * buat Organization baru + Membership ADMIN secara atomic. Kalau sudah
-   * punya, pakai membership yang paling baru diakses (F0: "organisasi
-   * terakhir yang dipakai").
-   */
-  private async ensureMembership(user: User) {
-    const existing = await this.prisma.membership.findFirst({
-      where: { userId: user.id, status: 'ACTIVE' },
-      orderBy: { lastAccessedAt: 'desc' },
-    });
-
-    if (existing) {
-      return this.prisma.membership.update({
-        where: { id: existing.id },
-        data: { lastAccessedAt: new Date() },
-      });
-    }
-
-    this.logger.info(
-      `no active membership for user=${user.id}, provisioning organization (D2 self-serve)`,
-    );
-
-    return this.prisma.$transaction(async (tx) => {
-      const seed = user.name ?? user.email.split('@')[0];
-      const slug = await this.slugService.generateUniqueOrgSlug(tx, seed);
-
-      const organization = await tx.organization.create({
-        data: {
-          name: `${seed}'s Organization`,
-          slug,
-          createdBy: user.id,
-        },
-      });
-
-      return tx.membership.create({
-        data: {
-          userId: user.id,
-          organizationId: organization.id,
-          role: Role.ADMIN,
-          status: 'ACTIVE',
-          lastAccessedAt: new Date(),
-        },
-      });
     });
   }
 }

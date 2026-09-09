@@ -6,7 +6,20 @@ Every customer company is one **Organization** — the owner of its connected re
 
 This repository (`critiq-be`) contains the backend API for Critiq, built with **NestJS**.
 
-> Status: MVP v1.2 (in development, multi-tenant) · Internal · Cititex Engineering
+> Status: MVP v1.4 (in development) · Internal · Cititex Engineering
+>
+> **v1.4 change**: GitLab login is identity-only again (`read_user` scope, one
+> fixed Critiq-owned OAuth app on gitlab.com — no per-instance app
+> registration). Repo access — for GitLab.com or self-hosted — comes from an
+> **access token pasted by an Admin, scoped to the organization** (SonarQube
+> Cloud style), not derived from anyone's OAuth login. The field accepts a
+> group access token (recommended) or a personal access token; either is
+> verified against the GitLab API and stored encrypted directly on the
+> organization's integration record. GitHub access is still moving to a GitHub
+> App installation per org (separate, larger migration, not yet scheduled in
+> detail) rather than a user-scoped OAuth token. See `CLAUDE.md` → "Kredensial
+> code host (PRD v1.4)" for the full rationale and what's already built vs.
+> still pending.
 
 ---
 
@@ -77,7 +90,7 @@ These are backend invariants, not UI details:
 | Database | PostgreSQL | relational, fits audit log & per-branch policy modeling |
 | ORM | Prisma | type-safe client, straightforward migration workflow |
 | Queue | BullMQ + Redis | async scan/regenerate/rescan jobs, retry/backoff built in |
-| Auth | Passport.js (`@nestjs/passport`) | `passport-github2` for GitHub; GitLab uses a custom strategy on `passport-oauth2` (no well-maintained official strategy exists). Note GitLab has two distinct flows: OAuth login vs. connecting a self-hosted instance via Personal Access Token |
+| Auth | Passport.js (`@nestjs/passport`) | GitHub: OAuth login for identity today, migrating to a GitHub App installation for repo access (org-level, not a user-scoped token — larger migration, not yet scheduled). GitLab: identity-only OAuth login (`passport-oauth2`, `read_user` scope, one fixed Critiq-owned app on gitlab.com). Repo access is a separate, org-level access token (group or personal) pasted by an Admin and verified against the GitLab API — never derived from anyone's login |
 | Session | JWT (`@nestjs/jwt` + `passport-jwt`) | Bearer token on every authenticated endpoint |
 | Validation | `class-validator` / `class-transformer` | DTO validation at controller boundaries |
 | Config | `@nestjs/config` + `joi` | fail-fast startup if required env vars are missing |
@@ -126,12 +139,22 @@ pnpm test:cov      # test coverage
 | `DATABASE_URL`             | PostgreSQL connection string (Prisma)                               |
 | `REDIS_URL`                | Redis connection string (BullMQ, from Fase 4 onward)                |
 | `JWT_SECRET`               | Signing secret for session JWTs                                     |
-| `ENCRYPTION_KEY`           | At-rest encryption key for AI provider API keys and GitLab PATs     |
-| `GITHUB_CLIENT_ID`         | GitHub OAuth App client ID (org `cititex`)                          |
+| `ENCRYPTION_KEY`           | At-rest encryption key for GitLab access tokens (per-organization) and AI provider API keys |
+| `GITHUB_CLIENT_ID`         | GitHub OAuth App client ID — identity login only; repo access is moving to a GitHub App installation (see `CLAUDE.md`) |
 | `GITHUB_CLIENT_SECRET`     | GitHub OAuth App client secret                                      |
-| `GITLAB_CLIENT_ID`         | GitLab OAuth App client ID (self-hosted instance)                   |
-| `GITLAB_CLIENT_SECRET`     | GitLab OAuth App client secret                                      |
+| `GITHUB_REDIRECT_URL`      | GitHub OAuth callback URL                                           |
+| `GITLAB_CLIENT_ID`         | GitLab.com OAuth App client ID — identity login only, one fixed Critiq-owned app (not per-instance) |
+| `GITLAB_CLIENT_SECRET`     | GitLab.com OAuth App client secret                                  |
+| `GITLAB_REDIRECT_URL`      | GitLab.com OAuth callback URL                                       |
 
+> GitLab **repo access** credentials (instance URL + access token) are **not**
+> env vars — as of PRD v1.4 they're submitted per-organization by an Admin via
+> `POST /orgs/:orgId/integrations/gitlab` and stored encrypted on the
+> organization's `Integration` row (see `src/modules/integrations/`). There is
+> no per-instance OAuth app registration anymore (F18 was removed from the
+> product in v1.4) — any GitLab instance (gitlab.com or self-hosted) is
+> reachable with just an instance URL + a group/personal access token.
+>
 > `.env.example` is the source of truth — keep it in sync whenever a new variable is introduced in a phase.
 
 ---
@@ -144,8 +167,8 @@ REST + JSON, prefix `/api/v1`, auth via Bearer token (backed by an httpOnly sess
 
 | Group               | Examples                                                                                                |
 | -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Auth & session       | `POST /auth/oauth/:provider`, `POST /auth/logout`, `GET /me`, `GET/POST/DELETE /me/tokens`               |
-| Organizations        | `GET /me/orgs` (list orgs + role, powers the org switcher), `POST /orgs` (self-serve create)              |
+| Auth & session       | `GET /auth/github`, `GET /auth/gitlab` (identity-only, `read_user` scope), `GET /auth/:provider/callback`, `POST /auth/logout`, `GET /me`, `GET/POST/DELETE /me/tokens` |
+| Organizations        | `GET /me/orgs` (list orgs + role, powers the org switcher), `POST /orgs` (self-serve create; never auto-creates an integration — connecting GitLab is always a separate, explicit Admin action) |
 | Webhooks (inbound)   | `POST /webhooks/github`, `POST /webhooks/gitlab` — organization resolved from the connected repo         |
 
 **Everything else is scoped to one organization**, prefixed `/api/v1/orgs/:orgId/...` — role is evaluated from the caller's `Membership` on `:orgId` (403 if not a member or role isn't sufficient), never from a global role on the token:
@@ -160,7 +183,7 @@ REST + JSON, prefix `/api/v1`, auth via Bearer token (backed by an httpOnly sess
 | Rules                | `GET/PUT .../rules`                                                                                        |
 | Activity & Insights  | `GET .../activity?decision=&mode=`, `GET .../insights?range=8w`                                            |
 | Settings             | `GET/PUT .../settings/provider`, `GET/PUT .../settings/notifications`                                     |
-| Integrations         | `POST .../integrations/gitlab`, `GET .../integrations`, `GET .../integrations/:source/candidates`         |
+| Integrations         | `GET .../integrations`, `POST .../integrations/gitlab` (`{"instance_url", "token"}` — verified against the GitLab API, idempotent: calling again replaces the token), `DELETE .../integrations/gitlab`, `GET .../integrations/gitlab/health`, `GET .../integrations/gitlab/candidates` |
 | Search               | `GET .../search?q=` (powers frontend `⌘K`)                                                                |
 
 `GET .../members` + `PUT/DELETE .../members/:userId` replace the old
@@ -187,8 +210,8 @@ src/
     rules/         # 6 toggleable Critical rules
     activity/      # audit log queries
     insights/
-    settings/      # AI provider, notifications, team
-    integrations/  # GitHub/GitLab connections, webhook ingestion
+    settings/      # AI provider, notifications, members
+    integrations/  # GitHub App / GitLab org-level access token lifecycle, webhook ingestion
   common/
     decorators/
     filters/
@@ -209,11 +232,16 @@ prisma/
 
 ## Build Roadmap
 
-Development proceeds in phases, each with a checkpoint before moving to the next:
+Development proceeds in phases, each with a checkpoint before moving to the next.
+See `CLAUDE.md` for the up-to-date breakdown of what's done vs. pending within
+each phase — the PRD (and therefore this roadmap) has changed shape a few times
+(single-tenant → multi-tenant → OAuth-based GitLab credentials → org-level
+access-token GitLab credentials), so treat `CLAUDE.md` as the current source of
+truth rather than this summary:
 
-1. **Fase 0 — Foundation**: `ConfigModule` + env validation, fail-fast startup
-2. **Fase 1 — Database schema**: Prisma models for users, organizations, memberships, repos, PRs, findings, reviews, audit log
-3. **Fase 2 — Auth module**: GitHub/GitLab OAuth, JWT sessions, self-serve organization provisioning, org-scoped role guards
+1. **Fase 0 — Foundation** ✅: `ConfigModule` + env validation, fail-fast startup, git hooks
+2. **Fase 1 — Database schema**: core multi-tenant models exist (`User`, `Organization`, `Membership`); the old PAT-based `GitlabConnection`/`Repository` models and the v1.3 OAuth-credential models (`GitlabInstance`, `OauthCredential`) are both removed. `Integration` (PRD v1.4 §4/D3) now holds the GitLab access token directly, per-organization
+3. **Fase 2 — Auth module**: GitHub/GitLab.com OAuth (identity-only, both as static Passport strategies), JWT sessions, self-serve organization provisioning, org-scoped role guards (`OrgRolesGuard`), and the `integrations` module (`POST/DELETE .../integrations/gitlab`, `GET .../integrations`, `GET .../integrations/gitlab/health`, `GET .../integrations/gitlab/candidates`) are all working. `POST /orgs` never auto-creates an integration. Still pending: scheduled daily health-check cron (D5, needs BullMQ), webhook revocation on disconnect, "not yet connected" filtering on `candidates` (needs the `repos` module), and GitHub's separate, larger, not-yet-scheduled move to a GitHub App installation
 4. **Fase 3 — Core CRUD (read-side)**: `repos`, `pulls` read endpoints, DTO conventions
 5. **Fase 4 — Webhook ingestion + queue**: signature verification, async diff scan, AI provider abstraction
 
@@ -234,6 +262,10 @@ Carried over from the product PRD — resolve before relying on the affected beh
 - One GitHub org connected to two different Critiq organizations — allowed, or claimed exclusively by the first?
 - Per-user organization limits on a free tier; SSO enforcement / domain claiming per organization (enterprise)
 - Invite expiry, re-sending, and whether an invite can force a specific OAuth provider
+- Tokens without `expires_at` (older self-hosted instances): treat as 365 days, or force the Admin to enter a date?
+- Personal access tokens: is a Settings badge enough warning, or should Admins also get periodic nudges to migrate to a group token?
+- More than one GitLab instance per organization — real need or edge case for now?
+- Login for self-hosted-only GitLab teams with no GitHub/GitLab.com account: email magic link, or OAuth to their instance (needs per-instance app registration again)? Post-MVP candidate.
 
 ---
 

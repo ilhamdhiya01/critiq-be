@@ -2,12 +2,12 @@ import { Injectable, UnprocessableEntityException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { HttpService } from '@nestjs/axios';
-import { Strategy } from 'passport-oauth2';
 import { firstValueFrom } from 'rxjs';
+import { Strategy } from 'passport-oauth2';
 import { AuthService } from '../auth.service';
 import { Provider } from '../../../generated/prisma/enums';
 
-interface GitlabProfile {
+interface GitlabUserProfile {
   id: number;
   username: string;
   name: string;
@@ -15,6 +15,12 @@ interface GitlabProfile {
   avatar_url: string;
 }
 
+// Identity-only login (PRD v1.4/D3): one fixed OAuth app on gitlab.com, known
+// at boot time — unlike v1.3, there's no per-instance dynamism to accommodate,
+// so a real Passport strategy works here instead of the hand-rolled flow that
+// used to live in AuthController. `passport-oauth2` is used directly (rather
+// than the unmaintained, un-typed `passport-gitlab2`) with a custom
+// userProfile() hitting GitLab's API, mirroring GithubStrategy's shape.
 @Injectable()
 export class GitlabStrategy extends PassportStrategy(Strategy, 'gitlab') {
   constructor(
@@ -34,21 +40,21 @@ export class GitlabStrategy extends PassportStrategy(Strategy, 'gitlab') {
 
   userProfile(
     accessToken: string,
-    done: (err?: Error | null, profile?: GitlabProfile) => void,
+    done: (err?: unknown, profile?: GitlabUserProfile) => void,
   ): void {
     firstValueFrom(
-      this.http.get<GitlabProfile>('https://gitlab.com/api/v4/user', {
+      this.http.get<GitlabUserProfile>('https://gitlab.com/api/v4/user', {
         headers: { Authorization: `Bearer ${accessToken}` },
       }),
     )
-      .then((res) => done(null, res.data))
-      .catch((err: Error) => done(err));
+      .then((response) => done(undefined, response.data))
+      .catch((error: unknown) => done(error));
   }
 
   async validate(
     accessToken: string,
     refreshToken: string,
-    profile: GitlabProfile,
+    profile: GitlabUserProfile,
   ) {
     if (!profile.email) {
       throw new UnprocessableEntityException(
@@ -63,7 +69,6 @@ export class GitlabStrategy extends PassportStrategy(Strategy, 'gitlab') {
       name: profile.name ?? profile.username,
       avatarUrl: profile.avatar_url,
       accessToken,
-      refreshToken,
     });
   }
 }
