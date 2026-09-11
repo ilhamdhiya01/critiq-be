@@ -5,6 +5,7 @@ import type { Request, Response } from 'express';
 import { Role, User } from '../../generated/prisma/client';
 import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
+import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 
 interface AuthenticatedRequest extends Request {
   user: { user: User; activeOrgId: string | null; role: Role | null };
@@ -36,7 +37,7 @@ export class AuthController {
     // cookie), not an endpoint called via fetch/AJAX from the FE — so it
     // needs manual control over the response instead of returning a plain
     // value like the other controllers do.
-    this.handleOAuthCallback(req.user, 'github', res);
+    this.handleOAuthCallback(req.user, res);
   }
 
   // GitLab identity login (PRD v1.4/D3): a normal static Passport strategy,
@@ -55,18 +56,18 @@ export class AuthController {
   @Get('gitlab/callback')
   @UseGuards(AuthGuard('gitlab'))
   gitlabCallback(@Req() req: AuthenticatedRequest, @Res() res: Response): void {
-    this.handleOAuthCallback(req.user, 'gitlab', res);
+    this.handleOAuthCallback(req.user, res);
   }
 
   @Get('me')
   @UseGuards(AuthGuard('jwt'))
+  @ResponseMessage('Current session retrieved successfully')
   me(@Req() req: RequestWithSession): JwtPayload {
     return req.user;
   }
 
   private handleOAuthCallback(
     auth: { user: User; activeOrgId: string | null; role: Role | null },
-    provider: 'github' | 'gitlab',
     res: Response,
   ): void {
     const token = this.authService.issueSessionToken(
@@ -87,6 +88,6 @@ export class AuthController {
     });
 
     const feUrl = this.configService.getOrThrow<string>('feUrl');
-    res.redirect(`${feUrl}/onboarding?provider=${provider}`);
+    res.redirect(`${feUrl}`);
   }
 }
