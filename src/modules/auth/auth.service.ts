@@ -1,7 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Provider, Role, User } from '../../generated/prisma/client';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -10,6 +9,7 @@ export interface JwtPayload {
   sub: string;
   activeOrgId: string | null;
   role: Role | null;
+  provider: Provider;
 }
 
 export interface OAuthProfile {
@@ -27,7 +27,6 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
-    private readonly encryptionService: EncryptionService,
     @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
   ) {}
 
@@ -35,8 +34,9 @@ export class AuthService {
     userId: string,
     activeOrgId: string | null,
     role: Role | null,
+    provider: Provider,
   ): string {
-    const payload: JwtPayload = { sub: userId, activeOrgId, role };
+    const payload: JwtPayload = { sub: userId, activeOrgId, role, provider };
     return this.jwtService.sign(payload);
   }
 
@@ -44,6 +44,7 @@ export class AuthService {
     user: User;
     activeOrgId: string | null;
     role: Role | null;
+    provider: Provider;
   }> {
     const user = await this.findOrCreateUser(profile);
     const membership = await this.prisma.membership.findFirst({
@@ -54,6 +55,7 @@ export class AuthService {
       user,
       activeOrgId: membership?.organizationId ?? null,
       role: membership?.role ?? null,
+      provider: profile.provider,
     };
   }
 
@@ -68,30 +70,21 @@ export class AuthService {
       include: { user: true },
     });
 
-    // GitLab tokens are never persisted here: since PRD v1.4/D3, GitLab
-    // login only proves identity (scope `read_user`) and the token from that
-    // handshake has no further use afterward — repo access is a completely
-    // separate, org-level access token handled by the integrations module.
-    const encryptedAccessToken =
-      profile.provider === Provider.GITLAB
-        ? undefined
-        : this.encryptionService.encrypt(profile.accessToken);
-    const encryptedRefreshToken =
-      profile.provider === Provider.GITLAB || !profile.refreshToken
-        ? undefined
-        : this.encryptionService.encrypt(profile.refreshToken);
+    // Neither provider's login token is ever persisted here (PRD v1.4/D3):
+    // GitLab login only proves identity (scope `read_user`), and GitHub
+    // login is likewise identity-only (scope `user:email`) since the
+    // GitHub App migration — repo access for both providers is a
+    // completely separate, org-level credential handled by the
+    // integrations module (GitLab: pasted access token; GitHub: App
+    // installation). A live encrypted OAuth token sitting in `Account`
+    // that's never actually used for anything is exactly the kind of
+    // needless blast-radius surface this principle exists to avoid, so
+    // `Account.accessToken`/`refreshToken` are always left unset here.
 
     if (existingAccount) {
       this.logger.info(
         `found existing user from OAuth profile: provider=${profile.provider} providerAccountId=${profile.providerAccountId}`,
       );
-      await this.prisma.account.update({
-        where: { id: existingAccount.id },
-        data: {
-          accessToken: encryptedAccessToken,
-          refreshToken: encryptedRefreshToken,
-        },
-      });
       return existingAccount.user;
     }
 
@@ -107,8 +100,6 @@ export class AuthService {
         data: {
           provider: profile.provider,
           providerAccountId: profile.providerAccountId,
-          accessToken: encryptedAccessToken,
-          refreshToken: encryptedRefreshToken,
           userId: existingUser.id,
         },
       });
@@ -127,8 +118,6 @@ export class AuthService {
           create: {
             provider: profile.provider,
             providerAccountId: profile.providerAccountId,
-            accessToken: encryptedAccessToken,
-            refreshToken: encryptedRefreshToken,
           },
         },
       },

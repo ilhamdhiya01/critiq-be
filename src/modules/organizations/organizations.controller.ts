@@ -55,6 +55,7 @@ export class OrganizationsController {
       req.user.sub,
       organization.id,
       role,
+      req.user.provider,
     );
     // Kept in sync with auth.controller.ts's session cookie settings.
     res.cookie('session', token, {

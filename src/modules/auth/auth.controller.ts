@@ -2,13 +2,18 @@ import { Controller, Get, Req, Res, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
-import { Role, User } from '../../generated/prisma/client';
+import { Provider, Role, User } from '../../generated/prisma/client';
 import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 
 interface AuthenticatedRequest extends Request {
-  user: { user: User; activeOrgId: string | null; role: Role | null };
+  user: {
+    user: User;
+    activeOrgId: string | null;
+    role: Role | null;
+    provider: Provider;
+  };
 }
 
 interface RequestWithSession extends Request {
@@ -67,14 +72,22 @@ export class AuthController {
   }
 
   private handleOAuthCallback(
-    auth: { user: User; activeOrgId: string | null; role: Role | null },
+    auth: {
+      user: User;
+      activeOrgId: string | null;
+      role: Role | null;
+      provider: Provider;
+    },
     res: Response,
   ): void {
     const token = this.authService.issueSessionToken(
       auth.user.id,
       auth.activeOrgId,
       auth.role,
+      auth.provider,
     );
+
+    console.log('user', auth);
 
     // SameSite=None + Secure:true unconditionally: user's explicit choice to
     // run FE/BE cross-origin locally instead of same-origin via proxy — see

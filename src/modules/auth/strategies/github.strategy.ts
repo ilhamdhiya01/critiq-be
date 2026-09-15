@@ -15,7 +15,13 @@ export class GithubStrategy extends PassportStrategy(Strategy, 'github') {
       clientID: configService.getOrThrow<string>('github.clientId'),
       clientSecret: configService.getOrThrow<string>('github.clientSecret'),
       callbackURL: configService.getOrThrow<string>('github.redirectUrl'),
-      scope: ['user:email', 'repo'],
+      // Identity-only (PRD v1.4/D3, same principle already applied to
+      // GitLab's login strategy): repo access comes from the separate
+      // GitHub App installation flow (see integrations module), never from
+      // this OAuth token. `repo` scope was a pre-existing leftover that
+      // granted read/write access to the user's private repos via their
+      // personal OAuth token — removed as part of the GitHub App migration.
+      scope: ['user:email'],
     });
   }
 

@@ -100,14 +100,24 @@ model Integration {
   id             String           @id @default(cuid())
   organizationId String
   source         Provider
-  instanceUrl    String           @db.Text
   credentialKind CredentialKind   @default(GROUP_TOKEN)
-  encryptedToken String           @db.Text
-  expiresAt      DateTime
-  tokenKind      TokenKind
-  tokenUsername  String           @db.Text
-  groupsCache    Json?
   state          IntegrationState @default(ACTIVE)
+
+  // --- GitLab-only fields — nullable, unused when source = GITHUB ---
+  instanceUrl    String?    @db.Text
+  encryptedToken String?    @db.Text
+  expiresAt      DateTime?
+  tokenKind      TokenKind?
+  tokenUsername  String?    @db.Text
+  groupsCache    Json?
+
+  // --- GitHub App-only fields — nullable, unused when source = GITLAB ---
+  // installationId is the durable credential here: there is no per-org
+  // secret to store, just this id + the one shared App private key (env
+  // config) needed to mint short-lived installation access tokens on demand.
+  installationId    String? @unique
+  installationLogin String? @db.Text
+  appSlug           String? @db.Text
 
   connectedByUserId String?
 
@@ -124,6 +134,7 @@ model Integration {
 enum CredentialKind {
   GROUP_TOKEN
   OAUTH
+  INSTALLATION
 }
 
 enum TokenKind {
@@ -136,4 +147,35 @@ enum IntegrationState {
   EXPIRING_SOON
   TOKEN_EXPIRED
   INVALID
+  // GitHub App installation only: the org's GitHub restricts installs to
+  // owners, a non-owner requested install, and a separate GitHub-side
+  // owner approval is still pending. No webhook ingestion exists yet
+  // (Fase 4) to detect that approval automatically — this state persists
+  // until an admin re-runs the install flow after approval.
+  PENDING_APPROVAL
+}
+
+// Short-lived, single-use record bridging the GitHub App installation
+// redirect round trip (Critiq -> github.com -> Critiq callback). Stored in
+// Postgres rather than Redis — this project has no Redis/queue infra yet
+// (Fase 4), and a TTL-checked-on-read row is sufficient for a flow that
+// only ever needs to survive one browser redirect. Deleted immediately
+// once consumed by the callback (single-use), or left to be ignored once
+// past expiresAt (no cron sweeps expired rows yet — harmless clutter, not
+// a correctness issue, since expiry is always checked on read).
+model GithubInstallIntent {
+  state          String                @id
+  organizationId String
+  userId         String
+  returnTo       GithubInstallReturnTo
+  expiresAt      DateTime
+
+  createdAt DateTime @default(now())
+
+  @@map("github_install_intents")
+}
+
+enum GithubInstallReturnTo {
+  SETUP
+  SETTINGS
 }

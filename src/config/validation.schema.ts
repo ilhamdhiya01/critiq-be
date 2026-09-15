@@ -8,6 +8,14 @@ export const validationSchema = Joi.object({
   GITHUB_CLIENT_ID: Joi.string().required(),
   GITHUB_CLIENT_SECRET: Joi.string().required(),
   GITHUB_REDIRECT_URL: Joi.string().uri().required(),
+  GITHUB_APP_ID: Joi.string().required(),
+  GITHUB_APP_PRIVATE_KEY: Joi.string().required(),
+  GITHUB_APP_CLIENT_ID: Joi.string().required(),
+  GITHUB_APP_CLIENT_SECRET: Joi.string().required(),
+  // Optional while the App's webhook "Active" toggle stays unchecked (Fase
+  // 4, webhook ingestion, isn't built yet) — see configuration.ts.
+  GITHUB_APP_WEBHOOK_SECRET: Joi.string().optional(),
+  GITHUB_APP_SLUG: Joi.string().required(),
   GITLAB_CLIENT_ID: Joi.string().required(),
   GITLAB_CLIENT_SECRET: Joi.string().required(),
   GITLAB_REDIRECT_URL: Joi.string().uri().required(),
