@@ -38,7 +38,15 @@ export class GithubInstallationCallbackController {
   ): Promise<void> {
     const feUrl = this.configService.getOrThrow<string>('feUrl');
 
-    const intent = await this.githubInstallIntentService.consume(query.state);
+    // No `state` at all — e.g. the admin changed an existing installation's
+    // granted repos from GitHub's own UI (github.com/settings/installations)
+    // rather than starting from Critiq's "Connect GitHub" button. GitHub
+    // still hits this Setup URL ("Redirect on update"), but never had a
+    // Critiq-issued `state` to echo back, since no installations/new?state=
+    // link was ever visited for that trip — there's nothing to consume.
+    const intent = query.state
+      ? await this.githubInstallIntentService.consume(query.state)
+      : null;
     if (!intent) {
       // No valid intent (missing, already consumed, or expired). This also
       // covers the case where the admin installed the App directly from
