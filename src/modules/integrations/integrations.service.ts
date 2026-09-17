@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/only-throw-error */
 import {
   ConflictException,
   Inject,
@@ -6,10 +5,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
-import { firstValueFrom } from 'rxjs';
-import axios from 'axios';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Prisma } from '../../generated/prisma/client';
@@ -27,33 +23,10 @@ import {
   GithubAppService,
   type GithubInstallation,
 } from './github-app.service';
+import { GitlabApiService, type GitlabProject } from './gitlab-api.service';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
-interface GitlabUser {
-  id: number;
-  username: string;
-}
-
-interface GitlabPersonalAccessTokenSelf {
-  scopes: string[];
-  expires_at: string | null;
-}
-
-interface GitlabProject {
-  id: number;
-  path_with_namespace: string;
-  // GitLab omits this field entirely for some project types/permissions
-  // rather than returning null, so it's optional here, not nullable.
-  language?: string;
-  visibility: string;
-  permissions?: {
-    project_access?: { access_level: number } | null;
-    group_access?: { access_level: number } | null;
-  };
-}
-
-const MAINTAINER_ACCESS_LEVEL = 40;
 const EXPIRING_SOON_THRESHOLD_DAYS = 14;
 // GitLab bot usernames for group access tokens follow this pattern (e.g.
 // `platform_bot`, `group_1_bot_a1`) — this is the only signal available to
@@ -65,9 +38,9 @@ export class IntegrationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly encryptionService: EncryptionService,
-    private readonly http: HttpService,
     private readonly configService: ConfigService,
     private readonly githubAppService: GithubAppService,
+    private readonly gitlabApiService: GitlabApiService,
     @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
   ) {}
 
@@ -84,11 +57,19 @@ export class IntegrationsService {
     connectedByUserId: string,
     dto: ConnectGitlabDto,
   ): Promise<IntegrationResponseDto> {
-    const instanceUrl = this.normalizeInstanceUrl(dto.instance_url);
+    const instanceUrl = this.gitlabApiService.normalizeInstanceUrl(
+      dto.instance_url,
+    );
 
-    const user = await this.fetchGitlabUser(instanceUrl, dto.token);
-    const tokenInfo = await this.fetchGitlabTokenSelf(instanceUrl, dto.token);
-    const projects = await this.fetchMaintainerProjects(instanceUrl, dto.token);
+    const user = await this.gitlabApiService.fetchUser(instanceUrl, dto.token);
+    const tokenInfo = await this.gitlabApiService.fetchTokenSelf(
+      instanceUrl,
+      dto.token,
+    );
+    const projects = await this.gitlabApiService.fetchMaintainerProjects(
+      instanceUrl,
+      dto.token,
+    );
 
     if (projects.length === 0) {
       throw new UnprocessableEntityException({
@@ -279,7 +260,7 @@ export class IntegrationsService {
     const token = this.encryptionService.decrypt(credential.encryptedToken);
     let state: IntegrationState;
     try {
-      await this.fetchGitlabUser(credential.instanceUrl, token);
+      await this.gitlabApiService.fetchUser(credential.instanceUrl, token);
       state = this.resolveStateFromExpiry(credential.expiresAt);
     } catch {
       state = IntegrationState.INVALID;
@@ -318,12 +299,12 @@ export class IntegrationsService {
 
     const credential = this.assertGitlabCredential(integration);
     const token = this.encryptionService.decrypt(credential.encryptedToken);
-    // TODO Fase 3: filter out projects already linked via Repository — the
-    // `repos` module doesn't exist yet, so "candidates" currently returns
-    // every Maintainer+ project unfiltered. On a fresh org this is already
-    // correct (nothing is connected yet), so the endpoint isn't half-built,
-    // just not yet excluding already-connected repos.
-    const projects = await this.fetchMaintainerProjects(
+    // TODO: filter out projects already linked via Repository — the `repos`
+    // module (added alongside this comment) doesn't filter candidates by
+    // connected-repo yet, so this still returns every Maintainer+ project
+    // unfiltered. Needs a join against Repository.externalId once that
+    // model has real data, not just once it exists.
+    const projects = await this.gitlabApiService.fetchMaintainerProjects(
       credential.instanceUrl,
       token,
       query,
@@ -374,10 +355,6 @@ export class IntegrationsService {
     );
   }
 
-  private normalizeInstanceUrl(url: string): string {
-    return url.trim().replace(/\/+$/, '');
-  }
-
   // Mirrors assertGitlabCredential's pattern: a data-invariant assertion,
   // not a user-facing validation. Every GITHUB row is always written with
   // installationId set (in connectGithub's upsert), so this should never
@@ -419,85 +396,6 @@ export class IntegrationsService {
       encryptedToken: integration.encryptedToken,
       expiresAt: integration.expiresAt,
     };
-  }
-
-  private async fetchGitlabUser(
-    instanceUrl: string,
-    token: string,
-  ): Promise<GitlabUser> {
-    try {
-      const response = await firstValueFrom(
-        this.http.get<GitlabUser>(`${instanceUrl}/api/v4/user`, {
-          headers: { 'Private-Token': token },
-        }),
-      );
-      return response.data;
-    } catch (error) {
-      throw this.mapGitlabRequestError(error);
-    }
-  }
-
-  private async fetchGitlabTokenSelf(
-    instanceUrl: string,
-    token: string,
-  ): Promise<GitlabPersonalAccessTokenSelf> {
-    try {
-      const response = await firstValueFrom(
-        this.http.get<GitlabPersonalAccessTokenSelf>(
-          `${instanceUrl}/api/v4/personal_access_tokens/self`,
-          { headers: { 'Private-Token': token } },
-        ),
-      );
-      return response.data;
-    } catch (error) {
-      throw this.mapGitlabRequestError(error);
-    }
-  }
-
-  private async fetchMaintainerProjects(
-    instanceUrl: string,
-    token: string,
-    search?: string,
-  ): Promise<GitlabProject[]> {
-    try {
-      const response = await firstValueFrom(
-        this.http.get<GitlabProject[]>(`${instanceUrl}/api/v4/projects`, {
-          headers: { 'Private-Token': token },
-          params: {
-            membership: true,
-            min_access_level: MAINTAINER_ACCESS_LEVEL,
-            ...(search && { search }),
-          },
-        }),
-      );
-      return response.data;
-    } catch (error) {
-      throw this.mapGitlabRequestError(error);
-    }
-  }
-
-  private mapGitlabRequestError(error: unknown): never {
-    // axios.isAxiosError() (not `instanceof AxiosError`) — `instanceof` can
-    // silently return false here due to a dual-package-hazard between how
-    // @nestjs/axios's internal HttpService loads axios (as ESM, `file://`
-    // resolution — visible in the stack trace) versus how this file imports
-    // it, even though there's only one axios version in node_modules. The
-    // mismatch meant every GitLab 401/403 was falling through to the
-    // `throw error as Error` below and surfacing as an unhandled 500
-    // instead of the intended 422 token_invalid.
-    if (axios.isAxiosError(error)) {
-      if (error.response?.status === 401 || error.response?.status === 403) {
-        throw new UnprocessableEntityException({
-          field: 'token',
-          message: 'token_invalid',
-        });
-      }
-      throw new UnprocessableEntityException({
-        field: 'instance_url',
-        message: 'instance_unreachable',
-      });
-    }
-    throw error as Error;
   }
 
   private resolveStateFromExpiry(expiresAt: Date): IntegrationState {

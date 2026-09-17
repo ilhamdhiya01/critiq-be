@@ -1,5 +1,10 @@
 /* eslint-disable @typescript-eslint/only-throw-error */
-import { Injectable, UnprocessableEntityException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createAppAuth } from '@octokit/auth-app';
 import { request } from '@octokit/request';
@@ -21,6 +26,18 @@ export interface GithubRepository {
   private: boolean;
   language: string | null;
 }
+
+export interface GithubRepositoryDetail {
+  default_branch: string;
+}
+
+export interface GithubBranch {
+  name: string;
+}
+
+const BRANCH_PAGE_SIZE = 100;
+const BRANCH_HARD_CAP = 500;
+const REQUEST_TIMEOUT_MS = 8000;
 
 // Mints and caches GitHub App installation access tokens, and wraps the
 // small set of GitHub API calls this integration needs. Deliberately
@@ -110,6 +127,69 @@ export class GithubAppService {
     }
   }
 
+  // Default branch snapshot for a single repo (D6, PRD v1.4.2) — never
+  // assumed "main", always read live from GitHub at connect/lookup time.
+  async fetchRepository(
+    installationId: string,
+    owner: string,
+    repo: string,
+  ): Promise<GithubRepositoryDetail> {
+    const token = await this.getInstallationToken(installationId);
+    try {
+      const response = await request('GET /repos/{owner}/{repo}', {
+        owner,
+        repo,
+        headers: { authorization: `bearer ${token}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      });
+      return response.data;
+    } catch (error) {
+      throw this.mapGithubRequestError(error);
+    }
+  }
+
+  // Paginates per_page=100 until a short page is returned, same shape as
+  // listInstallationRepositories — hard-capped at 500 total branches (PRD
+  // v1.4.2 §12.4) rather than fetching indefinitely.
+  async listBranches(
+    installationId: string,
+    owner: string,
+    repo: string,
+  ): Promise<{ branches: GithubBranch[]; truncated: boolean }> {
+    const token = await this.getInstallationToken(installationId);
+    try {
+      const branches: GithubBranch[] = [];
+      let page = 1;
+      let truncated = false;
+
+      while (true) {
+        const response = await request('GET /repos/{owner}/{repo}/branches', {
+          owner,
+          repo,
+          headers: { authorization: `bearer ${token}` },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+          per_page: BRANCH_PAGE_SIZE,
+          page,
+        });
+        const data = response.data as GithubBranch[];
+        branches.push(...data);
+
+        if (branches.length >= BRANCH_HARD_CAP) {
+          truncated = true;
+          break;
+        }
+        if (data.length < BRANCH_PAGE_SIZE) {
+          break;
+        }
+        page += 1;
+      }
+
+      return { branches: branches.slice(0, BRANCH_HARD_CAP), truncated };
+    } catch (error) {
+      throw this.mapGithubRequestError(error);
+    }
+  }
+
   private async getInstallationToken(installationId: string): Promise<string> {
     try {
       const installationAuthentication = await this.appAuth({
@@ -123,6 +203,16 @@ export class GithubAppService {
   }
 
   private mapGithubRequestError(error: unknown): never {
+    // AbortSignal.timeout() rejects with a DOMException, not a RequestError
+    // — must be checked before the RequestError branch below, or a slow
+    // GitHub response would fall through to the generic github_unreachable
+    // 422 instead of the more accurate 502 provider_unreachable.
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new HttpException(
+        { field: 'installation_id', message: 'provider_unreachable' },
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
     // Octokit throws its own RequestError (from @octokit/request-error),
     // never an axios error — unlike integrations.service.ts's GitLab error
     // mapping, `axios.isAxiosError()` would never match here and every

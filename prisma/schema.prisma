@@ -35,9 +35,12 @@ model Organization {
   slug      String @unique @db.VarChar(100)
   createdBy String
 
-  creator      User          @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
-  memberships  Membership[]
-  integrations Integration[]
+  creator            User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
+  memberships        Membership[]
+  integrations       Integration[]
+  repositories       Repository[]
+  repoScanConfigs    RepoScanConfig[]
+  branchScanPolicies BranchScanPolicy[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -123,6 +126,7 @@ model Integration {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   connectedBy  User?        @relation("IntegrationConnectedBy", fields: [connectedByUserId], references: [id], onDelete: SetNull)
+  repositories Repository[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -178,4 +182,79 @@ model GithubInstallIntent {
 enum GithubInstallReturnTo {
   SETUP
   SETTINGS
+}
+
+model Repository {
+  id             String   @id @default(cuid())
+  organizationId String
+  integrationId  String
+  provider       Provider
+  externalId     String
+  path           String
+  defaultBranch  String
+
+  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  integration    Integration        @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  scanConfig     RepoScanConfig?
+  branchPolicies BranchScanPolicy[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // integrationId already implies organizationId (an Integration belongs to
+  // exactly one org) — sufficient without repeating organizationId here.
+  @@unique([integrationId, externalId])
+  @@index([organizationId])
+  @@map("repositories")
+}
+
+// Scan scope (D6, PRD v1.4.2) — which branches' PR/MR webhooks are actually
+// processed for this repo. Deliberately separate from BranchScanPolicy
+// (review mode per branch): scope answers "do we scan this branch at all",
+// policy answers "how do we review it once scanned". defaultBranch is a
+// snapshot taken from the provider at connect time — never assumed "main".
+model RepoScanConfig {
+  id                     String    @id @default(cuid())
+  organizationId         String
+  repositoryId           String    @unique
+  defaultBranch          String
+  branches               String[]
+  defaultBranchChangedAt DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, repositoryId])
+  @@map("repo_scan_configs")
+}
+
+// Review mode per monitored branch — one row per branch in RepoScanConfig's
+// scope. Kept separate from RepoScanConfig itself (D6) so scope changes
+// (adding/removing a monitored branch) don't require rewriting policy data
+// for branches that stay in scope.
+model BranchScanPolicy {
+  id             String       @id @default(cuid())
+  organizationId String
+  repositoryId   String
+  branch         String
+  policy         ReviewPolicy
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([repositoryId, branch])
+  @@index([organizationId])
+  @@map("branch_scan_policies")
+}
+
+enum ReviewPolicy {
+  MANUAL_ONLY
+  ALLOW_AI
+  REQUIRE_BOTH
 }
