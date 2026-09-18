@@ -1,0 +1,90 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - development
+      - main
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build-and-push:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # development -> :dev (for testing, not what the VPS pulls).
+      # main (default branch) -> :latest + :sha-<full sha> — this is what
+      # production pulls.
+      - name: Extract metadata (app image)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/critiq-be
+          tags: |
+            type=raw,value=dev,enable=${{ github.ref_name != 'main' }}
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+            type=sha,format=long,enable=${{ github.ref_name == 'main' }}
+
+      # Mirrors the app image's tags with a `-migrator` suffix (e.g.
+      # `dev-migrator`, `latest-migrator`) — docker-compose.yml's `migrate`
+      # service pulls this exact suffix pattern.
+      - name: Extract metadata (migrator image)
+        id: meta-migrator
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/critiq-be
+          flavor: |
+            suffix=-migrator
+          tags: |
+            type=raw,value=dev,enable=${{ github.ref_name != 'main' }}
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+            type=sha,format=long,enable=${{ github.ref_name == 'main' }}
+
+      # Required for the arm64 half of the multi-platform build below —
+      # the runner itself is amd64, so building for arm64 needs QEMU
+      # emulation registered first.
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built for both amd64 (typical VPS) and arm64 (Apple Silicon dev
+      # machines) so the same ghcr.io tag can be pulled and run in either
+      # place — a single-platform build would 404/"no matching manifest"
+      # on whichever architecture wasn't built for.
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runner
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push migrator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: migrator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-migrator.outputs.tags }}
+          labels: ${{ steps.meta-migrator.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
