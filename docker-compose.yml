@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: critiq_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # No host port mapping — Postgres never needs to be reachable from
+    # outside the Compose network, only `app` needs it.
+
+  # One-off job: runs `prisma migrate deploy` against `db`, then exits.
+  # Kept out of the long-running `app` image — see Dockerfile's `migrator`
+  # stage comment for why (the `prisma` CLI package alone pulls in ~250MB
+  # of tooling `app` never needs at runtime — Prisma Studio UI, pglite,
+  # react — verified by measuring it directly).
+  migrate:
+    image: ghcr.io/${GHCR_OWNER}/critiq-be:${IMAGE_TAG:-latest}-migrator
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+
+  app:
+    # IMAGE_TAG defaults to `latest` (the production tag, built from `main`)
+    # — override to `dev` only for local testing against the `development`
+    # branch's image. Never hardcode `dev` here: this same file is the one
+    # copied to the VPS, and a stray override left in place would make
+    # production silently run an unreleased build.
+    image: ghcr.io/${GHCR_OWNER}/critiq-be:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:3001/api/v1', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:

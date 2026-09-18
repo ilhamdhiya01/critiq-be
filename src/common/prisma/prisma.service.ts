@@ -1,9 +1,10 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, PrismaClient } from '../../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import { PRISMA_LOG_CONFIG } from './prisma.types';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
 
 @Injectable()
 export class PrismaService
@@ -18,8 +19,7 @@ export class PrismaService
 {
   constructor(
     configService: ConfigService,
-    @InjectPinoLogger(PrismaService.name)
-    private readonly logger: PinoLogger,
+    @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {
     super({
       log: PRISMA_LOG_CONFIG,
@@ -31,16 +31,16 @@ export class PrismaService
 
   onModuleInit() {
     this.$on('query', (event) => {
-      this.logger.info({ event }, 'prisma query');
+      this.logger.info(event);
     });
     this.$on('info', (event) => {
-      this.logger.info({ event }, 'prisma info');
+      this.logger.info(event);
     });
     this.$on('warn', (event) => {
-      this.logger.warn({ event }, 'prisma warn');
+      this.logger.warn(event);
     });
     this.$on('error', (event) => {
-      this.logger.error({ event }, 'prisma error');
+      this.logger.error(event);
     });
   }
 }

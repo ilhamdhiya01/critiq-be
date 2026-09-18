@@ -11,3 +11,258 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+model User {
+  id        String  @id @default(cuid())
+  email     String  @unique @db.VarChar(100)
+  name      String? @db.VarChar(100)
+  avatarUrl String?
+
+  accounts              Account[]
+  memberships           Membership[]
+  createdOrgs           Organization[] @relation("OrganizationCreatedBy")
+  connectedIntegrations Integration[]  @relation("IntegrationConnectedBy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Organization {
+  id        String @id @default(cuid())
+  name      String @db.VarChar(100)
+  slug      String @unique @db.VarChar(100)
+  createdBy String
+
+  creator            User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
+  memberships        Membership[]
+  integrations       Integration[]
+  repositories       Repository[]
+  repoScanConfigs    RepoScanConfig[]
+  branchScanPolicies BranchScanPolicy[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("organizations")
+}
+
+model Membership {
+  id             String           @id @default(cuid())
+  userId         String
+  organizationId String
+  role           Role             @default(VIEWER)
+  status         MembershipStatus @default(ACTIVE)
+  lastAccessedAt DateTime?
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+  @@map("memberships")
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+}
+
+enum Role {
+  ADMIN
+  REVIEWER
+  VIEWER
+}
+
+model Account {
+  id                String   @id @default(cuid())
+  provider          Provider
+  providerAccountId String
+  accessToken       String?  @db.Text
+  refreshToken      String?  @db.Text
+  userId            String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+enum Provider {
+  GITHUB
+  GITLAB
+}
+
+model Integration {
+  id             String           @id @default(cuid())
+  organizationId String
+  source         Provider
+  credentialKind CredentialKind   @default(GROUP_TOKEN)
+  state          IntegrationState @default(ACTIVE)
+
+  // --- GitLab-only fields — nullable, unused when source = GITHUB ---
+  instanceUrl    String?    @db.Text
+  encryptedToken String?    @db.Text
+  expiresAt      DateTime?
+  tokenKind      TokenKind?
+  tokenUsername  String?    @db.Text
+  groupsCache    Json?
+
+  // --- GitHub App-only fields — nullable, unused when source = GITLAB ---
+  // installationId is the durable credential here: there is no per-org
+  // secret to store, just this id + the one shared App private key (env
+  // config) needed to mint short-lived installation access tokens on demand.
+  installationId    String? @unique
+  installationLogin String? @db.Text
+  appSlug           String? @db.Text
+
+  connectedByUserId String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connectedBy  User?        @relation("IntegrationConnectedBy", fields: [connectedByUserId], references: [id], onDelete: SetNull)
+  repositories Repository[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, source])
+  @@map("integrations")
+}
+
+enum CredentialKind {
+  GROUP_TOKEN
+  OAUTH
+  INSTALLATION
+}
+
+enum TokenKind {
+  GROUP
+  PERSONAL
+}
+
+enum IntegrationState {
+  ACTIVE
+  EXPIRING_SOON
+  TOKEN_EXPIRED
+  INVALID
+  // GitHub App installation only: the org's GitHub restricts installs to
+  // owners, a non-owner requested install, and a separate GitHub-side
+  // owner approval is still pending. No webhook ingestion exists yet
+  // (Fase 4) to detect that approval automatically — this state persists
+  // until an admin re-runs the install flow after approval.
+  PENDING_APPROVAL
+}
+
+// Short-lived, single-use record bridging the GitHub App installation
+// redirect round trip (Critiq -> github.com -> Critiq callback). Stored in
+// Postgres rather than Redis — this project has no Redis/queue infra yet
+// (Fase 4), and a TTL-checked-on-read row is sufficient for a flow that
+// only ever needs to survive one browser redirect. Deleted immediately
+// once consumed by the callback (single-use), or left to be ignored once
+// past expiresAt (no cron sweeps expired rows yet — harmless clutter, not
+// a correctness issue, since expiry is always checked on read).
+model GithubInstallIntent {
+  state          String                @id
+  organizationId String
+  userId         String
+  returnTo       GithubInstallReturnTo
+  expiresAt      DateTime
+
+  createdAt DateTime @default(now())
+
+  @@map("github_install_intents")
+}
+
+enum GithubInstallReturnTo {
+  SETUP
+  SETTINGS
+}
+
+model Repository {
+  id             String   @id @default(cuid())
+  organizationId String
+  integrationId  String
+  provider       Provider
+  externalId     String
+  path           String
+  defaultBranch  String
+
+  // GitLab-only — a hook is registered per-repo via the GitLab API when the
+  // repo is connected (see ReposService.createRepos). Null until that call
+  // succeeds, and always null for provider = GITHUB: GitHub App webhooks are
+  // App-wide (configured once in the App's own dashboard), never per-repo,
+  // so there is no per-row hook id/secret to store for that provider.
+  gitlabWebhookId        Int?
+  encryptedWebhookSecret String? @db.Text
+
+  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  integration    Integration        @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  scanConfig     RepoScanConfig?
+  branchPolicies BranchScanPolicy[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // integrationId already implies organizationId (an Integration belongs to
+  // exactly one org) — sufficient without repeating organizationId here.
+  @@unique([integrationId, externalId])
+  @@index([organizationId])
+  @@map("repositories")
+}
+
+// Scan scope (D6, PRD v1.4.2) — which branches' PR/MR webhooks are actually
+// processed for this repo. Deliberately separate from BranchScanPolicy
+// (review mode per branch): scope answers "do we scan this branch at all",
+// policy answers "how do we review it once scanned". defaultBranch is a
+// snapshot taken from the provider at connect time — never assumed "main".
+model RepoScanConfig {
+  id                     String    @id @default(cuid())
+  organizationId         String
+  repositoryId           String    @unique
+  defaultBranch          String
+  branches               String[]
+  defaultBranchChangedAt DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, repositoryId])
+  @@map("repo_scan_configs")
+}
+
+// Review mode per monitored branch — one row per branch in RepoScanConfig's
+// scope. Kept separate from RepoScanConfig itself (D6) so scope changes
+// (adding/removing a monitored branch) don't require rewriting policy data
+// for branches that stay in scope.
+model BranchScanPolicy {
+  id             String       @id @default(cuid())
+  organizationId String
+  repositoryId   String
+  branch         String
+  policy         ReviewPolicy
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([repositoryId, branch])
+  @@index([organizationId])
+  @@map("branch_scan_policies")
+}
+
+enum ReviewPolicy {
+  MANUAL_ONLY
+  ALLOW_AI
+  REQUIRE_BOTH
+}

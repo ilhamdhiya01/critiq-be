@@ -41,6 +41,12 @@ lerna-debug.log*
 .env.test.local
 .env.production.local
 .env.local
+# local docker-compose testing env (see docker-compose.yml's env_file /
+# Compose substitution vars) — same secrets as .env, never shared
+.env.compose
+
+# local mkcert HTTPS certs (see main.ts) — machine-specific, never shared
+/certs
 
 # temp directory
 .temp
