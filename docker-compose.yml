@@ -17,7 +17,12 @@ services:
     # outside the Compose network, only `app` needs it.
 
   app:
-    image: ghcr.io/${GHCR_OWNER}/critiq-be:latest
+    # IMAGE_TAG defaults to `latest` (the production tag, built from `main`)
+    # — override to `dev` only for local testing against the `development`
+    # branch's image. Never hardcode `dev` here: this same file is the one
+    # copied to the VPS, and a stray override left in place would make
+    # production silently run an unreleased build.
+    image: ghcr.io/${GHCR_OWNER}/critiq-be:${IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       db:
