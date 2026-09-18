@@ -1,0 +1,12 @@
+# Automatically merged by Compose alongside docker-compose.yml — local-dev
+# only override. Points `app`'s env vars at .env.compose (see that file's
+# header comment for why this is needed) instead of the dev .env that
+# lives in this same directory for `pnpm start:dev`.
+#
+# Do NOT copy this file to the VPS: there's no conflicting dev .env there,
+# so docker-compose.yml's plain `env_file: - .env` already does the right
+# thing with the production .env you create on the server.
+services:
+  app:
+    env_file:
+      - .env.compose
