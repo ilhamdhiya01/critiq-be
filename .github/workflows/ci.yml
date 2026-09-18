@@ -3,6 +3,10 @@ name: CI
 on:
   push:
   pull_request:
+  # Lets docker-publish.yml call this workflow directly (`uses:
+  # ./.github/workflows/ci.yml`) as its own gate, instead of duplicating
+  # the same lint/typecheck/build steps in two files.
+  workflow_call:
 
 jobs:
   ci:
