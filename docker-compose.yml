@@ -16,6 +16,20 @@ services:
     # No host port mapping — Postgres never needs to be reachable from
     # outside the Compose network, only `app` needs it.
 
+  # One-off job: runs `prisma migrate deploy` against `db`, then exits.
+  # Kept out of the long-running `app` image — see Dockerfile's `migrator`
+  # stage comment for why (the `prisma` CLI package alone pulls in ~250MB
+  # of tooling `app` never needs at runtime — Prisma Studio UI, pglite,
+  # react — verified by measuring it directly).
+  migrate:
+    image: ghcr.io/${GHCR_OWNER}/critiq-be:${IMAGE_TAG:-latest}-migrator
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+
   app:
     # IMAGE_TAG defaults to `latest` (the production tag, built from `main`)
     # — override to `dev` only for local testing against the `development`
@@ -25,8 +39,8 @@ services:
     image: ghcr.io/${GHCR_OWNER}/critiq-be:${IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     ports:
