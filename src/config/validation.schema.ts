@@ -12,9 +12,10 @@ export const validationSchema = Joi.object({
   GITHUB_APP_PRIVATE_KEY: Joi.string().required(),
   GITHUB_APP_CLIENT_ID: Joi.string().required(),
   GITHUB_APP_CLIENT_SECRET: Joi.string().required(),
-  // Optional while the App's webhook "Active" toggle stays unchecked (Fase
-  // 4, webhook ingestion, isn't built yet) — see configuration.ts.
-  GITHUB_APP_WEBHOOK_SECRET: Joi.string().optional(),
+  // Required: WebhooksController verifies GitHub's X-Hub-Signature-256
+  // against this secret on every inbound webhook call — no longer optional
+  // now that the receiver endpoint actually exists and depends on it.
+  GITHUB_APP_WEBHOOK_SECRET: Joi.string().required(),
   GITHUB_APP_SLUG: Joi.string().required(),
   GITLAB_CLIENT_ID: Joi.string().required(),
   GITLAB_CLIENT_SECRET: Joi.string().required(),
@@ -22,4 +23,5 @@ export const validationSchema = Joi.object({
   JWT_SECRET: Joi.string().min(32).required(),
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   FE_URL: Joi.string().uri().required(),
+  BACKEND_URL: Joi.string().uri().required(),
 });

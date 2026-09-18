@@ -237,11 +237,56 @@ export class IntegrationsService {
       );
     }
 
-    // TODO Fase 4: revoke webhooks on all connected GitLab repos before
-    // deleting the Integration row — there is nothing to revoke yet since
-    // the `repos` module (Fase 3) doesn't exist, so a connected GitLab repo
-    // with a live webhook cannot exist yet either.
+    await this.revokeRepositoryWebhooks(integration);
     await this.prisma.integration.delete({ where: { id: integration.id } });
+  }
+
+  // Revokes every connected repo's GitLab hook before the Integration row
+  // (and its token) is deleted — otherwise the token needed to call
+  // DELETE .../hooks/:id would already be gone. A single repo's revoke
+  // failure is logged and skipped rather than aborting the whole
+  // disconnect: the admin explicitly asked to disconnect, and a webhook
+  // left orphaned on GitLab's side (which will just 404/be ignored once
+  // this org's Integration is gone) is a much smaller problem than
+  // blocking an explicit disconnect action.
+  private async revokeRepositoryWebhooks(integration: {
+    id: string;
+    instanceUrl: string | null;
+    encryptedToken: string | null;
+    expiresAt: Date | null;
+  }): Promise<void> {
+    const credential = this.assertGitlabCredential(integration);
+    const repositoriesWithHooks = await this.prisma.repository.findMany({
+      where: { integrationId: integration.id, gitlabWebhookId: { not: null } },
+    });
+    if (repositoriesWithHooks.length === 0) {
+      return;
+    }
+
+    const token = this.encryptionService.decrypt(credential.encryptedToken);
+    for (const repository of repositoriesWithHooks) {
+      // The `gitlabWebhookId: { not: null }` filter above guarantees this
+      // at the query level, but Prisma's generated type for findMany can't
+      // narrow the column's nullability per-row — asserted explicitly
+      // rather than trusted with `!`.
+      if (repository.gitlabWebhookId === null) {
+        continue;
+      }
+      try {
+        await this.gitlabApiService.deleteProjectHook(
+          credential.instanceUrl,
+          token,
+          repository.externalId,
+          repository.gitlabWebhookId,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn('Failed to revoke GitLab webhook for repository', {
+          repositoryId: repository.id,
+          error: message,
+        });
+      }
+    }
   }
 
   async getHealth(organizationId: string): Promise<IntegrationResponseDto> {

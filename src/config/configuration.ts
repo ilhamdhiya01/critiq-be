@@ -43,4 +43,11 @@ export default () => ({
     redirectUrl: process.env.GITLAB_REDIRECT_URL,
   },
   feUrl: process.env.FE_URL,
+  // This server's own publicly-reachable base URL — distinct from feUrl
+  // (the frontend's URL). Needed to tell GitLab where to POST webhook
+  // events when a repo is connected (createRepos() builds
+  // `${backendUrl}/api/v1/webhooks/gitlab` and registers it via the GitLab
+  // API). GitHub doesn't need this: its App-wide webhook URL is configured
+  // once in the App's own dashboard, not sent per-repo via API.
+  backendUrl: process.env.BACKEND_URL,
 });

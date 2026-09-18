@@ -1,13 +1,22 @@
+import { randomBytes } from 'crypto';
 import {
   ConflictException,
+  Inject,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Prisma } from '../../generated/prisma/client';
-import { IntegrationState, Provider } from '../../generated/prisma/enums';
+import {
+  IntegrationState,
+  Provider,
+  ReviewPolicy,
+} from '../../generated/prisma/enums';
 import {
   GithubAppService,
   type GithubBranch,
@@ -16,13 +25,25 @@ import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { BranchListResponseDto } from './dto/branch-list-response.dto';
 import { RepoScanConfigResponseDto } from './dto/repo-scan-config-response.dto';
 import { UpdateScanConfigDto } from './dto/update-scan-config.dto';
-import { CreateReposDto } from './dto/create-repos.dto';
+import {
+  CreateReposDto,
+  type DefaultPolicyWireValue,
+} from './dto/create-repos.dto';
 import {
   CreateReposResponseDto,
   type CreateReposItemResult,
 } from './dto/create-repos-response.dto';
 import { RepositoryListItemDto } from './dto/repository-list-item.dto';
 import { RepositoryDetailDto } from './dto/repository-detail.dto';
+
+// Mirrors GithubInstallIntentDto's returnTo mapping pattern — lowercase
+// wire value in, Prisma enum out, kept as a lookup table rather than an
+// if/else chain.
+const DEFAULT_POLICY_MAP: Record<DefaultPolicyWireValue, ReviewPolicy> = {
+  manual_only: ReviewPolicy.MANUAL_ONLY,
+  allow_ai: ReviewPolicy.ALLOW_AI,
+  require_both: ReviewPolicy.REQUIRE_BOTH,
+};
 
 // Branch names allowed at MVP: exact names only (D6, PRD v1.4.2) — no
 // glob/wildcard support, so anything that looks like one is rejected
@@ -44,6 +65,8 @@ export class ReposService {
     private readonly encryptionService: EncryptionService,
     private readonly githubAppService: GithubAppService,
     private readonly gitlabApiService: GitlabApiService,
+    private readonly configService: ConfigService,
+    @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
   async getBranchesForCandidate(
@@ -178,32 +201,18 @@ export class ReposService {
     dto: CreateReposDto,
   ): Promise<CreateReposResponseDto> {
     const items: CreateReposItemResult[] = [];
+    // One request is always for a single provider (the FE only ever shows
+    // one candidates list — GitHub or GitLab — per submission, per D4), so
+    // this integration lookup happens once up front rather than per item.
+    const source = dto.source === 'github' ? Provider.GITHUB : Provider.GITLAB;
+    const integration = await this.findIntegrationOrThrow(
+      organizationId,
+      source,
+    );
+    const defaultPolicy = DEFAULT_POLICY_MAP[dto.defaultPolicy];
 
     for (const project of dto.projects) {
       const providerRepoId = String(project.id);
-      // Every item needs its own provider (GitHub vs GitLab) resolved —
-      // the DTO doesn't carry `source` per item, so this infers it from
-      // whichever org integration currently owns a candidate with this id.
-      // In practice a single wizard submission is always for one provider
-      // (D4: the wizard's repo source follows the login provider), so this
-      // resolves to whichever of the two integrations exists for the org.
-      let integration: Awaited<
-        ReturnType<typeof this.resolveIntegrationForCandidate>
-      >;
-      try {
-        integration = await this.resolveIntegrationForCandidate(
-          organizationId,
-          providerRepoId,
-        );
-      } catch {
-        items.push({
-          status: 'failed',
-          providerRepoId: project.id,
-          error: 'provider_unreachable',
-        });
-        continue;
-      }
-
       let providerBranches: ProviderBranches;
       try {
         providerBranches = await this.fetchProviderBranches(
@@ -268,15 +277,14 @@ export class ReposService {
               organizationId,
               repositoryId: repository.id,
               branch,
-              policy: dto.defaultPolicy,
+              policy: defaultPolicy,
             })),
           });
           return repository;
         });
 
-        // TODO Fase 4: install a webhook for this repo here — webhook
-        // infra doesn't exist yet, so `webhook.status` stays
-        // 'not_configured' rather than claiming 'installed'.
+        const webhook = await this.installWebhook(created.id, integration);
+
         // TODO Fase 4: record an AuditLog entry (repo.connected) here.
         items.push({
           status: 'ok',
@@ -284,7 +292,7 @@ export class ReposService {
           path,
           defaultBranch: providerBranches.defaultBranch,
           monitoredBranches,
-          webhook: { status: 'not_configured' },
+          webhook,
         });
       } catch (error) {
         if (
@@ -399,31 +407,73 @@ export class ReposService {
     return integration;
   }
 
-  private async resolveIntegrationForCandidate(
-    organizationId: string,
-    providerRepoId: string,
-  ) {
-    void providerRepoId;
-    // D4: the wizard's repo source always follows the org's login provider
-    // — an org has at most one GitHub and one GitLab integration, and a
-    // single wizard submission is only ever for one of them. There is no
-    // per-item `source` in the request body to disambiguate further, so
-    // this resolves to whichever integration exists (Admin-only route, and
-    // connectRepos is only reachable after a candidates list from exactly
-    // one provider was shown).
-    const integrations = await this.prisma.integration.findMany({
-      where: { organizationId },
-    });
-    const usable = integrations.find(
-      (integration) => integration.state !== IntegrationState.TOKEN_EXPIRED,
-    );
-    if (!usable) {
-      throw new ConflictException({
-        field: 'organizationId',
-        message: 'no_usable_integration',
-      });
+  // GitHub App webhooks are App-wide (configured once in the App's own
+  // dashboard) — there is no per-repo API call to make, so a GitHub repo's
+  // events already flow the moment the App was granted access to it.
+  // GitLab has no such App-wide concept: a hook has to be registered on
+  // this specific project, which is what this method actually does.
+  // Failure here does not roll back the repository — see the plan's
+  // partial-success rationale: a repo that exists but hasn't got a working
+  // webhook yet is still more useful than no repo at all, and there's no
+  // retry endpoint yet (TODO Fase 4) so the failure is only surfaced to the
+  // caller for now, not auto-recovered.
+  private async installWebhook(
+    repositoryId: string,
+    integration: {
+      source: Provider;
+      instanceUrl: string | null;
+      encryptedToken: string | null;
+    },
+  ): Promise<
+    | { status: 'installed' }
+    | { status: 'app_managed' }
+    | { status: 'failed'; error: string }
+  > {
+    if (integration.source === Provider.GITHUB) {
+      return { status: 'app_managed' };
     }
-    return usable;
+
+    if (!integration.instanceUrl || !integration.encryptedToken) {
+      throw new Error(
+        'Integration row with source GITLAB is missing its GitLab credential fields — data invariant violated.',
+      );
+    }
+
+    try {
+      const repository = await this.prisma.repository.findUniqueOrThrow({
+        where: { id: repositoryId },
+      });
+      const token = this.encryptionService.decrypt(integration.encryptedToken);
+      const secret = randomBytes(32).toString('base64url');
+      const backendUrl = this.configService.getOrThrow<string>('backendUrl');
+
+      const hook = await this.gitlabApiService.createProjectHook(
+        integration.instanceUrl,
+        token,
+        repository.externalId,
+        {
+          url: `${backendUrl}/api/v1/webhooks/gitlab`,
+          secretToken: secret,
+        },
+      );
+
+      await this.prisma.repository.update({
+        where: { id: repositoryId },
+        data: {
+          gitlabWebhookId: hook.id,
+          encryptedWebhookSecret: this.encryptionService.encrypt(secret),
+        },
+      });
+
+      return { status: 'installed' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn('Failed to install GitLab webhook for repository', {
+        repositoryId,
+        error: message,
+      });
+      return { status: 'failed', error: 'webhook_install_failed' };
+    }
   }
 
   private async fetchProviderBranches(

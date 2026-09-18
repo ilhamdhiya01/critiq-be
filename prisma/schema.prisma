@@ -193,6 +193,14 @@ model Repository {
   path           String
   defaultBranch  String
 
+  // GitLab-only — a hook is registered per-repo via the GitLab API when the
+  // repo is connected (see ReposService.createRepos). Null until that call
+  // succeeds, and always null for provider = GITHUB: GitHub App webhooks are
+  // App-wide (configured once in the App's own dashboard), never per-repo,
+  // so there is no per-row hook id/secret to store for that provider.
+  gitlabWebhookId        Int?
+  encryptedWebhookSecret String? @db.Text
+
   organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   integration    Integration        @relation(fields: [integrationId], references: [id], onDelete: Cascade)
   scanConfig     RepoScanConfig?

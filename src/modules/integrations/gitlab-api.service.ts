@@ -42,6 +42,10 @@ export interface GitlabBranch {
   name: string;
 }
 
+export interface GitlabProjectHook {
+  id: number;
+}
+
 const MAINTAINER_ACCESS_LEVEL = 40;
 const REQUEST_TIMEOUT_MS = 8000;
 const BRANCH_PAGE_SIZE = 100;
@@ -171,6 +175,62 @@ export class GitlabApiService {
     }
 
     return { branches: branches.slice(0, BRANCH_HARD_CAP), truncated };
+  }
+
+  // Registers a webhook on a single project (D6/webhook rollout — called
+  // from ReposService.createRepos after a repo's Repository row commits).
+  // GitLab returns the created hook's `id`, which the caller persists on
+  // Repository.gitlabWebhookId so it can be deleted again on disconnect.
+  async createProjectHook(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    opts: { url: string; secretToken: string },
+  ): Promise<GitlabProjectHook> {
+    try {
+      const response = await firstValueFrom(
+        this.http.post<GitlabProjectHook>(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/hooks`,
+          {
+            url: opts.url,
+            token: opts.secretToken,
+            merge_requests_events: true,
+            push_events: false,
+            enable_ssl_verification: true,
+          },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+      return response.data;
+    } catch (error) {
+      throw this.mapGitlabRequestError(error);
+    }
+  }
+
+  // Called from IntegrationsService.disconnectGitlab when revoking every
+  // repo's hook before deleting the Integration row. A 404 here means the
+  // hook is already gone (e.g. deleted manually on GitLab's side) — treated
+  // as success rather than an error, since the caller's goal ("this hook
+  // should not exist") is already satisfied.
+  async deleteProjectHook(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    hookId: number,
+  ): Promise<void> {
+    try {
+      await firstValueFrom(
+        this.http.delete(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/hooks/${hookId}`,
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return;
+      }
+      throw this.mapGitlabRequestError(error);
+    }
   }
 
   mapGitlabRequestError(error: unknown): never {

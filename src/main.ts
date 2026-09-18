@@ -38,6 +38,14 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     bufferLogs: true,
     httpsOptions,
+    // WebhooksController needs the raw request body (Buffer, before Nest's
+    // default express.json() parses it) to verify GitHub's
+    // X-Hub-Signature-256 HMAC — recomputing the HMAC from a re-serialized
+    // JSON object risks whitespace/key-ordering differences from what
+    // GitHub actually signed, which would make every signature mismatch.
+    // This makes `req.rawBody` available globally; only the webhook routes
+    // use it.
+    rawBody: true,
   });
 
   const logger: Logger = app.get(WINSTON_MODULE_NEST_PROVIDER);
