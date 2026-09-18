@@ -39,12 +39,22 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
             type=sha,format=long,enable=${{ github.ref_name == 'main' }}
 
+      # Required for the arm64 half of the multi-platform build below —
+      # the runner itself is amd64, so building for arm64 needs QEMU
+      # emulation registered first.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
+      # Built for both amd64 (typical VPS) and arm64 (Apple Silicon dev
+      # machines) so the same ghcr.io tag can be pulled and run in either
+      # place — a single-platform build would 404/"no matching manifest"
+      # on whichever architecture wasn't built for.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
