@@ -1,5 +1,3 @@
-// Runtime validation for inbound webhook bodies.
-//
 // Webhook bodies arrive as raw bytes from an external sender, so they are
 // `any` until proven otherwise — a bare `as GithubPullRequestPayload` is a
 // promise to the compiler with nothing behind it at runtime. This is not
