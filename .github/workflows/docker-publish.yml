@@ -26,7 +26,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # development -> :dev (for testing, not what the VPS pulls).
+      # development -> :dev (what the dev VPS pulls, see `deploy` below).
       # main (default branch) -> :latest + :sha-<full sha> — this is what
       # production pulls.
       - name: Extract metadata (app image)
@@ -88,3 +88,34 @@ jobs:
           labels: ${{ steps.meta-migrator.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Runs only after both images are pushed. SSHes into the VPS and pulls the
+  # tag matching this branch (`dev` for development, `latest` for main), then
+  # recreates the stack. `up -d` re-runs the one-off `migrate` job because
+  # `app` depends on it — `prisma migrate deploy` is idempotent, so that's
+  # safe. Secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY (repo → Settings →
+  # Secrets and variables → Actions).
+  deploy:
+    name: Deploy to VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+    steps:
+      - name: Pull and restart on VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: IMAGE_TAG
+          script: |
+            set -e
+            cd ~/critiq/critiq-be
+            export IMAGE_TAG="${IMAGE_TAG}"
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker compose ps
+            docker image prune -f
+        env:
+          IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'dev' }}
