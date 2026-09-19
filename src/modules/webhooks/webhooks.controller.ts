@@ -36,6 +36,18 @@ export class WebhooksController {
     try {
       if (req.rawBody) {
         await this.webhooksService.handleGitlabEvent(req.rawBody, req.headers);
+      } else {
+        // Logged rather than silently skipped: without this branch a
+        // delivery that arrives with no raw body is indistinguishable in
+        // the logs from one that never reached this server at all, since
+        // the 200 below is sent either way. rawBody is populated by
+        // NestFactory's `rawBody: true` (main.ts) and is missing when the
+        // request carries no body, or a Content-Type the body parser does
+        // not handle.
+        this.logger.warn('webhook.gitlab.no_raw_body', {
+          contentType: req.headers['content-type'],
+          contentLength: req.headers['content-length'],
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -52,6 +64,12 @@ export class WebhooksController {
     try {
       if (req.rawBody) {
         await this.webhooksService.handleGithubEvent(req.rawBody, req.headers);
+      } else {
+        // See the GitLab handler above for why this branch logs.
+        this.logger.warn('webhook.github.no_raw_body', {
+          contentType: req.headers['content-type'],
+          contentLength: req.headers['content-length'],
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
