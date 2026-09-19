@@ -6,17 +6,12 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Provider } from '../../generated/prisma/enums';
-
-interface GitlabMergeRequestPayload {
-  object_kind: string;
-  project: { id: number };
-  object_attributes?: { target_branch: string };
-}
-
-interface GithubPullRequestPayload {
-  repository: { id: number };
-  pull_request?: { base: { ref: string } };
-}
+import {
+  isGithubPingEvent,
+  isGithubPullRequestPayload,
+  isGitlabMergeRequestPayload,
+  parseJsonBody,
+} from './webhook-payload';
 
 // Scope of this service is deliberately narrow (see the webhook rollout
 // plan): verify signature, resolve the repo, check D6's scan scope, and
@@ -33,9 +28,14 @@ export class WebhooksService {
   ) {}
 
   async handleGitlabEvent(rawBody: Buffer, headers: Record<string, unknown>) {
-    const payload = JSON.parse(
-      rawBody.toString('utf8'),
-    ) as GitlabMergeRequestPayload;
+    const parsed = parseJsonBody(rawBody);
+    if (!isGitlabMergeRequestPayload(parsed)) {
+      this.logger.warn('webhook.gitlab.rejected', {
+        reason: 'malformed_payload',
+      });
+      return;
+    }
+    const payload = parsed;
 
     const repository = await this.prisma.repository.findFirst({
       where: {
@@ -122,9 +122,23 @@ export class WebhooksService {
       return;
     }
 
-    const payload = JSON.parse(
-      rawBody.toString('utf8'),
-    ) as GithubPullRequestPayload;
+    const parsed = parseJsonBody(rawBody);
+
+    // Sent once when the webhook is first saved in the App settings, to
+    // confirm the endpoint is reachable. Carries no repository, so there is
+    // nothing to resolve or scan — acknowledged and dropped.
+    if (isGithubPingEvent(parsed)) {
+      this.logger.info('webhook.github.ping');
+      return;
+    }
+
+    if (!isGithubPullRequestPayload(parsed)) {
+      this.logger.warn('webhook.github.rejected', {
+        reason: 'malformed_payload',
+      });
+      return;
+    }
+    const payload = parsed;
 
     const repository = await this.prisma.repository.findFirst({
       where: {
