@@ -264,6 +264,10 @@ export class ReposService {
               defaultBranch: providerBranches.defaultBranch,
             },
           });
+          await tx.organization.update({
+            where: { id: organizationId },
+            data: { onboardingCompleted: true },
+          });
           await tx.repoScanConfig.create({
             data: {
               organizationId,
@@ -311,6 +315,19 @@ export class ReposService {
     }
 
     return new CreateReposResponseDto({ items });
+  }
+
+  // Read back by ReposController after createRepos, to decide whether the
+  // caller's session token still reflects the organization's onboarding
+  // state. Separate from createRepos' return value on purpose: the flag is
+  // set inside the per-repo transaction, so only the row itself is
+  // authoritative about whether any repo actually landed.
+  async isOnboardingCompleted(organizationId: string): Promise<boolean> {
+    const organization = await this.prisma.organization.findUniqueOrThrow({
+      where: { id: organizationId },
+      select: { onboardingCompleted: true },
+    });
+    return organization.onboardingCompleted ?? false;
   }
 
   async list(organizationId: string): Promise<RepositoryListItemDto[]> {
