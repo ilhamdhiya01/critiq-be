@@ -13,6 +13,7 @@ interface AuthenticatedRequest extends Request {
     activeOrgId: string | null;
     role: Role | null;
     provider: Provider;
+    onboardingCompleted: boolean;
   };
 }
 
@@ -77,17 +78,17 @@ export class AuthController {
       activeOrgId: string | null;
       role: Role | null;
       provider: Provider;
+      onboardingCompleted: boolean;
     },
     res: Response,
   ): void {
-    const token = this.authService.issueSessionToken(
-      auth.user.id,
-      auth.activeOrgId,
-      auth.role,
-      auth.provider,
-    );
-
-    console.log('user', auth);
+    const token = this.authService.issueSessionToken({
+      sub: auth.user.id,
+      activeOrgId: auth.activeOrgId,
+      role: auth.role,
+      provider: auth.provider,
+      onboardingCompleted: auth.onboardingCompleted,
+    });
 
     // SameSite=None + Secure:true unconditionally: user's explicit choice to
     // run FE/BE cross-origin locally instead of same-origin via proxy — see

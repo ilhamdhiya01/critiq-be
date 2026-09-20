@@ -51,12 +51,16 @@ export class OrganizationsController {
       dto,
     );
 
-    const token = this.authService.issueSessionToken(
-      req.user.sub,
-      organization.id,
+    const token = this.authService.issueSessionToken({
+      sub: req.user.sub,
+      activeOrgId: organization.id,
       role,
-      req.user.provider,
-    );
+      provider: req.user.provider,
+      // A just-created organization has not been through the setup wizard
+      // by definition — this mirrors Organization.onboardingCompleted's
+      // schema default rather than reading the row back.
+      onboardingCompleted: false,
+    });
     // Kept in sync with auth.controller.ts's session cookie settings.
     res.cookie('session', token, {
       httpOnly: true,
