@@ -1,14 +1,33 @@
-import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Put,
+  Req,
+  Res,
+} from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { ReposService } from './repos.service';
 import { UpdateScanConfigDto } from './dto/update-scan-config.dto';
 import { CreateReposDto } from './dto/create-repos.dto';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { Role } from '../../generated/prisma/enums';
+import { AuthService } from '../auth/auth.service';
+import type { JwtPayload } from '../auth/auth.service';
+
+interface RequestWithSession extends Request {
+  user: JwtPayload;
+}
 
 @Controller('orgs/:orgId/repos')
 export class ReposController {
-  constructor(private readonly reposService: ReposService) {}
+  constructor(
+    private readonly reposService: ReposService,
+    private readonly authService: AuthService,
+  ) {}
 
   @Get()
   @OrgAuth([])
@@ -56,7 +75,48 @@ export class ReposController {
   @Post()
   @OrgAuth([Role.ADMIN])
   @ResponseMessage('Repositories connected')
-  createRepos(@Param('orgId') orgId: string, @Body() dto: CreateReposDto) {
-    return this.reposService.createRepos(orgId, dto);
+  async createRepos(
+    @Req() req: RequestWithSession,
+    @Param('orgId') orgId: string,
+    @Body() dto: CreateReposDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.reposService.createRepos(orgId, dto);
+
+    // Connecting the first repo flips Organization.onboardingCompleted
+    // (ReposService.createRepos), which the session token carries — so the
+    // token the caller holds is stale the moment this succeeds. Reissuing
+    // here keeps the FE from bouncing a just-onboarded admin back into the
+    // wizard until their next login.
+    //
+    // The flag is read back from the database rather than inferred from
+    // `result.items`: it only flips inside the per-repo transaction, so a
+    // request where every item failed (e.g. all already_connected) must
+    // leave the token's value alone.
+    const onboardingCompleted =
+      await this.reposService.isOnboardingCompleted(orgId);
+    if (onboardingCompleted !== req.user.onboardingCompleted) {
+      // Fields are copied one by one rather than spread from req.user: that
+      // object is a *decoded* token, so it also carries the registered `iat`
+      // and `exp` claims, and jsonwebtoken refuses to sign a payload that
+      // already has `exp` while JwtModule supplies `expiresIn` ("Bad
+      // options.expiresIn option the payload already has an exp property").
+      const token = this.authService.issueSessionToken({
+        sub: req.user.sub,
+        activeOrgId: req.user.activeOrgId,
+        role: req.user.role,
+        provider: req.user.provider,
+        onboardingCompleted,
+      });
+      // Kept in sync with auth.controller.ts's session cookie settings.
+      res.cookie('session', token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 24 * 60 * 60 * 1000,
+      });
+    }
+
+    return result;
   }
 }

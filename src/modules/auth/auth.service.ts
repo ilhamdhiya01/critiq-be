@@ -10,6 +10,13 @@ export interface JwtPayload {
   activeOrgId: string | null;
   role: Role | null;
   provider: Provider;
+  // Onboarding state of `activeOrgId` only — like `role`, it is scoped to
+  // the organization the token was issued for, not the user globally (D1:
+  // one user can belong to several organizations, each with its own
+  // onboarding state). Any endpoint that changes which org is active, or
+  // that completes onboarding, must reissue the token — see
+  // ReposController.createRepos and OrganizationsController.create.
+  onboardingCompleted: boolean;
 }
 
 export interface OAuthProfile {
@@ -30,13 +37,10 @@ export class AuthService {
     @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
   ) {}
 
-  issueSessionToken(
-    userId: string,
-    activeOrgId: string | null,
-    role: Role | null,
-    provider: Provider,
-  ): string {
-    const payload: JwtPayload = { sub: userId, activeOrgId, role, provider };
+  // Takes an object rather than positional arguments: the payload now has
+  // several same-typed fields (two nullable strings, two booleans-or-enums)
+  // that are easy to transpose silently at a call site.
+  issueSessionToken(payload: JwtPayload): string {
     return this.jwtService.sign(payload);
   }
 
@@ -45,17 +49,27 @@ export class AuthService {
     activeOrgId: string | null;
     role: Role | null;
     provider: Provider;
+    onboardingCompleted: boolean;
   }> {
     const user = await this.findOrCreateUser(profile);
+    // `organization` is included for its onboardingCompleted flag, which
+    // rides in the session token so the FE can route a fresh login straight
+    // past the setup wizard without a second round trip.
     const membership = await this.prisma.membership.findFirst({
       where: { userId: user.id, status: 'ACTIVE' },
       orderBy: { lastAccessedAt: 'desc' },
+      include: { organization: true },
     });
     return {
       user,
       activeOrgId: membership?.organizationId ?? null,
       role: membership?.role ?? null,
       provider: profile.provider,
+      // A user with no membership at all has no organization to be onboarded
+      // into yet, so `false` sends them to the wizard — the same place the
+      // flag's default sends a brand-new organization.
+      onboardingCompleted:
+        membership?.organization.onboardingCompleted ?? false,
     };
   }
 

@@ -6,6 +6,7 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Provider } from '../../generated/prisma/enums';
+import { PullsService } from '../pulls/pulls.service';
 import {
   isGithubPingEvent,
   isGithubPullRequestPayload,
@@ -14,16 +15,17 @@ import {
 } from './webhook-payload';
 
 // Scope of this service is deliberately narrow (see the webhook rollout
-// plan): verify signature, resolve the repo, check D6's scan scope, and
-// log the outcome. No BullMQ/queue infra exists yet, so nothing is
-// enqueued here — this is the "receive and log" half only, the "act on it"
-// half is Fase 4 proper.
+// plan): verify signature, resolve the repo, check D6's scan scope, upsert
+// a PullRequest row for read-side access (PullsService, Fase 3 GET-only),
+// and log the outcome. No BullMQ/queue infra exists yet, so nothing is
+// enqueued for scanning — that half is Fase 4 proper.
 @Injectable()
 export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly encryptionService: EncryptionService,
     private readonly configService: ConfigService,
+    private readonly pullsService: PullsService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
@@ -98,12 +100,19 @@ export class WebhooksService {
       return;
     }
 
-    // TODO Fase 4: enqueue a scan job (BullMQ) here instead of just
-    // logging — queue infra doesn't exist yet.
     this.logger.info('webhook.gitlab.received_in_scope', {
       repositoryId: repository.id,
       targetBranch,
     });
+    // TODO Fase 4: enqueue a scan job (BullMQ) here instead — the upsert
+    // below only maintains the GET-only read model (PullsService), it
+    // doesn't trigger any scan/AI work. Queue infra doesn't exist yet.
+    await this.pullsService.upsertFromWebhook(
+      repository.organizationId,
+      repository.id,
+      Provider.GITLAB,
+      payload,
+    );
   }
 
   async handleGithubEvent(rawBody: Buffer, headers: Record<string, unknown>) {
@@ -171,12 +180,19 @@ export class WebhooksService {
       return;
     }
 
-    // TODO Fase 4: enqueue a scan job (BullMQ) here instead of just
-    // logging — queue infra doesn't exist yet.
     this.logger.info('webhook.github.received_in_scope', {
       repositoryId: repository.id,
       targetBranch,
     });
+    // TODO Fase 4: enqueue a scan job (BullMQ) here instead — the upsert
+    // below only maintains the GET-only read model (PullsService), it
+    // doesn't trigger any scan/AI work. Queue infra doesn't exist yet.
+    await this.pullsService.upsertFromWebhook(
+      repository.organizationId,
+      repository.id,
+      Provider.GITHUB,
+      payload,
+    );
   }
 
   // Constant-time comparison — a naive `===` on secrets leaks timing
