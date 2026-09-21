@@ -34,6 +34,7 @@ model Organization {
   name      String @db.VarChar(100)
   slug      String @unique @db.VarChar(100)
   createdBy String
+  onboardingCompleted Boolean @default(false)
 
   creator            User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
   memberships        Membership[]
@@ -41,6 +42,7 @@ model Organization {
   repositories       Repository[]
   repoScanConfigs    RepoScanConfig[]
   branchScanPolicies BranchScanPolicy[]
+  pullRequests       PullRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -205,6 +207,7 @@ model Repository {
   integration    Integration        @relation(fields: [integrationId], references: [id], onDelete: Cascade)
   scanConfig     RepoScanConfig?
   branchPolicies BranchScanPolicy[]
+  pullRequests   PullRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -265,4 +268,58 @@ enum ReviewPolicy {
   MANUAL_ONLY
   ALLOW_AI
   REQUIRE_BOTH
+}
+
+// Provider-agnostic PR/MR state — GitHub's `state` (open/closed) + `merged`
+// boolean and GitLab's `state` (opened/closed/merged/locked) collapse into
+// this single 3-value enum so the FE never has to branch on provider.
+// GitLab `locked` maps to OPEN — locking only blocks new discussion, it
+// isn't a terminal PR status. See PullsService's mapPayload for the exact
+// per-provider mapping.
+enum PullRequestState {
+  OPEN
+  CLOSED
+  MERGED
+}
+
+// One row per PR/MR, upserted from webhook events only (WebhooksService) —
+// no polling/pull path exists. Deliberately GET-only at this phase (Fase
+// 3): no review/approve fields here, that's the separate `reviews` module
+// later. organizationId is denormalized (same rationale as Repository/
+// RepoScanConfig/BranchScanPolicy) so tenant-scoped queries never need a
+// join to enforce isolation.
+model PullRequest {
+  id             String            @id @default(cuid())
+  organizationId String
+  repositoryId   String
+  provider       Provider
+  externalId     String
+  title          String
+  authorUsername String?
+  sourceBranch   String
+  targetBranch   String
+  headSha        String?
+  state          PullRequestState
+
+  // Snapshot of the BranchScanPolicy matching targetBranch at the moment
+  // this row was first created (PR opened) — NEVER re-read on update. If
+  // BranchScanPolicy for this branch changes later, this PR keeps showing
+  // the policy in effect when it was opened (audit integrity, CLAUDE.md
+  // "Prioritas policy"). Falls back to MANUAL_ONLY in the defensive case
+  // where no matching BranchScanPolicy row exists — should not happen in
+  // the normal flow, since every monitored branch gets a BranchScanPolicy
+  // row in ReposService.createRepos.
+  effectivePolicy ReviewPolicy
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Repeated webhook events (opened, then synchronize, then closed) for
+  // the same PR/MR must upsert the same row, never duplicate it.
+  @@unique([repositoryId, externalId])
+  @@index([organizationId])
+  @@map("pull_requests")
 }
