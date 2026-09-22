@@ -46,10 +46,22 @@ export interface GitlabProjectHook {
   id: number;
 }
 
+export interface GitlabMergeRequestDiff {
+  old_path: string;
+  new_path: string;
+  new_file: boolean;
+  renamed_file: boolean;
+  deleted_file: boolean;
+  diff: string;
+  too_large?: boolean;
+}
+
 const MAINTAINER_ACCESS_LEVEL = 40;
 const REQUEST_TIMEOUT_MS = 8000;
 const BRANCH_PAGE_SIZE = 100;
 const BRANCH_HARD_CAP = 500;
+const MR_DIFFS_PAGE_SIZE = 100;
+const MR_DIFFS_HARD_CAP = 500;
 
 // All GitLab REST API access (credential verification for Fase 2's identity
 // login gate, and now repo/branch lookups for the `repos` module) lives
@@ -175,6 +187,53 @@ export class GitlabApiService {
     }
 
     return { branches: branches.slice(0, BRANCH_HARD_CAP), truncated };
+  }
+
+  // Uses the current `/diffs` endpoint (paginated), not the deprecated
+  // `/changes` endpoint (unpaginated, flagged for removal by GitLab) — same
+  // pagination/hard-cap shape as fetchBranches. `diff` comes back as an
+  // empty string for binary files or when `too_large` is set; PullsService
+  // is responsible for turning that into an explicit truncated flag.
+  async fetchMergeRequestDiffs(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeIid: string,
+  ): Promise<{ diffs: GitlabMergeRequestDiff[]; truncated: boolean }> {
+    const diffs: GitlabMergeRequestDiff[] = [];
+    let page = 1;
+    let truncated = false;
+
+    while (true) {
+      let response: { data: GitlabMergeRequestDiff[] };
+      try {
+        response = await firstValueFrom(
+          this.http.get<GitlabMergeRequestDiff[]>(
+            `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/merge_requests/${encodeURIComponent(mergeIid)}/diffs`,
+            {
+              headers: { 'Private-Token': token },
+              timeout: REQUEST_TIMEOUT_MS,
+              params: { per_page: MR_DIFFS_PAGE_SIZE, page },
+            },
+          ),
+        );
+      } catch (error) {
+        throw this.mapGitlabRequestError(error);
+      }
+
+      diffs.push(...response.data);
+
+      if (diffs.length >= MR_DIFFS_HARD_CAP) {
+        truncated = true;
+        break;
+      }
+      if (response.data.length < MR_DIFFS_PAGE_SIZE) {
+        break;
+      }
+      page += 1;
+    }
+
+    return { diffs: diffs.slice(0, MR_DIFFS_HARD_CAP), truncated };
   }
 
   // Registers a webhook on a single project (D6/webhook rollout — called
