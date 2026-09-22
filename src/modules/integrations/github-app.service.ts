@@ -35,8 +35,20 @@ export interface GithubBranch {
   name: string;
 }
 
+export interface GithubPullRequestFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string;
+  previous_filename?: string;
+}
+
 const BRANCH_PAGE_SIZE = 100;
 const BRANCH_HARD_CAP = 500;
+const PR_FILES_PAGE_SIZE = 100;
+const PR_FILES_HARD_CAP = 500;
 const REQUEST_TIMEOUT_MS = 8000;
 
 // Mints and caches GitHub App installation access tokens, and wraps the
@@ -185,6 +197,54 @@ export class GithubAppService {
       }
 
       return { branches: branches.slice(0, BRANCH_HARD_CAP), truncated };
+    } catch (error) {
+      throw this.mapGithubRequestError(error);
+    }
+  }
+
+  // Same pagination/hard-cap shape as listBranches. Files without a `patch`
+  // (binary, or too large — GitHub just omits the field, no error) are
+  // passed through as-is; PullsService is responsible for turning that
+  // absence into an explicit truncated flag for the FE.
+  async listPullRequestFiles(
+    installationId: string,
+    owner: string,
+    repo: string,
+    pullNumber: string,
+  ): Promise<{ files: GithubPullRequestFile[]; truncated: boolean }> {
+    const token = await this.getInstallationToken(installationId);
+    try {
+      const files: GithubPullRequestFile[] = [];
+      let page = 1;
+      let truncated = false;
+
+      while (true) {
+        const response = await request(
+          'GET /repos/{owner}/{repo}/pulls/{pull_number}/files',
+          {
+            owner,
+            repo,
+            pull_number: Number(pullNumber),
+            headers: { authorization: `bearer ${token}` },
+            request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+            per_page: PR_FILES_PAGE_SIZE,
+            page,
+          },
+        );
+        const data = response.data as GithubPullRequestFile[];
+        files.push(...data);
+
+        if (files.length >= PR_FILES_HARD_CAP) {
+          truncated = true;
+          break;
+        }
+        if (data.length < PR_FILES_PAGE_SIZE) {
+          break;
+        }
+        page += 1;
+      }
+
+      return { files: files.slice(0, PR_FILES_HARD_CAP), truncated };
     } catch (error) {
       throw this.mapGithubRequestError(error);
     }
