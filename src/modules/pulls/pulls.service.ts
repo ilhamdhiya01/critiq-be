@@ -180,6 +180,7 @@ export class PullsService {
   ): Promise<PullRequestDetailDto> {
     const pull = await this.prisma.pullRequest.findUnique({
       where: { id: pullRequestId },
+      include: { repository: { select: { path: true } } },
     });
     // Checked against the row, not filtered in `where` — a PR that exists
     // but belongs to another org/repo surfaces identically to one that
@@ -198,6 +199,7 @@ export class PullsService {
       provider: pull.provider,
       externalId: pull.externalId,
       title: pull.title,
+      repositoryPath: pull.repository.path,
       authorUsername: pull.authorUsername,
       sourceBranch: pull.sourceBranch,
       targetBranch: pull.targetBranch,

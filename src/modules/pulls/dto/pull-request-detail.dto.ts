@@ -10,6 +10,7 @@ export class PullRequestDetailDto {
   provider!: Provider;
   externalId!: string;
   title!: string;
+  repositoryPath!: string;
   authorUsername!: string | null;
   sourceBranch!: string;
   targetBranch!: string;
@@ -25,6 +26,7 @@ export class PullRequestDetailDto {
     provider: Provider;
     externalId: string;
     title: string;
+    repositoryPath: string;
     authorUsername: string | null;
     sourceBranch: string;
     targetBranch: string;
