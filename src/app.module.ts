@@ -6,6 +6,7 @@ import { ReposModule } from './modules/repos/repos.module';
 import { PullsModule } from './modules/pulls/pulls.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { CommonModule } from './common/common.module';
+import { QueueModule } from './queue/queue.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { CommonModule } from './common/common.module';
     ReposModule,
     PullsModule,
     WebhooksModule,
+    QueueModule,
   ],
   controllers: [],
   providers: [],
