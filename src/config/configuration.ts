@@ -50,4 +50,12 @@ export default () => ({
   // API). GitHub doesn't need this: its App-wide webhook URL is configured
   // once in the App's own dashboard, not sent per-repo via API.
   backendUrl: process.env.BACKEND_URL,
+  redis: {
+    url: process.env.REDIS_URL,
+  },
+  scan: {
+    concurrency: Number(process.env.SCAN_CONCURRENCY ?? 3),
+    jobTimeoutMs: Number(process.env.SCAN_JOB_TIMEOUT_MS ?? 120000),
+    maxDiffBytes: Number(process.env.SCAN_MAX_DIFF_BYTES ?? 1048576),
+  },
 });
