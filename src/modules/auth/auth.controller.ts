@@ -6,6 +6,7 @@ import { Provider, Role, User } from '../../generated/prisma/client';
 import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
+import { SessionUserDto } from './dto/session-user.dto';
 
 interface AuthenticatedRequest extends Request {
   user: {
@@ -68,8 +69,8 @@ export class AuthController {
   @Get('me')
   @UseGuards(AuthGuard('jwt'))
   @ResponseMessage('Current session retrieved successfully')
-  me(@Req() req: RequestWithSession): JwtPayload {
-    return req.user;
+  me(@Req() req: RequestWithSession): Promise<SessionUserDto> {
+    return this.authService.getSessionUser(req.user);
   }
 
   private handleOAuthCallback(
