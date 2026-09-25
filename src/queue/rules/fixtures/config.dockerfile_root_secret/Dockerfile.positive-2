@@ -1,0 +1,2 @@
+FROM python:3.12-slim
+ENV API_KEY=abcdef0123456789

@@ -1,5 +1,6 @@
 import {
   Controller,
+  HttpStatus,
   Inject,
   Post,
   Req,
@@ -9,7 +10,7 @@ import {
 import type { Request, Response } from 'express';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
-import { WebhooksService } from './webhooks.service';
+import { WebhookOutcome, WebhooksService } from './webhooks.service';
 
 // Global route, deliberately unguarded (no @OrgAuth/AuthGuard('jwt')) —
 // mirrors GithubInstallationCallbackController: the caller here is
@@ -17,10 +18,13 @@ import { WebhooksService } from './webhooks.service';
 // org context can't come from a JWT and is instead resolved from the
 // Repository row matched inside WebhooksService.
 //
-// Always responds 200, regardless of what happened processing the event —
-// GitLab and GitHub both use the response status to decide whether to
-// retry, and repeated non-2xx responses can get a webhook auto-disabled.
-// The response body carries no information either provider reads.
+// Status codes: 401 only when the sender could not be authenticated (bad
+// signature/token, or a GitLab repo whose secret we don't hold); 202 when a
+// new scan job was enqueued; 200 for everything else — duplicates,
+// out-of-scope branches, ignored events, and even unexpected processing
+// errors. Both providers retry and can auto-disable a webhook on repeated
+// non-2xx, so a failure that isn't the sender's fault must never surface
+// as one; an authentication failure should, since that hook is broken.
 @Controller('webhooks')
 export class WebhooksController {
   constructor(
@@ -33,27 +37,9 @@ export class WebhooksController {
     @Req() req: RawBodyRequest<Request>,
     @Res() res: Response,
   ): Promise<void> {
-    try {
-      if (req.rawBody) {
-        await this.webhooksService.handleGitlabEvent(req.rawBody, req.headers);
-      } else {
-        // Logged rather than silently skipped: without this branch a
-        // delivery that arrives with no raw body is indistinguishable in
-        // the logs from one that never reached this server at all, since
-        // the 200 below is sent either way. rawBody is populated by
-        // NestFactory's `rawBody: true` (main.ts) and is missing when the
-        // request carries no body, or a Content-Type the body parser does
-        // not handle.
-        this.logger.warn('webhook.gitlab.no_raw_body', {
-          contentType: req.headers['content-type'],
-          contentLength: req.headers['content-length'],
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn('webhook.gitlab.processing_error', { error: message });
-    }
-    res.status(200).send();
+    await this.handle('gitlab', req, res, (rawBody) =>
+      this.webhooksService.handleGitlabEvent(rawBody, req.headers),
+    );
   }
 
   @Post('github')
@@ -61,20 +47,69 @@ export class WebhooksController {
     @Req() req: RawBodyRequest<Request>,
     @Res() res: Response,
   ): Promise<void> {
-    try {
-      if (req.rawBody) {
-        await this.webhooksService.handleGithubEvent(req.rawBody, req.headers);
-      } else {
-        // See the GitLab handler above for why this branch logs.
-        this.logger.warn('webhook.github.no_raw_body', {
-          contentType: req.headers['content-type'],
-          contentLength: req.headers['content-length'],
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn('webhook.github.processing_error', { error: message });
+    await this.handle('github', req, res, (rawBody) =>
+      this.webhooksService.handleGithubEvent(rawBody, req.headers),
+    );
+  }
+
+  private async handle(
+    provider: 'gitlab' | 'github',
+    req: RawBodyRequest<Request>,
+    res: Response,
+    run: (rawBody: Buffer) => Promise<WebhookOutcome>,
+  ): Promise<void> {
+    if (!req.rawBody) {
+      // Logged rather than silently skipped: without this a delivery that
+      // arrives with no raw body is indistinguishable in the logs from one
+      // that never reached this server. rawBody is populated by
+      // NestFactory's `rawBody: true` (main.ts) and is missing when the
+      // request has no body or a Content-Type the body parser doesn't handle.
+      this.logger.warn(`webhook.${provider}.no_raw_body`, {
+        contentType: req.headers['content-type'],
+        contentLength: req.headers['content-length'],
+      });
+      res.status(HttpStatus.OK).json({ received: true, skipped: 'malformed' });
+      return;
     }
-    res.status(200).send();
+
+    let outcome: WebhookOutcome;
+    try {
+      outcome = await run(req.rawBody);
+    } catch (error) {
+      this.logger.error(`webhook.${provider}.processing_error`, {
+        errorName: error instanceof Error ? error.name : 'Unknown',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(HttpStatus.OK).json({ received: true });
+      return;
+    }
+
+    switch (outcome.kind) {
+      case 'rejected':
+        res.status(HttpStatus.UNAUTHORIZED).json({ received: false });
+        return;
+      case 'duplicate':
+        res.status(HttpStatus.OK).json({ received: true, duplicate: true });
+        return;
+      case 'skipped':
+        res
+          .status(HttpStatus.OK)
+          .json({ received: true, skipped: outcome.reason });
+        return;
+      case 'pull_closed':
+        res.status(HttpStatus.OK).json({ received: true });
+        return;
+      case 'scan_enqueued':
+        // 202 only when this delivery actually created work; a repeat for
+        // an already-scanned sha points at the existing scan with 200.
+        res
+          .status(outcome.deduplicated ? HttpStatus.OK : HttpStatus.ACCEPTED)
+          .json({
+            received: true,
+            scanId: outcome.scanId,
+            ...(outcome.deduplicated ? { deduplicated: true } : {}),
+          });
+        return;
+    }
   }
 }

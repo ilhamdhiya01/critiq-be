@@ -24,4 +24,8 @@ export const validationSchema = Joi.object({
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   FE_URL: Joi.string().uri().required(),
   BACKEND_URL: Joi.string().uri().required(),
+  REDIS_URL: Joi.string().uri().required(),
+  SCAN_CONCURRENCY: Joi.number().default(3),
+  SCAN_JOB_TIMEOUT_MS: Joi.number().default(120000),
+  SCAN_MAX_DIFF_BYTES: Joi.number().default(1048576),
 });
