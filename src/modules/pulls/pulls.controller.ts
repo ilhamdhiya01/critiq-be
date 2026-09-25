@@ -24,4 +24,15 @@ export class PullsController {
   ) {
     return this.pullsService.getDetail(orgId, repoId, id);
   }
+
+  @Get(':id/diff')
+  @OrgAuth([])
+  @ResponseMessage('Pull request diff retrieved successfully')
+  getDiff(
+    @Param('orgId') orgId: string,
+    @Param('repoId') repoId: string,
+    @Param('id') id: string,
+  ) {
+    return this.pullsService.getDiff(orgId, repoId, id);
+  }
 }

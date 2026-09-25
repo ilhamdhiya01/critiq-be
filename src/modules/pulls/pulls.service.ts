@@ -1,8 +1,15 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { EncryptionService } from '../../common/encryption/encryption.service';
 import {
+  IntegrationState,
   Provider,
   PullRequestState,
   ReviewPolicy,
@@ -11,9 +18,21 @@ import type {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
 } from '../webhooks/webhook-payload';
+import {
+  GithubAppService,
+  GithubPullRequestFile,
+} from '../integrations/github-app.service';
+import {
+  GitlabApiService,
+  GitlabMergeRequestDiff,
+} from '../integrations/gitlab-api.service';
 import { PullRequestListItemDto } from './dto/pull-request-list-item.dto';
 import { PullRequestOrgListItemDto } from './dto/pull-request-org-list-item.dto';
 import { PullRequestDetailDto } from './dto/pull-request-detail.dto';
+import {
+  PullRequestDiffDto,
+  PullRequestFileDto,
+} from './dto/pull-request-diff.dto';
 
 interface MappedPullRequest {
   externalId: string;
@@ -29,6 +48,9 @@ interface MappedPullRequest {
 export class PullsService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly githubAppService: GithubAppService,
+    private readonly gitlabApiService: GitlabApiService,
+    private readonly encryptionService: EncryptionService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
@@ -158,6 +180,7 @@ export class PullsService {
   ): Promise<PullRequestDetailDto> {
     const pull = await this.prisma.pullRequest.findUnique({
       where: { id: pullRequestId },
+      include: { repository: { select: { path: true } } },
     });
     // Checked against the row, not filtered in `where` — a PR that exists
     // but belongs to another org/repo surfaces identically to one that
@@ -176,6 +199,7 @@ export class PullsService {
       provider: pull.provider,
       externalId: pull.externalId,
       title: pull.title,
+      repositoryPath: pull.repository.path,
       authorUsername: pull.authorUsername,
       sourceBranch: pull.sourceBranch,
       targetBranch: pull.targetBranch,
@@ -184,6 +208,118 @@ export class PullsService {
       effectivePolicy: pull.effectivePolicy,
       createdAt: pull.createdAt,
       updatedAt: pull.updatedAt,
+    });
+  }
+
+  // Live-proxied from the provider on every call — same convention as
+  // ReposService.getBranchesForRepo (branches). No diff/file data is ever
+  // stored in the DB; this only reads PullRequest for its provider
+  // identifiers, then calls out.
+  async getDiff(
+    organizationId: string,
+    repositoryId: string,
+    pullRequestId: string,
+  ): Promise<PullRequestDiffDto> {
+    const pull = await this.prisma.pullRequest.findUnique({
+      where: { id: pullRequestId },
+      include: { repository: { include: { integration: true } } },
+    });
+    if (
+      !pull ||
+      pull.organizationId !== organizationId ||
+      pull.repositoryId !== repositoryId
+    ) {
+      throw new NotFoundException('Pull request not found.');
+    }
+
+    const { repository } = pull;
+    const { integration } = repository;
+    if (
+      integration.state === IntegrationState.TOKEN_EXPIRED ||
+      integration.state === IntegrationState.INVALID
+    ) {
+      throw new ConflictException({
+        field: 'organizationId',
+        message:
+          integration.state === IntegrationState.TOKEN_EXPIRED
+            ? 'token_expired'
+            : 'token_invalid',
+      });
+    }
+
+    if (integration.source === Provider.GITHUB) {
+      if (!integration.installationId) {
+        throw new Error(
+          'Integration row with source GITHUB is missing installationId — data invariant violated.',
+        );
+      }
+      const [owner, repo] = repository.path.split('/');
+      const result = await this.githubAppService.listPullRequestFiles(
+        integration.installationId,
+        owner,
+        repo,
+        pull.externalId,
+      );
+      return new PullRequestDiffDto({
+        files: result.files.map((file) => this.mapGithubFile(file)),
+        truncated: result.truncated,
+      });
+    }
+
+    if (!integration.instanceUrl || !integration.encryptedToken) {
+      throw new Error(
+        'Integration row with source GITLAB is missing its GitLab credential fields — data invariant violated.',
+      );
+    }
+    const token = this.encryptionService.decrypt(integration.encryptedToken);
+    const result = await this.gitlabApiService.fetchMergeRequestDiffs(
+      integration.instanceUrl,
+      token,
+      repository.externalId,
+      pull.externalId,
+    );
+    return new PullRequestDiffDto({
+      files: result.diffs.map((diff) => this.mapGitlabDiff(diff)),
+      truncated: result.truncated,
+    });
+  }
+
+  private mapGithubFile(file: GithubPullRequestFile): PullRequestFileDto {
+    const truncated = file.patch === undefined;
+    const status =
+      file.status === 'added' ||
+      file.status === 'removed' ||
+      file.status === 'renamed'
+        ? file.status
+        : 'modified';
+    return new PullRequestFileDto({
+      path: file.filename,
+      previousPath: file.previous_filename ?? null,
+      status,
+      additions: file.additions,
+      deletions: file.deletions,
+      patch: file.patch ?? null,
+      truncated,
+    });
+  }
+
+  private mapGitlabDiff(diff: GitlabMergeRequestDiff): PullRequestFileDto {
+    const truncated = diff.diff === '';
+    const status = diff.new_file
+      ? 'added'
+      : diff.deleted_file
+        ? 'removed'
+        : diff.renamed_file
+          ? 'renamed'
+          : 'modified';
+    return new PullRequestFileDto({
+      path: diff.new_path,
+      previousPath: diff.renamed_file ? diff.old_path : null,
+      status,
+      additions: null,
+      deletions: null,
+      patch: truncated ? null : diff.diff,
+      truncated,
     });
   }
 
