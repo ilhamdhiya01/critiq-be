@@ -1,7 +1,7 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ScanQueueService } from './scan-queue.service';
+import { SCAN_QUEUE_NAME, ScanQueueService } from './scan-queue.service';
 
 @Global()
 @Module({
@@ -12,7 +12,7 @@ import { ScanQueueService } from './scan-queue.service';
       }),
       inject: [ConfigService],
     }),
-    BullModule.registerQueue({ name: 'scan' }),
+    BullModule.registerQueue({ name: SCAN_QUEUE_NAME }),
   ],
   providers: [ScanQueueService],
   exports: [BullModule, ScanQueueService],

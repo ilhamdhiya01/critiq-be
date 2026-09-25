@@ -16,6 +16,10 @@ export default tseslint.config(
       'eslint.config.mjs',
       'commitlint.config.js',
       'src/generated/**',
+      // Static-rule test fixtures are deliberately "bad" source (undeclared
+      // vars, leaked-secret literals, even invalid syntax) read as plain
+      // text by the rule specs — never compiled, linted or formatted.
+      'src/**/fixtures/**',
     ],
   },
   eslint.configs.recommended,

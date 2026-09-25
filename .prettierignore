@@ -1,0 +1,4 @@
+# Static-rule test fixtures are read as raw text by the rule specs; their
+# exact line layout is test data (line numbers, same-line matches) and must
+# never be reformatted. Some are intentionally not valid source at all.
+src/**/fixtures/**
