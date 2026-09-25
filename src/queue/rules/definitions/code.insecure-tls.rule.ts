@@ -1,3 +1,4 @@
+import { matchesAsCode } from '../line-context';
 import { Rule, RuleFinding } from '../rule.interface';
 
 const PATTERNS = [
@@ -17,7 +18,9 @@ export const codeInsecureTlsRule: Rule = {
   test(ctx) {
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
-      if (PATTERNS.some((pattern) => pattern.test(line.text))) {
+      // Comments and string prose (docs, error messages — including this
+      // rule's own `message`) only mention the option; they don't set it.
+      if (PATTERNS.some((pattern) => matchesAsCode(pattern, line.text))) {
         findings.push({
           lineStart: line.newLine,
           lineEnd: line.newLine,

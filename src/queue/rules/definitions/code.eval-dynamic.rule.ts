@@ -1,3 +1,4 @@
+import { isCommentLine, isInsideStringLiteral } from '../line-context';
 import { Rule, RuleFinding } from '../rule.interface';
 
 // Finds the argument text between a call's opening "(" and its matching
@@ -42,13 +43,17 @@ function hasNonLiteralArgument(rawArgs: string): boolean {
   );
 }
 
+// First call site of `calleePattern` that is real code — an occurrence
+// inside a string literal (docs, messages, test data) is only a mention.
 function findCallArgs(text: string, calleePattern: RegExp): string | null {
-  const match = calleePattern.exec(text);
-  if (!match) {
-    return null;
+  for (const match of text.matchAll(new RegExp(calleePattern.source, 'g'))) {
+    if (isInsideStringLiteral(text, match.index)) {
+      continue;
+    }
+    const openParenIndex = match.index + match[0].length - 1;
+    return extractBalancedArgs(text, openParenIndex);
   }
-  const openParenIndex = match.index + match[0].length - 1;
-  return extractBalancedArgs(text, openParenIndex);
+  return null;
 }
 
 const JS_EVAL_CALLEE = /\beval\s*\(/;
@@ -65,6 +70,9 @@ export const codeEvalDynamicRule: Rule = {
   test(ctx) {
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
+      if (isCommentLine(line.text)) {
+        continue;
+      }
       const callees =
         ctx.language === 'py'
           ? [PY_EVAL_EXEC_CALLEE]

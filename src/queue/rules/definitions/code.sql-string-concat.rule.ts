@@ -1,3 +1,4 @@
+import { isCommentLine } from '../line-context';
 import { Rule, RuleFinding } from '../rule.interface';
 
 // Matches a SQL keyword inside a string that is being concatenated with a
@@ -21,6 +22,11 @@ export const codeSqlStringConcatRule: Rule = {
   test(ctx) {
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
+      // Comments only. The string-literal check other code.* rules use
+      // can't apply here: the SQL itself always lives inside a string.
+      if (isCommentLine(line.text)) {
+        continue;
+      }
       if (
         SQL_KEYWORD.test(line.text) &&
         CONCAT_WITH_VARIABLE.test(line.text) &&

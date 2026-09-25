@@ -7,8 +7,11 @@ describe('code.insecure_tls', () => {
     expect(result.hits).toHaveLength(1);
   });
 
-  it.each(['negative-1.ts', 'negative-2.py'])('does not flag %s', (fixture) => {
-    const result = runRuleAgainstFixture(codeInsecureTlsRule, fixture);
-    expect(result.hits).toHaveLength(0);
-  });
+  it.each(['negative-1.ts', 'negative-2.py', 'negative-3.ts'])(
+    'does not flag %s',
+    (fixture) => {
+      const result = runRuleAgainstFixture(codeInsecureTlsRule, fixture);
+      expect(result.hits).toHaveLength(0);
+    },
+  );
 });

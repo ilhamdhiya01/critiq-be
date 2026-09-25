@@ -20,8 +20,14 @@ describe('secret.db_url_with_password', () => {
     expect(result.hits[0].snippet).toBe('mongodb+srv://****:****@');
   });
 
-  it.each(['negative-1.ts', 'negative-2.ts'])('does not flag %s', (fixture) => {
-    const result = runRuleAgainstFixture(secretDbUrlWithPasswordRule, fixture);
-    expect(result.hits).toHaveLength(0);
-  });
+  it.each(['negative-1.ts', 'negative-2.ts', 'negative-3.ts'])(
+    'does not flag %s',
+    (fixture) => {
+      const result = runRuleAgainstFixture(
+        secretDbUrlWithPasswordRule,
+        fixture,
+      );
+      expect(result.hits).toHaveLength(0);
+    },
+  );
 });

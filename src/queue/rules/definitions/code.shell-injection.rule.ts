@@ -1,3 +1,8 @@
+import {
+  isCommentLine,
+  isInsideStringLiteral,
+  matchesAsCode,
+} from '../line-context';
 import { Rule, RuleFinding } from '../rule.interface';
 
 // child_process.exec/execSync with a non-literal first argument — exec()
@@ -56,8 +61,16 @@ export const codeShellInjectionRule: Rule = {
   test(ctx) {
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
+      if (isCommentLine(line.text)) {
+        continue;
+      }
       if (ctx.language === 'js') {
-        const match = JS_EXEC_CALLEE.exec(line.text);
+        // First call site that is real code, not a mention inside a string.
+        const match = [
+          ...line.text.matchAll(new RegExp(JS_EXEC_CALLEE.source, 'g')),
+        ].find(
+          (candidate) => !isInsideStringLiteral(line.text, candidate.index),
+        );
         if (match) {
           const openParenIndex = match.index + match[0].length - 1;
           const args = extractBalancedArgs(line.text, openParenIndex);
@@ -74,8 +87,8 @@ export const codeShellInjectionRule: Rule = {
 
       if (ctx.language === 'py') {
         if (
-          PY_SUBPROCESS_SHELL_TRUE_PATTERN.test(line.text) ||
-          PY_OS_SYSTEM_CALLEE.test(line.text)
+          matchesAsCode(PY_SUBPROCESS_SHELL_TRUE_PATTERN, line.text) ||
+          matchesAsCode(PY_OS_SYSTEM_CALLEE, line.text)
         ) {
           findings.push({
             lineStart: line.newLine,

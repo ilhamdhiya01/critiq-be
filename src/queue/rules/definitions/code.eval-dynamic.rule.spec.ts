@@ -7,8 +7,11 @@ describe('code.eval_dynamic', () => {
     expect(result.hits.length).toBeGreaterThanOrEqual(1);
   });
 
-  it.each(['negative-1.ts', 'negative-2.ts'])('does not flag %s', (fixture) => {
-    const result = runRuleAgainstFixture(codeEvalDynamicRule, fixture);
-    expect(result.hits).toHaveLength(0);
-  });
+  it.each(['negative-1.ts', 'negative-2.ts', 'negative-3.ts'])(
+    'does not flag %s',
+    (fixture) => {
+      const result = runRuleAgainstFixture(codeEvalDynamicRule, fixture);
+      expect(result.hits).toHaveLength(0);
+    },
+  );
 });
