@@ -34,6 +34,12 @@ import {
   PullRequestFileDto,
 } from './dto/pull-request-diff.dto';
 
+export interface UpsertedPullRequest {
+  id: string;
+  state: PullRequestState;
+  headSha: string | null;
+}
+
 interface MappedPullRequest {
   externalId: string;
   title: string;
@@ -54,22 +60,23 @@ export class PullsService {
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
-  // Called synchronously from WebhooksService at the point an in-scope
-  // MR/PR event is received — no queue involved (BullMQ doesn't exist yet,
-  // Fase 4). Repeated events for the same PR (opened, then synchronize,
-  // then closed) upsert the same row rather than creating duplicates.
+  // Called from WebhooksService when an in-scope MR/PR event is received,
+  // before it enqueues (or cancels) a scan — pure DB write, never a
+  // provider call, so the webhook request stays fast. Repeated events for
+  // the same PR (opened, then synchronize, then closed) upsert the same row
+  // rather than creating duplicates.
   async upsertFromWebhook(
     organizationId: string,
     repositoryId: string,
     provider: Provider,
     payload: GitlabMergeRequestPayload | GithubPullRequestPayload,
-  ): Promise<void> {
+  ): Promise<UpsertedPullRequest | null> {
     const mapped =
       provider === Provider.GITLAB
         ? this.mapGitlabPayload(payload as GitlabMergeRequestPayload)
         : this.mapGithubPayload(payload as GithubPullRequestPayload);
     if (!mapped) {
-      return;
+      return null;
     }
 
     const effectivePolicy = await this.resolveEffectivePolicy(
@@ -77,7 +84,7 @@ export class PullsService {
       mapped.targetBranch,
     );
 
-    await this.prisma.pullRequest.upsert({
+    return this.prisma.pullRequest.upsert({
       where: {
         repositoryId_externalId: {
           repositoryId,
@@ -108,6 +115,7 @@ export class PullsService {
         headSha: mapped.headSha,
         state: mapped.state,
       },
+      select: { id: true, state: true, headSha: true },
     });
   }
 
