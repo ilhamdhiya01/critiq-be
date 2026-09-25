@@ -6,7 +6,7 @@ Every customer company is one **Organization** — the owner of its connected re
 
 This repository (`critiq-be`) contains the backend API for Critiq, built with **NestJS**.
 
-> Status: MVP v1.4 (in development) · Internal · Cititex Engineerin
+> Status: MVP v1.4 (in development) · Internal · Cititex Engineering
 >
 > **v1.4 change**: GitLab login is identity-only again (`read_user` scope, one
 > fixed Critiq-owned OAuth app on gitlab.com — no per-instance app
