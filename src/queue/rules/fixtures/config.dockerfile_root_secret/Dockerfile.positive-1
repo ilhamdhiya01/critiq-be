@@ -1,0 +1,2 @@
+FROM node:20-alpine
+ENV DATABASE_PASSWORD=Sup3rSecretProd2024

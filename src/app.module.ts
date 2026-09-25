@@ -7,10 +7,12 @@ import { PullsModule } from './modules/pulls/pulls.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
+import { RedisModule } from './common/redis/redis.module';
 
 @Module({
   imports: [
     CommonModule,
+    RedisModule,
     AuthModule,
     OrganizationsModule,
     IntegrationsModule,

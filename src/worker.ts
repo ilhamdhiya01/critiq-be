@@ -15,6 +15,10 @@ async function bootstrap() {
 
   const logger: Logger = app.get(WINSTON_MODULE_NEST_PROVIDER);
   app.useLogger(logger);
+  // On SIGTERM (`docker compose stop worker`, redeploys) Nest runs module
+  // destroy hooks, which lets @nestjs/bullmq close the Worker cleanly
+  // instead of leaving its active job to be detected as stalled later.
+  app.enableShutdownHooks();
 
   // Liveness for docker-compose's healthcheck (Step A.7) — touched every
   // 10s, checked externally via file mtime rather than a network port,
