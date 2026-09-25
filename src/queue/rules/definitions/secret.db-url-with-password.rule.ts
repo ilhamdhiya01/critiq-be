@@ -3,7 +3,9 @@ import { Rule, RuleFinding } from '../rule.interface';
 const DB_URL_PATTERN =
   /(postgres|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s]+:([^@\s]{4,})@/;
 
-const PLACEHOLDER_PATTERN = /^(<.*>|\$\{.*\}|password|changeme)$/i;
+// Masked values (`****`) are placeholders too — e.g. documentation, or
+// Critiq's own redacted snippet `postgres://****:****@` appearing in a test.
+const PLACEHOLDER_PATTERN = /^(<.*>|\$\{.*\}|password|changeme|\*+)$/i;
 
 export const secretDbUrlWithPasswordRule: Rule = {
   id: 'secret.db_url_with_password',

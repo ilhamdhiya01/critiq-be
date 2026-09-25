@@ -10,11 +10,14 @@ describe('config.cors_wildcard_credentials', () => {
     expect(result.hits).toHaveLength(1);
   });
 
-  it.each(['negative-1.ts', 'negative-2.ts'])('does not flag %s', (fixture) => {
-    const result = runRuleAgainstFixture(
-      configCorsWildcardCredentialsRule,
-      fixture,
-    );
-    expect(result.hits).toHaveLength(0);
-  });
+  it.each(['negative-1.ts', 'negative-2.ts', 'negative-3.ts'])(
+    'does not flag %s',
+    (fixture) => {
+      const result = runRuleAgainstFixture(
+        configCorsWildcardCredentialsRule,
+        fixture,
+      );
+      expect(result.hits).toHaveLength(0);
+    },
+  );
 });
