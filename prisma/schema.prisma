@@ -43,6 +43,9 @@ model Organization {
   repoScanConfigs    RepoScanConfig[]
   branchScanPolicies BranchScanPolicy[]
   pullRequests       PullRequest[]
+  scans              Scan[]
+  findings           Finding[]
+
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -208,6 +211,7 @@ model Repository {
   scanConfig     RepoScanConfig?
   branchPolicies BranchScanPolicy[]
   pullRequests   PullRequest[]
+  scans              Scan[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -282,6 +286,41 @@ enum PullRequestState {
   MERGED
 }
 
+enum ScanStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+  SUPERSEDED
+}
+
+enum ScanTrigger {
+  WEBHOOK
+  MANUAL
+  RESCAN
+}
+
+enum ScanErrorCode {
+  PROVIDER_UNREACHABLE
+  DIFF_TOO_LARGE
+  TIMEOUT
+  RULE_CRASH
+  TOKEN_EXPIRED
+}
+
+enum FindingSeverity {
+  CRITICAL
+  MAJOR
+  MINOR
+  INFO
+}
+
+enum FindingSource {
+  STATIC
+  AI
+}
+
+
 // One row per PR/MR, upserted from webhook events only (WebhooksService) —
 // no polling/pull path exists. Deliberately GET-only at this phase (Fase
 // 3): no review/approve fields here, that's the separate `reviews` module
@@ -301,6 +340,13 @@ model PullRequest {
   headSha        String?
   state          PullRequestState
 
+  // Denormalized pointer to the most recent Scan that reached a terminal
+  // state (DONE or FAILED) for this PR — updated only on those transitions,
+  // never on QUEUED/RUNNING, so list views always show the last valid
+  // result while an in-flight scan is surfaced separately as `activeScan`
+  // (computed at query time, not stored).
+  latestScanId String?
+
   // Snapshot of the BranchScanPolicy matching targetBranch at the moment
   // this row was first created (PR opened) — NEVER re-read on update. If
   // BranchScanPolicy for this branch changes later, this PR keeps showing
@@ -313,6 +359,12 @@ model PullRequest {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  latestScan   Scan?        @relation("PullRequestLatestScan", fields: [latestScanId], references: [id], onDelete: SetNull)
+
+  // Every Scan row ever created for this PR (all attempts, all statuses) —
+  // reverse side of Scan.pullRequest. Distinct from `latestScan` above,
+  // which points at just one of these (the most recent terminal one).
+  scans Scan[] @relation("ScanPullRequest")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -323,3 +375,93 @@ model PullRequest {
   @@index([organizationId])
   @@map("pull_requests")
 }
+
+// One row per scan attempt on a PR/MR's diff. `attempt` + the unique
+// constraint below let a manual/rescan trigger insert a fresh row for the
+// same headSha (attempt+1) without colliding with the original webhook-
+// triggered scan for that sha. organizationId is denormalized for the same
+// tenant-isolation reason as every other model here — no join needed to
+// enforce it.
+model Scan {
+  id             String        @id @default(cuid())
+  organizationId String
+  repositoryId   String
+  pullId         String
+  headSha        String
+  baseSha        String?
+  status         ScanStatus
+  trigger        ScanTrigger
+  attempt        Int           @default(1)
+  errorCode      ScanErrorCode?
+  errorMessage   String?       @db.Text
+  diffBytes      Int?
+  filesChanged   Int?
+  findingsCount  Int           @default(0)
+  criticalCount  Int           @default(0)
+
+  // Static rules snapshot at scan time (RulesModule's RULESET_VERSION) —
+  // kept even though only one ruleset version exists today, so a future
+  // ruleset change doesn't leave old scans looking like they used rules
+  // that didn't exist yet when they actually ran.
+  rulesetVersion String
+
+  // True once findings for this scan hit the 500-per-scan cap (see
+  // ScansModule) — the first 500 are still persisted, this just tells the
+  // FE "there were more."
+  findingsTruncated Boolean @default(false)
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  pullRequest  PullRequest  @relation("ScanPullRequest", fields: [pullId], references: [id], onDelete: Cascade)
+  findings     Finding[]
+
+  // Reverse side of PullRequest.latestScanId — a Scan doesn't reference
+  // "its" PullRequest.latestScanId directly (that would be circular); this
+  // is just what Prisma requires to model the relation named above on
+  // PullRequest.
+  latestForPullRequests PullRequest[] @relation("PullRequestLatestScan")
+
+  @@unique([repositoryId, pullId, headSha, attempt])
+  @@index([organizationId, pullId, createdAt(sort: Desc)])
+  @@map("scans")
+}
+
+// One row per rule hit within a scan. `fingerprint` lets the processor
+// dedupe repeated hits of the same issue within one scan (see RulesModule)
+// — it is not used for cross-scan dedup/suppression in this release.
+model Finding {
+  id             String          @id @default(cuid())
+  organizationId String
+  scanId         String
+  source         FindingSource
+  ruleId         String
+  severity       FindingSeverity
+  title          String          @db.VarChar(120)
+  message        String          @db.Text
+  filePath       String
+  lineStart      Int
+  lineEnd        Int
+
+  // Redacted to null for secret.* rules — the raw matched text (an actual
+  // credential) must never be persisted, even to a security-review UI.
+  snippet String? @db.Text
+
+  fingerprint String
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  scan Scan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, scanId])
+  @@index([scanId, filePath, lineStart])
+  @@map("findings")
+}
+
+
+
+
