@@ -1,9 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { Provider, Role, User } from '../../generated/prisma/client';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
+import { SessionUserDto } from './dto/session-user.dto';
 
 export interface JwtPayload {
   sub: string;
@@ -42,6 +43,34 @@ export class AuthService {
   // that are easy to transpose silently at a call site.
   issueSessionToken(payload: JwtPayload): string {
     return this.jwtService.sign(payload);
+  }
+
+  // Backs GET /auth/me. Profile fields (email/name/avatarUrl) always come
+  // from a fresh DB read here — see SessionUserDto's own comment for why
+  // they're deliberately never embedded in the token itself. Session-scoped
+  // fields (activeOrgId/role/onboardingCompleted) still come from the
+  // payload, not re-derived — same rationale as OrgRolesGuard re-verifying
+  // role per :orgId, but there is no :orgId on this route to re-verify
+  // against.
+  async getSessionUser(payload: JwtPayload): Promise<SessionUserDto> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+    });
+    if (!user) {
+      // Token references a user that no longer exists (deleted between
+      // issue and this request) — treat exactly like an invalid token.
+      throw new UnauthorizedException('Invalid session token');
+    }
+    return new SessionUserDto({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatarUrl: user.avatarUrl,
+      activeOrgId: payload.activeOrgId,
+      role: payload.role,
+      provider: payload.provider,
+      onboardingCompleted: payload.onboardingCompleted,
+    });
   }
 
   async loginWithOAuth(profile: OAuthProfile): Promise<{
