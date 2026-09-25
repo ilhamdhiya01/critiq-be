@@ -55,11 +55,11 @@ Roles belong to a **membership** (user × organization), not to the user — the
 same person can hold a different role in each organization they belong to
 (e.g. Admin in one company's org, Viewer in another's).
 
-| Role         | Example                       | Permissions (within that organization)                                                                          |
-| ------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| **Admin**    | Org's tech lead                | Everything a Reviewer can do, plus: connect/disconnect repos, manage branch policy, rules, AI provider, and members (invite & change role) |
-| **Reviewer** | Engineers                      | Review PRs (choose mode), approve / request changes, comment                                                     |
-| **Viewer**   | Stakeholders                   | Read-only: dashboard, insights, activity                                                                         |
+| Role         | Example         | Permissions (within that organization)                                                                                                     |
+| ------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Admin**    | Org's tech lead | Everything a Reviewer can do, plus: connect/disconnect repos, manage branch policy, rules, AI provider, and members (invite & change role) |
+| **Reviewer** | Engineers       | Review PRs (choose mode), approve / request changes, comment                                                                               |
+| **Viewer**   | Stakeholders    | Read-only: dashboard, insights, activity                                                                                                   |
 
 Role checks are enforced server-side via `OrgRolesGuard` (`common/decorators/org-auth.decorator.ts`) on every endpoint scoped to an organization — it re-verifies membership + role against the database for the `:orgId` in the route on every request, rather than trusting a role embedded in the session token, since a token's role is only valid for the organization that was active when it was issued. Never trust the frontend to hide an action as the only safeguard.
 
@@ -84,16 +84,16 @@ These are backend invariants, not UI details:
 
 ## Tech Stack
 
-| Area | Choice | Why |
-|---|---|---|
-| Framework | NestJS 11 | modular DI, first-class TypeScript |
-| Database | PostgreSQL | relational, fits audit log & per-branch policy modeling |
-| ORM | Prisma | type-safe client, straightforward migration workflow |
-| Queue | BullMQ + Redis | async scan/regenerate/rescan jobs, retry/backoff built in |
-| Auth | Passport.js (`@nestjs/passport`) | GitHub: OAuth login for identity today, migrating to a GitHub App installation for repo access (org-level, not a user-scoped token — larger migration, not yet scheduled). GitLab: identity-only OAuth login (`passport-oauth2`, `read_user` scope, one fixed Critiq-owned app on gitlab.com). Repo access is a separate, org-level access token (group or personal) pasted by an Admin and verified against the GitLab API — never derived from anyone's login |
-| Session | JWT (`@nestjs/jwt` + `passport-jwt`) | Bearer token on every authenticated endpoint |
-| Validation | `class-validator` / `class-transformer` | DTO validation at controller boundaries |
-| Config | `@nestjs/config` + `joi` | fail-fast startup if required env vars are missing |
+| Area       | Choice                                  | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Framework  | NestJS 11                               | modular DI, first-class TypeScript                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Database   | PostgreSQL                              | relational, fits audit log & per-branch policy modeling                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ORM        | Prisma                                  | type-safe client, straightforward migration workflow                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Queue      | BullMQ + Redis                          | async scan/regenerate/rescan jobs, retry/backoff built in                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Auth       | Passport.js (`@nestjs/passport`)        | GitHub: OAuth login for identity today, migrating to a GitHub App installation for repo access (org-level, not a user-scoped token — larger migration, not yet scheduled). GitLab: identity-only OAuth login (`passport-oauth2`, `read_user` scope, one fixed Critiq-owned app on gitlab.com). Repo access is a separate, org-level access token (group or personal) pasted by an Admin and verified against the GitLab API — never derived from anyone's login |
+| Session    | JWT (`@nestjs/jwt` + `passport-jwt`)    | Bearer token on every authenticated endpoint                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Validation | `class-validator` / `class-transformer` | DTO validation at controller boundaries                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Config     | `@nestjs/config` + `joi`                | fail-fast startup if required env vars are missing                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 > Dependencies are added incrementally per build phase, not all at once — see Build Roadmap below.
 
@@ -134,18 +134,18 @@ pnpm test:cov      # test coverage
 
 ### Environment Variables
 
-| Variable                  | Description                                                        |
-| -------------------------- | -------------------------------------------------------------------- |
-| `DATABASE_URL`             | PostgreSQL connection string (Prisma)                               |
-| `REDIS_URL`                | Redis connection string (BullMQ, from Fase 4 onward)                |
-| `JWT_SECRET`               | Signing secret for session JWTs                                     |
-| `ENCRYPTION_KEY`           | At-rest encryption key for GitLab access tokens (per-organization) and AI provider API keys |
-| `GITHUB_CLIENT_ID`         | GitHub OAuth App client ID — identity login only; repo access is moving to a GitHub App installation (see `CLAUDE.md`) |
-| `GITHUB_CLIENT_SECRET`     | GitHub OAuth App client secret                                      |
-| `GITHUB_REDIRECT_URL`      | GitHub OAuth callback URL                                           |
-| `GITLAB_CLIENT_ID`         | GitLab.com OAuth App client ID — identity login only, one fixed Critiq-owned app (not per-instance) |
-| `GITLAB_CLIENT_SECRET`     | GitLab.com OAuth App client secret                                  |
-| `GITLAB_REDIRECT_URL`      | GitLab.com OAuth callback URL                                       |
+| Variable               | Description                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`         | PostgreSQL connection string (Prisma)                                                                                  |
+| `REDIS_URL`            | Redis connection string (BullMQ, from Fase 4 onward)                                                                   |
+| `JWT_SECRET`           | Signing secret for session JWTs                                                                                        |
+| `ENCRYPTION_KEY`       | At-rest encryption key for GitLab access tokens (per-organization) and AI provider API keys                            |
+| `GITHUB_CLIENT_ID`     | GitHub OAuth App client ID — identity login only; repo access is moving to a GitHub App installation (see `CLAUDE.md`) |
+| `GITHUB_CLIENT_SECRET` | GitHub OAuth App client secret                                                                                         |
+| `GITHUB_REDIRECT_URL`  | GitHub OAuth callback URL                                                                                              |
+| `GITLAB_CLIENT_ID`     | GitLab.com OAuth App client ID — identity login only, one fixed Critiq-owned app (not per-instance)                    |
+| `GITLAB_CLIENT_SECRET` | GitLab.com OAuth App client secret                                                                                     |
+| `GITLAB_REDIRECT_URL`  | GitLab.com OAuth callback URL                                                                                          |
 
 > GitLab **repo access** credentials (instance URL + access token) are **not**
 > env vars — as of PRD v1.4 they're submitted per-organization by an Admin via
@@ -165,26 +165,26 @@ REST + JSON, prefix `/api/v1`, auth via Bearer token (backed by an httpOnly sess
 
 **Global endpoints** (no organization prefix — either identity-level, or the organization is resolved from context rather than the URL):
 
-| Group               | Examples                                                                                                |
-| -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Auth & session       | `GET /auth/github`, `GET /auth/gitlab` (identity-only, `read_user` scope), `GET /auth/:provider/callback`, `POST /auth/logout`, `GET /me`, `GET/POST/DELETE /me/tokens` |
-| Organizations        | `GET /me/orgs` (list orgs + role, powers the org switcher), `POST /orgs` (self-serve create; never auto-creates an integration — connecting GitLab is always a separate, explicit Admin action) |
-| Webhooks (inbound)   | `POST /webhooks/github`, `POST /webhooks/gitlab` — organization resolved from the connected repo         |
+| Group              | Examples                                                                                                                                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth & session     | `GET /auth/github`, `GET /auth/gitlab` (identity-only, `read_user` scope), `GET /auth/:provider/callback`, `POST /auth/logout`, `GET /me`, `GET/POST/DELETE /me/tokens`                         |
+| Organizations      | `GET /me/orgs` (list orgs + role, powers the org switcher), `POST /orgs` (self-serve create; never auto-creates an integration — connecting GitLab is always a separate, explicit Admin action) |
+| Webhooks (inbound) | `POST /webhooks/github`, `POST /webhooks/gitlab` — organization resolved from the connected repo                                                                                                |
 
 **Everything else is scoped to one organization**, prefixed `/api/v1/orgs/:orgId/...` — role is evaluated from the caller's `Membership` on `:orgId` (403 if not a member or role isn't sufficient), never from a global role on the token:
 
-| Group               | Examples                                                                                                |
-| -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Organization admin   | `PATCH .../` (rename), `GET .../members`, `POST .../invites`, `PUT/DELETE .../members/:userId`           |
-| Dashboard            | `GET .../dashboard/summary`                                                                               |
-| Repositories         | `GET/POST/DELETE .../repos`, `GET/PUT .../repos/:id/protection`, `POST .../repos/:id/rescan`               |
-| Pull Requests        | `GET .../pulls`, `GET .../pulls/:id`, `GET .../pulls/:id/diff`, `PUT .../pulls/:id/mode`, `POST .../pulls/:id/review` |
-| Comments             | `GET/POST .../pulls/:id/comments`                                                                          |
-| Rules                | `GET/PUT .../rules`                                                                                        |
-| Activity & Insights  | `GET .../activity?decision=&mode=`, `GET .../insights?range=8w`                                            |
-| Settings             | `GET/PUT .../settings/provider`, `GET/PUT .../settings/notifications`                                     |
-| Integrations         | `GET .../integrations`, `POST .../integrations/gitlab` (`{"instance_url", "token"}` — verified against the GitLab API, idempotent: calling again replaces the token), `DELETE .../integrations/gitlab`, `GET .../integrations/gitlab/health`, `GET .../integrations/gitlab/candidates` |
-| Search               | `GET .../search?q=` (powers frontend `⌘K`)                                                                |
+| Group               | Examples                                                                                                                                                                                                                                                                               |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Organization admin  | `PATCH .../` (rename), `GET .../members`, `POST .../invites`, `PUT/DELETE .../members/:userId`                                                                                                                                                                                         |
+| Dashboard           | `GET .../dashboard/summary`                                                                                                                                                                                                                                                            |
+| Repositories        | `GET/POST/DELETE .../repos`, `GET/PUT .../repos/:id/protection`, `POST .../repos/:id/rescan`                                                                                                                                                                                           |
+| Pull Requests       | `GET .../pulls`, `GET .../pulls/:id`, `GET .../pulls/:id/diff`, `PUT .../pulls/:id/mode`, `POST .../pulls/:id/review`                                                                                                                                                                  |
+| Comments            | `GET/POST .../pulls/:id/comments`                                                                                                                                                                                                                                                      |
+| Rules               | `GET/PUT .../rules`                                                                                                                                                                                                                                                                    |
+| Activity & Insights | `GET .../activity?decision=&mode=`, `GET .../insights?range=8w`                                                                                                                                                                                                                        |
+| Settings            | `GET/PUT .../settings/provider`, `GET/PUT .../settings/notifications`                                                                                                                                                                                                                  |
+| Integrations        | `GET .../integrations`, `POST .../integrations/gitlab` (`{"instance_url", "token"}` — verified against the GitLab API, idempotent: calling again replaces the token), `DELETE .../integrations/gitlab`, `GET .../integrations/gitlab/health`, `GET .../integrations/gitlab/candidates` |
+| Search              | `GET .../search?q=` (powers frontend `⌘K`)                                                                                                                                                                                                                                             |
 
 `GET .../members` + `PUT/DELETE .../members/:userId` replace the old
 `GET /team` / `PUT /team/:id/role` — those are removed as of PRD v1.2.

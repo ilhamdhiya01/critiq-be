@@ -25,11 +25,19 @@ export interface GitlabMergeRequestPayload {
     target_branch: string;
     source_branch: string;
     last_commit?: { id: string };
+    // open | close | reopen | update | merge | approved | ... — decides
+    // whether this delivery should trigger a scan (see WebhooksService).
+    action?: string;
+    // Previous head sha, present on `update` only when new commits were
+    // pushed — NOT the merge base, so it is never stored as baseSha.
+    oldrev?: string;
   };
   user?: { username: string };
 }
 
 export interface GithubPullRequestPayload {
+  // opened | synchronize | reopened | closed | edited | labeled | ...
+  action?: string;
   repository: { id: number };
   pull_request?: {
     number: number;
@@ -38,7 +46,7 @@ export interface GithubPullRequestPayload {
     merged: boolean;
     user?: { login: string };
     head: { sha: string; ref: string };
-    base: { ref: string };
+    base: { ref: string; sha?: string };
   };
 }
 
@@ -93,6 +101,12 @@ export function isGitlabMergeRequestPayload(
     ) {
       return false;
     }
+    if (attrs.action !== undefined && typeof attrs.action !== 'string') {
+      return false;
+    }
+    if (attrs.oldrev !== undefined && typeof attrs.oldrev !== 'string') {
+      return false;
+    }
   }
   // Same story: optional (maps to nullable authorUsername), but validated
   // if the provider did include it.
@@ -112,6 +126,9 @@ export function isGithubPullRequestPayload(
     return false;
   }
   if (!isRecord(value.repository) || typeof value.repository.id !== 'number') {
+    return false;
+  }
+  if (value.action !== undefined && typeof value.action !== 'string') {
     return false;
   }
   // Absent for the non-pull_request events a GitHub App subscription also
@@ -146,6 +163,9 @@ export function isGithubPullRequestPayload(
       return false;
     }
     if (!isRecord(pr.base) || typeof pr.base.ref !== 'string') {
+      return false;
+    }
+    if (pr.base.sha !== undefined && typeof pr.base.sha !== 'string') {
       return false;
     }
     // Same story: optional (maps to nullable authorUsername).
