@@ -16,7 +16,16 @@ import { SlugService } from './slug/slug.service';
   imports: [
     WinstonModule.forRoot({
       format: winston.format.json(),
-      transports: [new winston.transports.Console()],
+      transports: [
+        // LOG_LEVEL is read straight from the environment rather than
+        // ConfigService: this module is what *provides* ConfigModule, so
+        // nothing injectable exists yet at this point. Defaults to 'info',
+        // which includes PrismaService's per-query events — useful in a
+        // server, noise in a one-shot CLI script, hence the override.
+        new winston.transports.Console({
+          level: process.env.LOG_LEVEL ?? 'info',
+        }),
+      ],
     }),
     ConfigModule.forRoot({
       isGlobal: true,

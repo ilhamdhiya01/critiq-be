@@ -4,6 +4,12 @@ export const validationSchema = Joi.object({
   NODE_ENV: Joi.string()
     .valid('development', 'production', 'test')
     .default('development'),
+  // Console transport threshold (CommonModule). 'info' emits PrismaService's
+  // per-query log; 'warn' silences it — what the one-shot CLI scripts use so
+  // their output is readable.
+  LOG_LEVEL: Joi.string()
+    .valid('error', 'warn', 'info', 'debug', 'verbose')
+    .default('info'),
   DATABASE_URL: Joi.string().required(),
   GITHUB_CLIENT_ID: Joi.string().required(),
   GITHUB_CLIENT_SECRET: Joi.string().required(),
