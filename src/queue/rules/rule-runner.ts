@@ -4,11 +4,24 @@ import { MAX_LINE_LENGTH } from './rules.constants';
 import { isSecretSkippedPath } from './path-filter';
 import { FilterReason, filterValue } from './value-filter';
 
+// What survives redaction and is safe to carry past the runner: enough to
+// tell two credentials apart for fingerprinting, never enough to use one.
+// A four-character prefix and a length are strictly weaker than the
+// `snippet` already persisted, and far weaker than a hash of the value.
+export interface FindingIdentity {
+  key: string;
+  valuePrefix: string;
+  valueLength: number;
+}
+
 export interface RuleHit extends RuleFinding {
   ruleId: string;
   severity: 'critical';
   title: string;
   message: string;
+  // Present only for rules that emitted a candidate — i.e. where a real
+  // value exists to discriminate on.
+  identity?: FindingIdentity;
 }
 
 export interface RuleCrash {
@@ -146,6 +159,9 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
         // unredacted value, and nothing downstream — hit, DB row or log —
         // may ever see them. Listing the kept fields explicitly rather than
         // spreading-and-deleting makes that guarantee checkable at a glance.
+        // What crosses this boundary instead is `identity`: a four-char
+        // prefix and a length, which the processor needs to tell two
+        // credentials apart when fingerprinting.
         hits.push({
           lineStart: finding.lineStart,
           lineEnd: finding.lineEnd,
@@ -154,6 +170,11 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
           severity: rule.severity,
           title: rule.title,
           message: rule.message,
+          identity: finding.candidate && {
+            key: finding.candidate.key ?? '',
+            valuePrefix: finding.candidate.value.slice(0, 4),
+            valueLength: finding.candidate.value.length,
+          },
         });
       }
     } catch (error) {
