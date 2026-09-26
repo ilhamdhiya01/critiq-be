@@ -154,13 +154,16 @@ export class ScanProcessor
         continue;
       }
 
-      const result = runRulesForFile(
-        RULES,
-        file.path,
-        detectLanguage(file.path),
+      const result = runRulesForFile({
+        rules: RULES,
+        filePath: file.path,
+        language: detectLanguage(file.path),
         addedLines,
         budgetState,
-      );
+        status: file.status,
+        previousPath: file.previousPath,
+        sizeBytes: Buffer.byteLength(file.patch ?? '', 'utf8'),
+      });
       ruleRuns += result.ruleRuns;
       for (const crash of result.crashes) {
         ruleCrashes += 1;
