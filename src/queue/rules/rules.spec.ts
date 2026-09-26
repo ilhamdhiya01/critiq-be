@@ -34,6 +34,7 @@ describe('RULES', () => {
         'secret.hardcoded_password',
         'secret.jwt_literal',
         'secret.private_key_block',
+        'secret.sensitive_file_added',
         'secret.slack_webhook',
       ].sort(),
     );

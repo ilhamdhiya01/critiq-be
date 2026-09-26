@@ -117,6 +117,15 @@ export class ScanProcessor
     const scannableFiles = diff.files.filter(
       (file) => file.patch !== null && !isIgnoredPath(file.path),
     );
+    // File rules judge a path, not its contents, so they must also see files
+    // with no patch — which is exactly how a real credential file arrives.
+    // Providers omit the patch for binary blobs and oversized diffs, so
+    // filtering on `patch !== null` first would make
+    // secret.sensitive_file_added blind to a genuine 2048-bit private key
+    // while still passing on a small fixture.
+    const fileRuleCandidates = diff.files.filter(
+      (file) => !isIgnoredPath(file.path),
+    );
     // Counted over the files that will actually be scanned — generated
     // files (lockfiles, dist/) shouldn't push a normal PR over the limit.
     const diffBytes = scannableFiles.reduce(
@@ -133,7 +142,8 @@ export class ScanProcessor
       this.logger.warn('scan.diff_truncated', log);
     }
 
-    // 4. Run rules on added lines only.
+    // 4. Run rules: file rules on every kept file, line rules on the ones
+    // with a parseable patch.
     await job.updateProgress({ step: 'rules', pct: 60 });
     const rulesStartedAt = Date.now();
     const budgetState = { elapsedMs: 0 };
@@ -141,6 +151,35 @@ export class ScanProcessor
     let ruleRuns = 0;
     let ruleCrashes = 0;
     let budgetExceeded = false;
+
+    const fileRules = RULES.filter((rule) => rule.kind === 'file');
+    const lineRules = RULES.filter((rule) => rule.kind !== 'file');
+
+    for (const file of fileRuleCandidates) {
+      const result = runRulesForFile({
+        rules: fileRules,
+        filePath: file.path,
+        language: detectLanguage(file.path),
+        // File rules ignore these by definition; passing none keeps it
+        // obvious that a file rule deciding on content would be a bug.
+        addedLines: [],
+        budgetState,
+        status: file.status,
+        previousPath: file.previousPath,
+      });
+      ruleRuns += result.ruleRuns;
+      for (const crash of result.crashes) {
+        ruleCrashes += 1;
+        this.logger.warn('rule.crash', {
+          ...log,
+          ...crash,
+          filePath: file.path,
+        });
+      }
+      for (const hit of result.hits) {
+        hits.push({ ...hit, filePath: file.path });
+      }
+    }
 
     for (const file of scannableFiles) {
       const addedLines = parsePatch(file.patch ?? '')
@@ -155,7 +194,7 @@ export class ScanProcessor
       }
 
       const result = runRulesForFile({
-        rules: RULES,
+        rules: lineRules,
         filePath: file.path,
         language: detectLanguage(file.path),
         addedLines,
