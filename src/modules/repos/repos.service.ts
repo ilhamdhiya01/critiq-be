@@ -15,8 +15,12 @@ import { Prisma } from '../../generated/prisma/client';
 import {
   IntegrationState,
   Provider,
+  PullRequestState,
   ReviewPolicy,
+  ScanTrigger,
 } from '../../generated/prisma/enums';
+import { ScanQueueService } from '../../queue/scan-queue.service';
+import { RULESET_VERSION } from '../../queue/rules/rules.constants';
 import {
   GithubAppService,
   type GithubBranch,
@@ -35,6 +39,7 @@ import {
 } from './dto/create-repos-response.dto';
 import { RepositoryListItemDto } from './dto/repository-list-item.dto';
 import { RepositoryDetailDto } from './dto/repository-detail.dto';
+import { RescanResponseDto } from './dto/rescan-response.dto';
 
 // Mirrors GithubInstallIntentDto's returnTo mapping pattern — lowercase
 // wire value in, Prisma enum out, kept as a lookup table rather than an
@@ -66,6 +71,7 @@ export class ReposService {
     private readonly githubAppService: GithubAppService,
     private readonly gitlabApiService: GitlabApiService,
     private readonly configService: ConfigService,
+    private readonly scanQueue: ScanQueueService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
@@ -374,6 +380,73 @@ export class ReposService {
           })
         : null,
     });
+  }
+
+  // Re-runs scans for a repo's open PRs.
+  //
+  // `staleOnly` is the mode that matters in practice: after a ruleset
+  // version bump, PRs that were already scanned keep showing results the
+  // old rules produced until someone pushes to them. This lets an admin
+  // refresh a repo deliberately, rather than every deploy kicking off a
+  // scan wave across every org at once.
+  async rescanOpenPulls(
+    organizationId: string,
+    repositoryId: string,
+    staleOnly: boolean,
+  ): Promise<RescanResponseDto> {
+    const repository = await this.prisma.repository.findUnique({
+      where: { id: repositoryId },
+      select: { id: true, organizationId: true, provider: true },
+    });
+    if (!repository || repository.organizationId !== organizationId) {
+      throw new NotFoundException('Repository not found.');
+    }
+
+    const pulls = await this.prisma.pullRequest.findMany({
+      where: { repositoryId, state: PullRequestState.OPEN },
+      select: {
+        id: true,
+        headSha: true,
+        latestScan: { select: { rulesetVersion: true } },
+      },
+    });
+
+    let enqueued = 0;
+    let skippedUpToDate = 0;
+
+    for (const pull of pulls) {
+      // No head sha means there is no commit to check out — nothing a scan
+      // could run against.
+      if (!pull.headSha) {
+        continue;
+      }
+      if (staleOnly && pull.latestScan?.rulesetVersion === RULESET_VERSION) {
+        skippedUpToDate += 1;
+        continue;
+      }
+
+      await this.scanQueue.enqueue({
+        organizationId,
+        repositoryId,
+        pullId: pull.id,
+        headSha: pull.headSha,
+        // Informational only, and unavailable here — the processor diffs
+        // against the provider's merge base, not this value.
+        baseSha: null,
+        provider: repository.provider,
+        trigger: ScanTrigger.RESCAN,
+      });
+      enqueued += 1;
+    }
+
+    this.logger.info('repo.rescan_requested', {
+      orgId: organizationId,
+      repoId: repositoryId,
+      staleOnly,
+      enqueued,
+      skippedUpToDate,
+    });
+    return new RescanResponseDto({ enqueued, skippedUpToDate });
   }
 
   private async findScanConfigOrThrow(

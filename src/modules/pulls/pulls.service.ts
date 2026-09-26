@@ -29,6 +29,7 @@ import {
 import { PullRequestListItemDto } from './dto/pull-request-list-item.dto';
 import { PullRequestOrgListItemDto } from './dto/pull-request-org-list-item.dto';
 import { PullRequestDetailDto } from './dto/pull-request-detail.dto';
+import { FindingDto, ScanSummaryDto } from './dto/scan-summary.dto';
 import {
   PullRequestDiffDto,
   PullRequestFileDto,
@@ -158,7 +159,15 @@ export class PullsService {
   ): Promise<PullRequestOrgListItemDto[]> {
     const pulls = await this.prisma.pullRequest.findMany({
       where: { organizationId },
-      include: { repository: { select: { path: true } } },
+      include: {
+        repository: { select: { path: true } },
+        // `latestScan`, not `scans`: the latter returns every attempt ever
+        // made for this PR (QUEUED, FAILED, SUPERSEDED included), while this
+        // pointer is only moved on a terminal transition — so the list shows
+        // the last valid result and never a count from an in-flight or
+        // discarded scan. See PullRequest.latestScanId in schema.prisma.
+        latestScan: { select: { criticalCount: true } },
+      },
       orderBy: { updatedAt: 'desc' },
     });
     return pulls.map(
@@ -174,6 +183,11 @@ export class PullsService {
           sourceBranch: pull.sourceBranch,
           targetBranch: pull.targetBranch,
           state: pull.state,
+          // 0 when the PR has never completed a scan (just opened, or every
+          // attempt so far failed) — the list reads as "no criticals", which
+          // is the right default here. Whether a scan ran at all is a
+          // separate signal, not folded into this count.
+          criticalCount: pull.latestScan?.criticalCount ?? 0,
           effectivePolicy: pull.effectivePolicy,
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
@@ -188,7 +202,28 @@ export class PullsService {
   ): Promise<PullRequestDetailDto> {
     const pull = await this.prisma.pullRequest.findUnique({
       where: { id: pullRequestId },
-      include: { repository: { select: { path: true } } },
+      include: {
+        repository: { select: { path: true } },
+        // `latestScan`, not `scans`: the latter is every attempt ever made
+        // for this PR (FAILED and SUPERSEDED included). This pointer only
+        // moves on a terminal transition, so the review page shows one
+        // complete result instead of a list the caller has to pick from.
+        latestScan: {
+          include: {
+            // Severity is an enum ordered CRITICAL -> INFO in the schema, so
+            // ascending sort puts criticals first, matching how the review
+            // page lists them. File path and line break ties, so the order
+            // is stable between requests.
+            findings: {
+              orderBy: [
+                { severity: 'asc' },
+                { filePath: 'asc' },
+                { lineStart: 'asc' },
+              ],
+            },
+          },
+        },
+      },
     });
     // Checked against the row, not filtered in `where` — a PR that exists
     // but belongs to another org/repo surfaces identically to one that
@@ -214,6 +249,39 @@ export class PullsService {
       headSha: pull.headSha,
       state: pull.state,
       effectivePolicy: pull.effectivePolicy,
+      latestScan: pull.latestScan
+        ? new ScanSummaryDto({
+            id: pull.latestScan.id,
+            status: pull.latestScan.status,
+            trigger: pull.latestScan.trigger,
+            attempt: pull.latestScan.attempt,
+            headSha: pull.latestScan.headSha,
+            findingsCount: pull.latestScan.findingsCount,
+            criticalCount: pull.latestScan.criticalCount,
+            findingsTruncated: pull.latestScan.findingsTruncated,
+            filesChanged: pull.latestScan.filesChanged,
+            diffBytes: pull.latestScan.diffBytes,
+            rulesetVersion: pull.latestScan.rulesetVersion,
+            errorMessage: pull.latestScan.errorMessage,
+            startedAt: pull.latestScan.startedAt,
+            finishedAt: pull.latestScan.finishedAt,
+            findings: pull.latestScan.findings.map(
+              (finding) =>
+                new FindingDto({
+                  id: finding.id,
+                  source: finding.source,
+                  ruleId: finding.ruleId,
+                  severity: finding.severity,
+                  title: finding.title,
+                  message: finding.message,
+                  filePath: finding.filePath,
+                  lineStart: finding.lineStart,
+                  lineEnd: finding.lineEnd,
+                  snippet: finding.snippet,
+                }),
+            ),
+          })
+        : null,
       createdAt: pull.createdAt,
       updatedAt: pull.updatedAt,
     });
