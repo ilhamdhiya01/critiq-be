@@ -128,15 +128,32 @@ function isPatterned(value: string): boolean {
     return true;
   }
 
+  // A keyboard run only means "someone filled this field" when it accounts
+  // for most of the value, so what matters is the longest run present, not
+  // whether any 8-character run appears at all. `abcdEFGH1234ijkl5678` is a
+  // plausible generated credential that happens to contain `abcdefgh`;
+  // rejecting it on presence alone silently drops real findings, while
+  // `abcdefghijklmnop` is almost entirely one run and is noise.
   const lower = value.toLowerCase();
+  const longestRun = longestSequentialRun(lower);
+  return longestRun >= 8 && longestRun / value.length >= 0.6;
+}
+
+// Length of the longest substring of `value` that appears verbatim in one
+// of the keyboard/alphabet runs.
+function longestSequentialRun(value: string): number {
+  let longest = 0;
   for (const run of SEQUENTIAL_RUNS) {
-    for (let start = 0; start + 8 <= run.length; start += 1) {
-      if (lower.includes(run.slice(start, start + 8))) {
-        return true;
+    for (let start = 0; start < value.length; start += 1) {
+      for (let end = value.length; end > start + longest; end -= 1) {
+        if (run.includes(value.slice(start, end))) {
+          longest = end - start;
+          break;
+        }
       }
     }
   }
-  return false;
+  return longest;
 }
 
 function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
