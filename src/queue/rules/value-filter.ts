@@ -70,7 +70,11 @@ const PLACEHOLDER_EXACT = ['test', 'null', 'none', 'undefined', 'changeme'];
 // 4. The value has a structure that rules out it being a credential.
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SEMVER_PATTERN = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+// Pre-release and build metadata are separate optional groups, in that
+// order — `1.2.3-beta.11+build.9` carries both, and a single `[-+]…` group
+// only matches one of them.
+const SEMVER_PATTERN =
+  /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?/;
 const IPV4_PATTERN = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;

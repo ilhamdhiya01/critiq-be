@@ -1,7 +1,10 @@
 import { Rule, RuleFinding } from '../rule.interface';
 
+// `postgresql` as well as `postgres`: that is the spelling PostgreSQL's own
+// docs and Prisma use, so it is what a real DATABASE_URL almost always
+// says — this repo's included. Matching only `postgres` missed it.
 const DB_URL_PATTERN =
-  /(postgres|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s]+:([^@\s]{4,})@/;
+  /(postgresql|postgres|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s]+:([^@\s]{4,})@/;
 
 // Masked values (`****`) are placeholders too — e.g. documentation, or
 // Critiq's own redacted snippet `postgres://****:****@` appearing in a test.
