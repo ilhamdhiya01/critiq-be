@@ -52,8 +52,12 @@ export const SECRET_SKIP_GLOBS = [
   '**/*.sample.*',
   '**/*.md',
   '**/*.mdx',
-  '**/*.txt',
   '**/*.rst',
+  // `*.txt` is deliberately NOT here, though the spec listed it with the
+  // other prose formats: a private key pasted into `key.txt` or
+  // `credentials.txt` is a real and common way to leak one, and skipping
+  // the extension outright would make secret.private_key_block unable to
+  // see its most likely input.
   '**/*.test.*',
   '**/*.spec.*',
   '**/__tests__/**',

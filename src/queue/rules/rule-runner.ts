@@ -1,6 +1,8 @@
 import { Rule, RuleFileContext, RuleFinding } from './rule.interface';
 import { ruleAppliesTo } from './language-detector';
 import { MAX_LINE_LENGTH } from './rules.constants';
+import { isSecretSkippedPath } from './path-filter';
+import { FilterReason, filterValue } from './value-filter';
 
 export interface RuleHit extends RuleFinding {
   ruleId: string;
@@ -16,9 +18,19 @@ export interface RuleCrash {
   errorName: string;
 }
 
+export interface FilteredCandidate {
+  ruleId: string;
+  line: number;
+  reason: FilterReason;
+}
+
 export interface RunRulesResult {
   hits: RuleHit[];
   crashes: RuleCrash[];
+  // Candidates ValueFilter rejected. Surfaced so the caller can log them at
+  // debug for tuning — never persisted, and deliberately carrying no value
+  // or line text.
+  filtered: FilteredCandidate[];
   // How many applicable rules actually executed on this file — lets the
   // caller detect "every rule crashed" (ruleRuns > 0 && crashes === ruleRuns).
   ruleRuns: number;
@@ -67,11 +79,14 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
   } = input;
   const hits: RuleHit[] = [];
   const crashes: RuleCrash[] = [];
+  const filtered: FilteredCandidate[] = [];
   let ruleRuns = 0;
 
   if (budgetState.elapsedMs >= RULE_BUDGET_MS) {
-    return { hits, crashes, ruleRuns, budgetExceeded: true };
+    return { hits, crashes, filtered, ruleRuns, budgetExceeded: true };
   }
+
+  const secretRulesSkipped = isSecretSkippedPath(filePath);
 
   // Clipped rather than dropped, so a long line (e.g. a base64 blob that is
   // actually a key) still gets a chance to match on its first N characters.
@@ -94,13 +109,47 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
     if (!ruleAppliesTo(rule.languages, language)) {
       continue;
     }
+    // Documentation, example env files and test fixtures are where fake
+    // credentials legitimately live. Checked as a family prefix rather than
+    // a per-rule opt-in so a rule added later can't forget to honour it.
+    if (secretRulesSkipped && rule.id.startsWith('secret.')) {
+      continue;
+    }
 
     ruleRuns += 1;
     const ruleStartedAt = Date.now();
     try {
       for (const finding of rule.test(ctx)) {
+        // ValueFilter decides whether a credential-shaped match is really a
+        // credential. Three exemptions, all expressed declaratively: a rule
+        // that emitted no candidate has nothing to filter; file rules match
+        // on path alone; and provider rules whose prefix already proves
+        // provenance opt out via skipValueFilter (AWS publishes
+        // AKIAIOSFODNN7EXAMPLE, which reads exactly like a placeholder).
+        if (
+          finding.candidate &&
+          rule.kind !== 'file' &&
+          !rule.skipValueFilter
+        ) {
+          const reason = filterValue(finding.candidate);
+          if (reason) {
+            filtered.push({
+              ruleId: rule.id,
+              line: finding.candidate.line,
+              reason,
+            });
+            continue;
+          }
+        }
+
+        // `candidate` is dropped here: it holds the raw line and the
+        // unredacted value, and nothing downstream — hit, DB row or log —
+        // may ever see them. Listing the kept fields explicitly rather than
+        // spreading-and-deleting makes that guarantee checkable at a glance.
         hits.push({
-          ...finding,
+          lineStart: finding.lineStart,
+          lineEnd: finding.lineEnd,
+          snippet: finding.snippet,
           ruleId: rule.id,
           severity: rule.severity,
           title: rule.title,
@@ -116,9 +165,9 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
     budgetState.elapsedMs += Date.now() - ruleStartedAt;
 
     if (budgetState.elapsedMs >= RULE_BUDGET_MS) {
-      return { hits, crashes, ruleRuns, budgetExceeded: true };
+      return { hits, crashes, filtered, ruleRuns, budgetExceeded: true };
     }
   }
 
-  return { hits, crashes, ruleRuns, budgetExceeded: false };
+  return { hits, crashes, filtered, ruleRuns, budgetExceeded: false };
 }
