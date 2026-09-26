@@ -1,4 +1,8 @@
-export const RULESET_VERSION = '2026.09';
+// Bumped whenever the rules change what they would find on the same diff.
+// ScanQueueService compares a PR's last scan against this and re-scans when
+// they differ, so a bump makes every open PR's next webhook produce fresh
+// results instead of serving a verdict the old rules reached.
+export const RULESET_VERSION = '2026.09.2';
 
 // Paths matching any of these are skipped entirely before any rule runs:
 // generated/vendored/binary content a rule could never meaningfully flag.

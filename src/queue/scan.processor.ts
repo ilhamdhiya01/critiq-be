@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,9 +18,9 @@ import { PullsService } from '../modules/pulls/pulls.service';
 import { parsePatch } from './diff/diff-parser';
 import { detectLanguage } from './rules/language-detector';
 import { isIgnoredPath } from './rules/path-filter';
-import { RuleHit, runRulesForFile } from './rules/rule-runner';
+import { runRulesForFile } from './rules/rule-runner';
 import { RULES } from './rules/rules';
-import { RULESET_VERSION } from './rules/rules.constants';
+import { LocatedHit, dedupeFindings } from './dedupe-findings';
 import {
   classifyProviderError,
   sanitizeErrorMessage,
@@ -32,21 +31,6 @@ import { SCAN_QUEUE_NAME } from './scan-queue.service';
 
 const MAX_FINDINGS_PER_SCAN = 500;
 const SCAN_FAILED_NOTIFY_THROTTLE_SECONDS = 3600;
-
-interface LocatedHit extends RuleHit {
-  filePath: string;
-}
-
-interface PreparedFinding {
-  ruleId: string;
-  title: string;
-  message: string;
-  filePath: string;
-  lineStart: number;
-  lineEnd: number;
-  snippet: string | null;
-  fingerprint: string;
-}
 
 type LogContext = Record<string, unknown>;
 
@@ -246,7 +230,7 @@ export class ScanProcessor
     }
 
     // 5. Dedupe + cap.
-    const deduped = this.dedupe(hits).sort(
+    const deduped = dedupeFindings(hits).sort(
       (a, b) =>
         a.filePath.localeCompare(b.filePath) || a.lineStart - b.lineStart,
     );
@@ -273,7 +257,14 @@ export class ScanProcessor
           findingsCount: findings.length,
           criticalCount: findings.length,
           findingsTruncated,
-          rulesetVersion: RULESET_VERSION,
+          // rulesetVersion is deliberately NOT written here. It is set at
+          // enqueue (ScanQueueService) and describes the ruleset the scan
+          // was created under, which is what the stale-ruleset check
+          // compares against. Re-stamping it at persist time would let a
+          // scan created under the old ruleset but executed by an already-
+          // upgraded worker record the new version — and the next webhook
+          // for that sha would then wrongly conclude it is up to date,
+          // silently defeating rescans for the length of a rollout.
           errorCode: null,
           errorMessage: null,
         },
@@ -442,43 +433,6 @@ export class ScanProcessor
         'Scan exceeded SCAN_JOB_TIMEOUT_MS.',
       );
     }
-  }
-
-  // Same fingerprint → one finding, line range widened. Secret findings
-  // (and any redacted ones) fingerprint by line number instead of snippet:
-  // their snippets are masked (e.g. every AWS key becomes "AKIA****"), so a
-  // snippet-based key would merge two different leaked keys on lines 3 and
-  // 40 into one misleading 3–40 finding — and hashing the raw line instead
-  // would store an unsalted hash of the secret itself.
-  private dedupe(hits: LocatedHit[]): PreparedFinding[] {
-    const byFingerprint = new Map<string, PreparedFinding>();
-    for (const hit of hits) {
-      const key =
-        hit.snippet === null || hit.ruleId.startsWith('secret.')
-          ? `line:${hit.lineStart}`
-          : hit.snippet.trim().replace(/\s+/g, ' ');
-      const fingerprint = createHash('sha1')
-        .update(`${hit.ruleId}\0${hit.filePath}\0${key}`)
-        .digest('hex');
-
-      const existing = byFingerprint.get(fingerprint);
-      if (existing) {
-        existing.lineStart = Math.min(existing.lineStart, hit.lineStart);
-        existing.lineEnd = Math.max(existing.lineEnd, hit.lineEnd);
-        continue;
-      }
-      byFingerprint.set(fingerprint, {
-        ruleId: hit.ruleId,
-        title: hit.title,
-        message: hit.message,
-        filePath: hit.filePath,
-        lineStart: hit.lineStart,
-        lineEnd: hit.lineEnd,
-        snippet: hit.snippet,
-        fingerprint,
-      });
-    }
-    return [...byFingerprint.values()];
   }
 
   // Log stand-in for the future notifications module, throttled to one per

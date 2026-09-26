@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   Req,
   Res,
 } from '@nestjs/common';
@@ -68,6 +69,25 @@ export class ReposController {
     @Body() dto: UpdateScanConfigDto,
   ) {
     return this.reposService.updateScanConfig(orgId, id, dto);
+  }
+
+  // Admin only, same gating as every other repo-config mutation: this
+  // enqueues real work against the org's provider rate limits.
+  //
+  // `?stale=1` is the mode this exists for — re-scan only the open PRs
+  // whose last result predates the current ruleset. Without it, every open
+  // PR is re-scanned. Deliberately admin-triggered per repo rather than
+  // automatic on deploy, so a ruleset bump doesn't start a scan wave
+  // across every organization at once.
+  @Post(':id/rescan')
+  @OrgAuth([Role.ADMIN])
+  @ResponseMessage('Rescan enqueued')
+  rescan(
+    @Param('orgId') orgId: string,
+    @Param('id') id: string,
+    @Query('stale') stale?: string,
+  ) {
+    return this.reposService.rescanOpenPulls(orgId, id, stale === '1');
   }
 
   // Finishing the wizard is an Admin action (F2), same as connecting a
