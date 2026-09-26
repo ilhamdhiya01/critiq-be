@@ -2,6 +2,7 @@ import { Rule } from './rule.interface';
 import { secretAwsAccessKeyRule } from './definitions/secret.aws-access-key.rule';
 import { secretAssignmentLiteralRule } from './definitions/secret.assignment-literal.rule';
 import { secretPrivateKeyBlockRule } from './definitions/secret.private-key-block.rule';
+import { secretSensitiveFileAddedRule } from './definitions/secret.sensitive-file-added.rule';
 import { secretHardcodedPasswordRule } from './definitions/secret.hardcoded-password.rule';
 import { secretGithubTokenRule } from './definitions/secret.github-token.rule';
 import { secretGitlabTokenRule } from './definitions/secret.gitlab-token.rule';
@@ -23,6 +24,7 @@ export const RULES: Rule[] = [
   secretAwsAccessKeyRule,
   secretAssignmentLiteralRule,
   secretPrivateKeyBlockRule,
+  secretSensitiveFileAddedRule,
   secretHardcodedPasswordRule,
   secretGithubTokenRule,
   secretGitlabTokenRule,
