@@ -13,3 +13,17 @@ services:
   app:
     env_file:
       - .env.compose
+
+  # Published to the host only here, never in docker-compose.yml: on the VPS
+  # nothing outside the Compose network may reach Redis, but `pnpm
+  # start:worker:dev` and `pnpm start:dev` run as plain Node processes and
+  # reach it over localhost. Bound to 127.0.0.1 so it stays off the local
+  # network even on shared Wi-Fi.
+  #
+  # `db` deliberately gets no such mapping: a developer machine is likely to
+  # already have Postgres on 5432 (this one does), so publishing the
+  # container there fails on a port clash. Point DATABASE_URL at whichever
+  # Postgres you actually want instead — see .env's comment block.
+  redis:
+    ports:
+      - '127.0.0.1:6379:6379'
