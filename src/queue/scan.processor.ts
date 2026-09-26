@@ -173,6 +173,16 @@ export class ScanProcessor
           filePath: file.path,
         });
       }
+      // Debug level, and carrying only the reason — never the value that was
+      // rejected. This is the feedback loop for tuning ValueFilter: a rule
+      // firing on real credentials that get filtered shows up here.
+      for (const rejected of result.filtered) {
+        this.logger.debug('secret.filtered', {
+          ...log,
+          ...rejected,
+          filePath: file.path,
+        });
+      }
       for (const hit of result.hits) {
         hits.push({ ...hit, filePath: file.path });
       }
