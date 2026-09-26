@@ -63,12 +63,41 @@ export function loadFixtureAsAddedLines(
   return { filePath: fixtureName, addedLines };
 }
 
-export function runRuleAgainstFixture(rule: Rule, fixtureName: string) {
+// `overrides` exists for rules that key on something a fixture file cannot
+// express by being a file: a diff status (file rules), or a path that has to
+// look like a real repo path rather than the bare fixture name (skip-list
+// behaviour, e.g. `src/payment.test.ts` vs `src/payment.ts`).
+export interface FixtureOverrides {
+  filePath?: string;
+  status?: 'added' | 'removed' | 'modified' | 'renamed';
+  previousPath?: string | null;
+  sizeBytes?: number;
+}
+
+export function runRuleAgainstFixture(
+  rule: Rule,
+  fixtureName: string,
+  overrides: FixtureOverrides = {},
+) {
   const { filePath, addedLines } = loadFixtureAsAddedLines(
     rule.id,
     fixtureName,
   );
+  const effectivePath = overrides.filePath ?? filePath;
+  // Language comes from the fixture's own name even when filePath is
+  // overridden: the override exists to control path-based behaviour, and a
+  // fixture named `positive-1.ts` is still TypeScript wherever it pretends
+  // to live.
   const language = detectLanguage(fixtureName);
   const budgetState = { elapsedMs: 0 };
-  return runRulesForFile([rule], filePath, language, addedLines, budgetState);
+  return runRulesForFile({
+    rules: [rule],
+    filePath: effectivePath,
+    language,
+    addedLines,
+    budgetState,
+    status: overrides.status,
+    previousPath: overrides.previousPath,
+    sizeBytes: overrides.sizeBytes,
+  });
 }

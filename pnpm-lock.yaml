@@ -71,6 +71,9 @@ importers:
       joi:
         specifier: ^18.2.8
         version: 18.2.8
+      minimatch:
+        specifier: ^10.2.6
+        version: 10.2.6
       nest-winston:
         specifier: ^1.10.2
         version: 1.10.2(@nestjs/common@11.2.3(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(winston@3.19.0)
@@ -180,6 +183,9 @@ importers:
       prisma:
         specifier: 7.10.0
         version: 7.10.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@5.9.3)
+      safe-regex2:
+        specifier: ^5.1.1
+        version: 5.1.1
       source-map-support:
         specifier: ^0.5.21
         version: 0.5.21

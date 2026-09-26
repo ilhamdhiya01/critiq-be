@@ -25,8 +25,12 @@ describe('runRulesForFile', () => {
       test: () => [{ lineStart: 1, lineEnd: 1, snippet: 'hello' }],
     };
 
-    const result = runRulesForFile([crashing, working], 'a.ts', 'js', lines, {
-      elapsedMs: 0,
+    const result = runRulesForFile({
+      rules: [crashing, working],
+      filePath: 'a.ts',
+      language: 'js',
+      addedLines: lines,
+      budgetState: { elapsedMs: 0 },
     });
 
     expect(result.ruleRuns).toBe(2);
@@ -44,8 +48,12 @@ describe('runRulesForFile', () => {
       test: () => [{ lineStart: 1, lineEnd: 1, snippet: null }],
     };
 
-    const result = runRulesForFile([pyOnly], 'a.ts', 'js', lines, {
-      elapsedMs: 0,
+    const result = runRulesForFile({
+      rules: [pyOnly],
+      filePath: 'a.ts',
+      language: 'js',
+      addedLines: lines,
+      budgetState: { elapsedMs: 0 },
     });
 
     expect(result.ruleRuns).toBe(0);
@@ -59,8 +67,12 @@ describe('runRulesForFile', () => {
       test: () => [{ lineStart: 1, lineEnd: 1, snippet: null }],
     };
 
-    const result = runRulesForFile([rule], 'a.ts', 'js', lines, {
-      elapsedMs: 10_000,
+    const result = runRulesForFile({
+      rules: [rule],
+      filePath: 'a.ts',
+      language: 'js',
+      addedLines: lines,
+      budgetState: { elapsedMs: 10_000 },
     });
 
     expect(result.budgetExceeded).toBe(true);

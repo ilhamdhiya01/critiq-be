@@ -32,18 +32,39 @@ export interface RunRulesResult {
 
 export const RULE_BUDGET_MS = 5000;
 
+export interface RunRulesInput {
+  rules: Rule[];
+  filePath: string;
+  language: string;
+  addedLines: { newLine: number; text: string }[];
+  budgetState: { elapsedMs: number };
+  // Diff metadata — only file rules need it, so it stays optional for the
+  // fixture-based specs, which have no diff to take a status from.
+  status?: 'added' | 'removed' | 'modified' | 'renamed';
+  previousPath?: string | null;
+  sizeBytes?: number;
+}
+
 // Runs every applicable rule against one file's added lines. A rule that
 // throws is isolated (recorded in `crashes`) so the remaining rules still
 // run. No logger dependency on purpose — the caller (ScanProcessor) logs,
 // keeping this module free of any Nest/winston coupling so it stays
 // testable with plain Jest.
-export function runRulesForFile(
-  rules: Rule[],
-  filePath: string,
-  language: string,
-  addedLines: { newLine: number; text: string }[],
-  budgetState: { elapsedMs: number },
-): RunRulesResult {
+//
+// Takes a params object rather than positional arguments: diff metadata
+// pushed this past five parameters, several of them same-typed strings that
+// are easy to transpose silently at a call site.
+export function runRulesForFile(input: RunRulesInput): RunRulesResult {
+  const {
+    rules,
+    filePath,
+    language,
+    addedLines,
+    budgetState,
+    status,
+    previousPath,
+    sizeBytes,
+  } = input;
   const hits: RuleHit[] = [];
   const crashes: RuleCrash[] = [];
   let ruleRuns = 0;
@@ -60,7 +81,14 @@ export function runRulesForFile(
       : line,
   );
 
-  const ctx: RuleFileContext = { filePath, language, addedLines: clippedLines };
+  const ctx: RuleFileContext = {
+    filePath,
+    language,
+    addedLines: clippedLines,
+    status,
+    previousPath,
+    sizeBytes,
+  };
 
   for (const rule of rules) {
     if (!ruleAppliesTo(rule.languages, language)) {
