@@ -6,12 +6,9 @@ const PASSWORD_ASSIGNMENT_PATTERN =
 const PLACEHOLDER_PATTERN =
   /^(changeme|example|xxx+|<.*>|\$\{.*\}|your[_-]?password)$/i;
 
-// Fixture/test files are exactly where a *real* password would be least
-// harmful (mock data, not a live credential) and most likely to trip a
-// false positive (fixture strings intentionally look password-shaped) —
-// excluded by path rather than content.
-const EXCLUDED_PATH_PATTERN =
-  /(\.test\.|\.spec\.|\/fixtures\/|\.example($|\.)|\.md$)/i;
+// Test/fixture/example paths used to be excluded by a regex here. That is
+// now SECRET_SKIP_GLOBS, applied to the whole `secret.*` family in
+// rule-runner.ts — one tested list instead of a copy per rule.
 
 export const secretHardcodedPasswordRule: Rule = {
   id: 'secret.hardcoded_password',
@@ -21,10 +18,6 @@ export const secretHardcodedPasswordRule: Rule = {
     'This assigns a literal password value in code. Move it to an environment variable or secrets manager, and rotate the credential if it is real — a password committed to git must be treated as compromised.',
   languages: '*',
   test(ctx) {
-    if (EXCLUDED_PATH_PATTERN.test(ctx.filePath)) {
-      return [];
-    }
-
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
       const match = PASSWORD_ASSIGNMENT_PATTERN.exec(line.text);

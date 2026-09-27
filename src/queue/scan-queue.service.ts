@@ -68,13 +68,32 @@ export class ScanQueueService {
         headSha: input.headSha,
       },
       orderBy: { attempt: 'desc' },
-      select: { id: true, status: true, attempt: true },
+      select: {
+        id: true,
+        status: true,
+        attempt: true,
+        rulesetVersion: true,
+      },
     });
+
+    // A finished scan under an older ruleset is not a duplicate: the rules
+    // that would flag this diff today did not exist when it ran. Without
+    // this, fixing a detection gap leaves every already-scanned PR stuck on
+    // the old result until someone pushes a new commit.
+    //
+    // Gated on DONE deliberately. A QUEUED/RUNNING scan under an old
+    // ruleset is still in flight, and creating a new one would supersede it
+    // below — churning work to replace a result that was about to arrive.
+    // Let it finish; the next webhook for that sha picks up the new rules.
+    const rulesetIsStale =
+      latestForSha?.status === ScanStatus.DONE &&
+      latestForSha.rulesetVersion !== RULESET_VERSION;
 
     if (
       input.trigger === ScanTrigger.WEBHOOK &&
       latestForSha &&
-      WEBHOOK_DEDUPE_STATUSES.includes(latestForSha.status)
+      WEBHOOK_DEDUPE_STATUSES.includes(latestForSha.status) &&
+      !rulesetIsStale
     ) {
       return {
         scanId: latestForSha.id,
@@ -82,6 +101,14 @@ export class ScanQueueService {
         deduplicated: true,
       };
     }
+
+    // Records *why* this scan exists. A webhook that only got here because
+    // the ruleset moved on is a rescan, not ordinary webhook traffic, and
+    // the distinction matters when reading the scan history of a PR.
+    const trigger =
+      input.trigger === ScanTrigger.WEBHOOK && rulesetIsStale
+        ? ScanTrigger.RESCAN
+        : input.trigger;
 
     await this.cancelPending(input.pullId);
 
@@ -95,7 +122,7 @@ export class ScanQueueService {
           headSha: input.headSha,
           baseSha: input.baseSha,
           status: ScanStatus.QUEUED,
-          trigger: input.trigger,
+          trigger,
           attempt: (latestForSha?.attempt ?? 0) + 1,
           rulesetVersion: RULESET_VERSION,
         },
@@ -136,7 +163,7 @@ export class ScanQueueService {
       headSha: input.headSha,
       baseSha: input.baseSha,
       provider: input.provider,
-      trigger: input.trigger,
+      trigger,
     };
 
     try {
@@ -167,7 +194,7 @@ export class ScanQueueService {
       repoId: input.repositoryId,
       pullId: input.pullId,
       scanId,
-      trigger: input.trigger,
+      trigger,
     });
     return { scanId, status: ScanStatus.QUEUED, deduplicated: false };
   }

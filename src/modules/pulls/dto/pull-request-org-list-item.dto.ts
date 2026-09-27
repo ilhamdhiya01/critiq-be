@@ -19,6 +19,7 @@ export class PullRequestOrgListItemDto {
   sourceBranch!: string;
   targetBranch!: string;
   state!: PullRequestState;
+  criticalCount!: number;
   effectivePolicy!: ReviewPolicy;
   createdAt!: Date;
   updatedAt!: Date;
@@ -34,6 +35,7 @@ export class PullRequestOrgListItemDto {
     sourceBranch: string;
     targetBranch: string;
     state: PullRequestState;
+    criticalCount: number;
     effectivePolicy: ReviewPolicy;
     createdAt: Date;
     updatedAt: Date;
