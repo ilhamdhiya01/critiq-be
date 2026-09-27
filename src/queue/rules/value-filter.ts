@@ -160,9 +160,41 @@ function longestSequentialRun(value: string): number {
   return longest;
 }
 
+// `${...}` means the real value only exists at runtime, so whatever is in
+// the source is a template, not a credential. Caught here rather than by
+// entropy, because interpolation syntax is itself varied enough to push a
+// short template over any sensible threshold:
+// `diff-line:${filePath}:${line}` scores 3.75, higher than plenty of real
+// secrets.
+const INTERPOLATION_PATTERN = /\$\{|#\{|%\(|<%=/;
+
+// Identifier-shaped values: CamelCase, snake_case, kebab-case or
+// dot.separated words. Icon names, i18n keys, class names and enum values
+// all look like this, and all of them beat the entropy threshold —
+// `TbAdjustmentsHorizontal` scores 4.06 while the secret that prompted this
+// whole change, `akjsbdkajsbkjabskdjbaskdjbskjdf`, scores 2.69. Entropy
+// cannot separate the two in either direction; word structure can.
+//
+// Requires at least two segments of 3+ letters, so a genuinely random value
+// that happens to contain one capital run is unaffected.
+const WORD_SEGMENTED_PATTERN =
+  /^[A-Za-z][A-Za-z0-9]*(?:(?:[A-Z][a-z]{2,})|(?:[_.-][A-Za-z]{3,})){2,}[A-Za-z0-9]*$/;
+
+function isWordSegmented(value: string): boolean {
+  if (!WORD_SEGMENTED_PATTERN.test(value)) {
+    return false;
+  }
+  // Digits are rare in identifiers and common in generated credentials, so
+  // a value that is meaningfully numeric is not treated as word-shaped.
+  const digits = (value.match(/\d/g) ?? []).length;
+  return digits / value.length < 0.2;
+}
+
 function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
   const { value, key } = candidate;
 
+  if (INTERPOLATION_PATTERN.test(value)) return true;
+  if (isWordSegmented(value)) return true;
   if (UUID_PATTERN.test(value)) return true;
   if (SEMVER_PATTERN.test(value)) return true;
   if (ISO_DATE_PATTERN.test(value)) return true;

@@ -86,6 +86,40 @@ describe('filterValue', () => {
       expect(filterValue(candidate(value))).toBe('not_secret_shaped');
     });
 
+    // Both of these came from real false positives on a Critiq scan of the
+    // FE repo. Entropy cannot separate them from credentials in either
+    // direction: `TbAdjustmentsHorizontal` scores 4.06 while the secret
+    // this whole change started from scores 2.69. Structure can.
+    it.each([
+      ['TbShieldLock', 'an icon name in a lookup table'],
+      ['TbAdjustmentsHorizontal', 'a longer icon name'],
+      ['buttonPrimaryLargeRounded', 'a CSS class constant'],
+      ['home.header.title.description', 'a dot-separated i18n key'],
+      ['user_profile_settings_page', 'a snake_case identifier'],
+    ])('rejects %s (%s)', (value) => {
+      expect(filterValue(candidate(value))).toBe('not_secret_shaped');
+    });
+
+    it.each([
+      'diff-line:${filePath}:${line}',
+      'Bearer ${token}',
+      'redis://#{host}:#{port}',
+    ])('rejects the interpolated template %s', (value) => {
+      expect(filterValue(candidate(value))).toBe('not_secret_shaped');
+    });
+
+    // The word-shape check must not swallow generated credentials that
+    // happen to contain capitals or digits.
+    it.each([
+      'AbCdEf123456GhIjKl',
+      'Zx9!qL2#mN8$vB4@kP7&wR3*',
+      'S3cr3t-Passw0rd-2026',
+      'akjsbdkajsbkjabskdjbaskdjbskjdf',
+      'whsec_a1b2c3d4e5f6g7h8i9j0',
+    ])('still keeps the credential-looking %s', (value) => {
+      expect(filterValue(candidate(value))).toBeNull();
+    });
+
     it('rejects a bare 40-hex git sha', () => {
       const sha = 'ec10b625ad4e3b3f6544e26f1b5aa2eab5aa7bce';
       expect(filterValue(candidate(sha, { key: 'COMMIT' }))).toBe(
