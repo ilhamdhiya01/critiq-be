@@ -1,6 +1,6 @@
 # Critiq — AI-Assisted Code Review (Backend)
 
-Critiq is a **multi-organization SaaS** code review platform that scans pull/merge request **diffs only** (never the full codebase) on every push, flags Critical-severity findings, and lets reviewers choose a review mode per PR — **Manual** or **AI-Assisted**. The final decision (Approve / Request Changes) is always made by a human; AI never auto-approves or auto-merges.
+Critiq is a **multi-organization SaaS** code review platform that scans pull/merge request **diffs only** (never the full codebase) on every push, flags Critical-severity findings, and lets reviewers choose a review mode per PR — **Manual** or **AI-Assisted**. The final decision (Approve / Request Changes) is always made by a human; AI never auto-approves or auto-merge
 
 Every customer company is one **Organization** — the owner of its connected repos, GitLab instance, members, branch policy, rules, AI provider, and audit log. Data is strictly isolated between organizations.
 
