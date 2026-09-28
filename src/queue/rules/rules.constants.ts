@@ -2,7 +2,7 @@
 // ScanQueueService compares a PR's last scan against this and re-scans when
 // they differ, so a bump makes every open PR's next webhook produce fresh
 // results instead of serving a verdict the old rules reached.
-export const RULESET_VERSION = '2026.09.3';
+export const RULESET_VERSION = '2026.09.5';
 
 // Paths matching any of these are skipped entirely before any rule runs:
 // generated/vendored/binary content a rule could never meaningfully flag.
@@ -40,43 +40,59 @@ export const IGNORE_GLOBS = [
   '**/*.pdf',
 ];
 
-// Skipped for `secret.*` rules only (path-filter.ts's isSecretSkippedPath),
-// never for code./config. rules. These are the places a credential-shaped
-// string is expected and meaningless: documentation, example env files, and
-// test fixtures whose whole job is to contain fake secrets.
-//
-// This list replaces the per-rule EXCLUDED_PATH_PATTERN regexes that
-// secret.hardcoded_password and secret.jwt_literal each used to hand-roll.
-export const SECRET_SKIP_GLOBS = [
+// Test files, fixtures and documentation: findings here are stored but
+// SUPPRESSED with reason TEST_FILE (see src/queue/suppression.ts for which
+// rule families it applies to), never dropped — a real secret committed to a
+// spec file must still be visible to an Admin, just not counted or notified.
+export const TEST_FILE_GLOBS = [
+  '**/*.test.*',
+  '**/*.spec.*',
+  '**/*_test.*',
+  '**/test_*.py',
+  '**/__tests__/**',
+  '**/__mocks__/**',
+  '**/fixtures/**',
+  '**/testdata/**',
+  '**/test/**',
+  '**/tests/**',
+  '**/spec/**',
+  '**/e2e/**',
   '**/*.example',
+  '**/*.example.*',
   '**/*.sample',
+  '**/*.sample.*',
   '**/*.template',
   '**/*.dist',
-  '**/*.example.*',
-  '**/*.sample.*',
   '**/*.md',
   '**/*.mdx',
   '**/*.rst',
-  // `*.txt` is deliberately NOT here, though the spec listed it with the
-  // other prose formats: a private key pasted into `key.txt` or
-  // `credentials.txt` is a real and common way to leak one, and skipping
-  // the extension outright would make secret.private_key_block unable to
-  // see its most likely input.
-  '**/*.test.*',
-  '**/*.spec.*',
-  '**/__tests__/**',
-  '**/__mocks__/**',
-  '**/test/**',
-  '**/tests/**',
-  '**/fixtures/**',
-  '**/testdata/**',
-  '**/e2e/**',
+  '**/*.stories.*',
+  '**/*.snap',
+  // Shared test scaffolding that is not itself a spec. Holds fixture values
+  // on purpose (e.g. src/queue/rules/test-helpers.ts assembles the fake
+  // provider tokens) and is only ever imported by specs.
+  '**/test-helpers.*',
+  '**/test-utils.*',
+  '**/test_helpers.*',
+  '**/test_utils.*',
+  // `*.txt` is deliberately NOT here, although the v1.5.0 delta listed it with
+  // the other prose formats: a private key pasted into `key.txt` or
+  // `credentials.txt` is a real and common way to leak one, and suppressing
+  // the extension would hide exactly that.
 ];
 
-// Overrides SECRET_SKIP_GLOBS — a file matching both is still scanned for
-// secrets. Config and infrastructure files are where real credentials
-// actually get committed, and several of them would otherwise be swallowed
-// by a skip pattern above.
+// Subset of TEST_FILE_GLOBS that is inert data, never executed: every rule
+// family is suppressed here, including code.eval_dynamic / sql_string_concat
+// / shell_injection, which stay active in *.spec.* files because that code
+// actually runs in CI.
+export const DATA_FIXTURE_GLOBS = ['**/fixtures/**', '**/testdata/**'];
+
+// Overrides TEST_FILE_GLOBS — a file matching both is never suppressed as a
+// test file (e.g. `test/fixtures-free/docker-compose.yml`, `e2e/.env`).
+// Config and infrastructure files are where real credentials actually get
+// committed, and several of them would otherwise be swallowed by a pattern
+// above. DATA_FIXTURE_GLOBS still wins over this list: a file under
+// `fixtures/` is test data whatever its name.
 //
 // The `.env` entries are deliberately narrow. A blanket `**/.env.*` would
 // also match `.env.example` and `.env.sample`, whose entire purpose is to

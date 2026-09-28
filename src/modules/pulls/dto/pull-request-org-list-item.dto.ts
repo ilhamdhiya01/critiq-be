@@ -3,6 +3,7 @@ import {
   PullRequestState,
   ReviewPolicy,
 } from '../../../generated/prisma/enums';
+import { ActiveScanDto, LatestScanDto } from '../../scans/dto/scan.dto';
 
 // Same shape as PullRequestListItemDto plus repository identifiers — used
 // only by the org-wide list (GET orgs/:orgId/pulls), where results span
@@ -21,6 +22,10 @@ export class PullRequestOrgListItemDto {
   state!: PullRequestState;
   criticalCount!: number;
   effectivePolicy!: ReviewPolicy;
+  // Last terminal scan (the result shown), and the scan in flight if any —
+  // both null for a PR that was never scanned.
+  latestScan!: LatestScanDto | null;
+  activeScan!: ActiveScanDto | null;
   createdAt!: Date;
   updatedAt!: Date;
 
@@ -37,6 +42,8 @@ export class PullRequestOrgListItemDto {
     state: PullRequestState;
     criticalCount: number;
     effectivePolicy: ReviewPolicy;
+    latestScan: LatestScanDto | null;
+    activeScan: ActiveScanDto | null;
     createdAt: Date;
     updatedAt: Date;
   }) {

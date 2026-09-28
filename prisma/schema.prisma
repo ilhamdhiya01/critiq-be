@@ -320,6 +320,19 @@ enum FindingSource {
   AI
 }
 
+// Why a finding was stored but not counted (see src/queue/suppression.ts).
+// Suppressed findings stay visible to Admins — a real secret in a test file
+// must not vanish — but never reach criticalCount, notifications or diff
+// annotations.
+enum SuppressionReason {
+  TEST_FILE
+  REGEX_LITERAL
+  // Last, not in priority order: Postgres ADD VALUE appends, and keeping the
+  // schema in the same order avoids a spurious diff. Priority lives in
+  // classifySuppression (test_file > comment > regex_literal).
+  COMMENT
+}
+
 
 // One row per PR/MR, upserted from webhook events only (WebhooksService) —
 // no polling/pull path exists. Deliberately GET-only at this phase (Fase
@@ -410,6 +423,12 @@ model Scan {
   // FE "there were more."
   findingsTruncated Boolean @default(false)
 
+  // Suppressed findings, counted separately from findingsCount/criticalCount
+  // (which are active-only). Capped at 200 stored rows per scan; the count is
+  // the real total before the cap.
+  suppressedCount      Int     @default(0)
+  suppressedTruncated  Boolean @default(false)
+
   startedAt  DateTime?
   finishedAt DateTime?
   createdAt  DateTime  @default(now())
@@ -451,6 +470,10 @@ model Finding {
   snippet String? @db.Text
 
   fingerprint String
+
+  // null = active finding. Set = stored for visibility only, excluded from
+  // every count, notification and annotation.
+  suppressedReason SuppressionReason?
 
   createdAt DateTime @default(now())
 

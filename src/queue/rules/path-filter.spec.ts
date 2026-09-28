@@ -1,4 +1,8 @@
-import { isIgnoredPath, isSecretSkippedPath } from './path-filter';
+import {
+  isDataFixturePath,
+  isIgnoredPath,
+  isTestLikePath,
+} from './path-filter';
 
 describe('isIgnoredPath', () => {
   it.each([
@@ -39,44 +43,72 @@ describe('isIgnoredPath', () => {
   );
 });
 
-describe('isSecretSkippedPath', () => {
+describe('isTestLikePath', () => {
   it.each([
     'src/payment.test.ts',
     'src/payment.spec.ts',
+    'pkg/payment_test.go',
+    'tests/test_payment.py',
     '.env.example',
     'config.sample.yml',
     'docs/setup.md',
     'src/__tests__/auth.ts',
     'test/helpers.ts',
+    'spec/models/user_spec.rb',
+    'src/Button.stories.tsx',
     'src/queue/rules/fixtures/secret.github_token/positive-1.ts',
-  ])('skips secret rules for %s', (path) => {
-    expect(isSecretSkippedPath(path)).toBe(true);
+    'src/queue/rules/test-helpers.ts',
+    'lib/test_utils.py',
+  ])('treats %s as test-like', (path) => {
+    expect(isTestLikePath(path)).toBe(true);
   });
 
-  it.each(['src/payment.ts', 'src/config/database.ts', 'apps/api/Dockerfile'])(
-    'runs secret rules on %s',
-    (path) => {
-      expect(isSecretSkippedPath(path)).toBe(false);
-    },
-  );
+  it.each([
+    'src/payment.ts',
+    'src/config/database.ts',
+    'apps/api/Dockerfile',
+    // Deliberately not documentation: a key pasted into a .txt is a real leak.
+    'secrets/key.txt',
+  ])('treats %s as production code', (path) => {
+    expect(isTestLikePath(path)).toBe(false);
+  });
 
-  // MUST_SCAN_GLOBS overrides the skip list — and must do so without
-  // dragging `.env.example` back in, which acceptance 16 turns on.
+  // MUST_SCAN_GLOBS overrides the test-like list — without dragging
+  // .env.example back in.
   it.each([
     '.env',
     '.env.production',
-    'docker-compose.yml',
-    'docker-compose.override.yml',
+    'test/e2e/.env',
+    'tests/docker-compose.yml',
     'infra/main.tf',
     'app.properties',
-  ])('always scans %s for secrets', (path) => {
-    expect(isSecretSkippedPath(path)).toBe(false);
+  ])('never treats config file %s as test-like', (path) => {
+    expect(isTestLikePath(path)).toBe(false);
   });
 
   it.each(['.env.example', '.env.sample'])(
-    'still skips %s despite the .env override',
+    'still treats %s as test-like despite the .env override',
     (path) => {
-      expect(isSecretSkippedPath(path)).toBe(true);
+      expect(isTestLikePath(path)).toBe(true);
     },
   );
+
+  it('treats a data fixture as test-like even when its name is a config file', () => {
+    expect(isTestLikePath('src/rules/fixtures/leak/docker-compose.yml')).toBe(
+      true,
+    );
+  });
+});
+
+describe('isDataFixturePath', () => {
+  it.each(['src/queue/rules/fixtures/a.ts', 'pkg/testdata/sample.json'])(
+    'recognises %s',
+    (path) => {
+      expect(isDataFixturePath(path)).toBe(true);
+    },
+  );
+
+  it.each(['src/auth.spec.ts', 'test/helpers.ts'])('rejects %s', (path) => {
+    expect(isDataFixturePath(path)).toBe(false);
+  });
 });

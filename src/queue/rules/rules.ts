@@ -4,7 +4,6 @@ import { secretAssignmentLiteralRule } from './definitions/secret.assignment-lit
 import { secretPrivateKeyBlockRule } from './definitions/secret.private-key-block.rule';
 import { secretSensitiveFileAddedRule } from './definitions/secret.sensitive-file-added.rule';
 import { providerTokenRules } from './definitions/provider-token.rules';
-import { secretHighEntropyStringRule } from './definitions/secret.high-entropy-string.rule';
 import { secretHardcodedPasswordRule } from './definitions/secret.hardcoded-password.rule';
 import { secretGithubTokenRule } from './definitions/secret.github-token.rule';
 import { secretGitlabTokenRule } from './definitions/secret.gitlab-token.rule';
@@ -36,9 +35,9 @@ export const RULES: Rule[] = [
   // Fixed-prefix provider credentials, built from one factory — see
   // provider-token.rules.ts for why they are not fourteen separate files.
   ...providerTokenRules,
-  // Last of the secret rules on purpose: it is the broadest, and every
-  // narrower rule above has already claimed what it recognises.
-  secretHighEntropyStringRule,
+  // No value-only entropy rule: secret.high_entropy_string was removed in
+  // v1.5.0 delta 2 as outside the spec. It returns only as a formally
+  // proposed secret.high_entropy (see CLAUDE.md "Hal usang").
   codeEvalDynamicRule,
   codeSqlStringConcatRule,
   codeShellInjectionRule,

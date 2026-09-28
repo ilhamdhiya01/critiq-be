@@ -29,11 +29,25 @@ import {
 import { PullRequestListItemDto } from './dto/pull-request-list-item.dto';
 import { PullRequestOrgListItemDto } from './dto/pull-request-org-list-item.dto';
 import { PullRequestDetailDto } from './dto/pull-request-detail.dto';
-import { FindingDto, ScanSummaryDto } from './dto/scan-summary.dto';
+import { ScanSummaryDto } from './dto/scan-summary.dto';
 import {
+  DiffAnnotations,
   PullRequestDiffDto,
   PullRequestFileDto,
 } from './dto/pull-request-diff.dto';
+import { FindingDto } from '../scans/dto/finding.dto';
+import { LatestScanDto } from '../scans/dto/scan.dto';
+import { ScansService } from '../scans/scans.service';
+
+// What PR lists show of the latest scan — selected, not included, so a list
+// never drags each scan's full row along.
+const LATEST_SCAN_LIST_SELECT = {
+  id: true,
+  status: true,
+  criticalCount: true,
+  suppressedCount: true,
+  finishedAt: true,
+} as const;
 
 export interface UpsertedPullRequest {
   id: string;
@@ -58,6 +72,7 @@ export class PullsService {
     private readonly githubAppService: GithubAppService,
     private readonly gitlabApiService: GitlabApiService,
     private readonly encryptionService: EncryptionService,
+    private readonly scansService: ScansService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
@@ -127,8 +142,12 @@ export class PullsService {
     await this.assertRepositoryInOrg(organizationId, repositoryId);
     const pulls = await this.prisma.pullRequest.findMany({
       where: { repositoryId },
+      include: { latestScan: { select: LATEST_SCAN_LIST_SELECT } },
       orderBy: { updatedAt: 'desc' },
     });
+    const activeScans = await this.scansService.findActiveScans(
+      pulls.map((pull) => pull.id),
+    );
     return pulls.map(
       (pull) =>
         new PullRequestListItemDto({
@@ -141,6 +160,8 @@ export class PullsService {
           targetBranch: pull.targetBranch,
           state: pull.state,
           effectivePolicy: pull.effectivePolicy,
+          latestScan: this.toLatestScanDto(pull.latestScan),
+          activeScan: activeScans.get(pull.id) ?? null,
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -166,10 +187,13 @@ export class PullsService {
         // pointer is only moved on a terminal transition — so the list shows
         // the last valid result and never a count from an in-flight or
         // discarded scan. See PullRequest.latestScanId in schema.prisma.
-        latestScan: { select: { criticalCount: true } },
+        latestScan: { select: LATEST_SCAN_LIST_SELECT },
       },
       orderBy: { updatedAt: 'desc' },
     });
+    const activeScans = await this.scansService.findActiveScans(
+      pulls.map((pull) => pull.id),
+    );
     return pulls.map(
       (pull) =>
         new PullRequestOrgListItemDto({
@@ -189,6 +213,8 @@ export class PullsService {
           // separate signal, not folded into this count.
           criticalCount: pull.latestScan?.criticalCount ?? 0,
           effectivePolicy: pull.effectivePolicy,
+          latestScan: this.toLatestScanDto(pull.latestScan),
+          activeScan: activeScans.get(pull.id) ?? null,
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -214,7 +240,11 @@ export class PullsService {
             // ascending sort puts criticals first, matching how the review
             // page lists them. File path and line break ties, so the order
             // is stable between requests.
+            // Active only — suppressed findings are fetched separately
+            // (GET …/scans/:scanId/findings), never mixed into the list the
+            // reviewer acts on.
             findings: {
+              where: { suppressedReason: null },
               orderBy: [
                 { severity: 'asc' },
                 { filePath: 'asc' },
@@ -259,6 +289,8 @@ export class PullsService {
             findingsCount: pull.latestScan.findingsCount,
             criticalCount: pull.latestScan.criticalCount,
             findingsTruncated: pull.latestScan.findingsTruncated,
+            suppressedCount: pull.latestScan.suppressedCount,
+            suppressedTruncated: pull.latestScan.suppressedTruncated,
             filesChanged: pull.latestScan.filesChanged,
             diffBytes: pull.latestScan.diffBytes,
             rulesetVersion: pull.latestScan.rulesetVersion,
@@ -278,6 +310,7 @@ export class PullsService {
                   lineStart: finding.lineStart,
                   lineEnd: finding.lineEnd,
                   snippet: finding.snippet,
+                  suppressedReason: finding.suppressedReason,
                 }),
             ),
           })
@@ -298,7 +331,10 @@ export class PullsService {
   ): Promise<PullRequestDiffDto> {
     const pull = await this.prisma.pullRequest.findUnique({
       where: { id: pullRequestId },
-      include: { repository: { include: { integration: true } } },
+      include: {
+        repository: { include: { integration: true } },
+        latestScan: { select: { id: true, headSha: true } },
+      },
     });
     if (
       !pull ||
@@ -339,6 +375,7 @@ export class PullsService {
       return new PullRequestDiffDto({
         files: result.files.map((file) => this.mapGithubFile(file)),
         truncated: result.truncated,
+        ...(await this.buildAnnotations(pull.latestScan)),
       });
     }
 
@@ -357,7 +394,71 @@ export class PullsService {
     return new PullRequestDiffDto({
       files: result.diffs.map((diff) => this.mapGitlabDiff(diff)),
       truncated: result.truncated,
+      ...(await this.buildAnnotations(pull.latestScan)),
     });
+  }
+
+  // Read after the provider call on purpose: a failed diff fetch shouldn't
+  // have cost a findings query.
+  private async buildAnnotations(
+    latestScan: { id: string; headSha: string } | null,
+  ): Promise<{
+    annotations: DiffAnnotations;
+    suppressedAnnotations: DiffAnnotations;
+    annotationsScanId: string | null;
+    annotationsHeadSha: string | null;
+  }> {
+    const annotations: DiffAnnotations = {};
+    const suppressedAnnotations: DiffAnnotations = {};
+    if (!latestScan) {
+      return {
+        annotations,
+        suppressedAnnotations,
+        annotationsScanId: null,
+        annotationsHeadSha: null,
+      };
+    }
+
+    const findings = await this.prisma.finding.findMany({
+      where: { scanId: latestScan.id },
+      select: {
+        id: true,
+        filePath: true,
+        lineStart: true,
+        lineEnd: true,
+        severity: true,
+        suppressedReason: true,
+      },
+      orderBy: [{ filePath: 'asc' }, { lineStart: 'asc' }],
+    });
+    for (const finding of findings) {
+      const target =
+        finding.suppressedReason === null ? annotations : suppressedAnnotations;
+      (target[finding.filePath] ??= []).push({
+        findingId: finding.id,
+        lineStart: finding.lineStart,
+        lineEnd: finding.lineEnd,
+        severity: finding.severity,
+      });
+    }
+    return {
+      annotations,
+      suppressedAnnotations,
+      annotationsScanId: latestScan.id,
+      annotationsHeadSha: latestScan.headSha,
+    };
+  }
+
+  private toLatestScanDto(
+    latestScan: {
+      id: string;
+      status: LatestScanDto['status'];
+      criticalCount: number;
+      suppressedCount: number;
+      finishedAt: Date | null;
+    } | null,
+  ): LatestScanDto | null {
+    return latestScan ? new LatestScanDto(latestScan) : null;
   }
 
   private mapGithubFile(file: GithubPullRequestFile): PullRequestFileDto {
