@@ -22,6 +22,8 @@ model User {
   memberships           Membership[]
   createdOrgs           Organization[] @relation("OrganizationCreatedBy")
   connectedIntegrations Integration[]  @relation("IntegrationConnectedBy")
+  aiConsentOrgs         Organization[] @relation("OrganizationAiConsentBy")
+  updatedAiCredentials  AiCredential[] @relation("AiCredentialUpdatedBy")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -30,10 +32,10 @@ model User {
 }
 
 model Organization {
-  id        String @id @default(cuid())
-  name      String @db.VarChar(100)
-  slug      String @unique @db.VarChar(100)
-  createdBy String
+  id                  String  @id @default(cuid())
+  name                String  @db.VarChar(100)
+  slug                String  @unique @db.VarChar(100)
+  createdBy           String
   onboardingCompleted Boolean @default(false)
 
   creator            User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
@@ -45,7 +47,21 @@ model Organization {
   pullRequests       PullRequest[]
   scans              Scan[]
   findings           Finding[]
+  aiCredentials      AiCredential[]
+  aiUsageDaily       AiUsageDaily[]
 
+  // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
+  // live per provider in ai_credentials so switching back and forth never
+  // drops a key. No consent = step 2 never sends a diff anywhere.
+  aiProvider         AiProviderId?
+  aiModel            String?
+  aiConsentAt        DateTime?
+  aiConsentBy        String?
+  aiConsentUser      User?         @relation("OrganizationAiConsentBy", fields: [aiConsentBy], references: [id], onDelete: SetNull)
+  aiLocale           String        @default("en")
+  aiDailyTokenBudget Int           @default(2000000)
+  // Result of the last "Test connection" — shown back in GET settings/ai.
+  aiLastTest         Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -211,7 +227,7 @@ model Repository {
   scanConfig     RepoScanConfig?
   branchPolicies BranchScanPolicy[]
   pullRequests   PullRequest[]
-  scans              Scan[]
+  scans          Scan[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -333,7 +349,6 @@ enum SuppressionReason {
   COMMENT
 }
 
-
 // One row per PR/MR, upserted from webhook events only (WebhooksService) —
 // no polling/pull path exists. Deliberately GET-only at this phase (Fase
 // 3): no review/approve fields here, that's the separate `reviews` module
@@ -341,7 +356,7 @@ enum SuppressionReason {
 // RepoScanConfig/BranchScanPolicy) so tenant-scoped queries never need a
 // join to enforce isolation.
 model PullRequest {
-  id             String            @id @default(cuid())
+  id             String           @id @default(cuid())
   organizationId String
   repositoryId   String
   provider       Provider
@@ -396,7 +411,7 @@ model PullRequest {
 // tenant-isolation reason as every other model here — no join needed to
 // enforce it.
 model Scan {
-  id             String        @id @default(cuid())
+  id             String         @id @default(cuid())
   organizationId String
   repositoryId   String
   pullId         String
@@ -404,13 +419,13 @@ model Scan {
   baseSha        String?
   status         ScanStatus
   trigger        ScanTrigger
-  attempt        Int           @default(1)
+  attempt        Int            @default(1)
   errorCode      ScanErrorCode?
-  errorMessage   String?       @db.Text
+  errorMessage   String?        @db.Text
   diffBytes      Int?
   filesChanged   Int?
-  findingsCount  Int           @default(0)
-  criticalCount  Int           @default(0)
+  findingsCount  Int            @default(0)
+  criticalCount  Int            @default(0)
 
   // Static rules snapshot at scan time (RulesModule's RULESET_VERSION) —
   // kept even though only one ruleset version exists today, so a future
@@ -426,8 +441,8 @@ model Scan {
   // Suppressed findings, counted separately from findingsCount/criticalCount
   // (which are active-only). Capped at 200 stored rows per scan; the count is
   // the real total before the cap.
-  suppressedCount      Int     @default(0)
-  suppressedTruncated  Boolean @default(false)
+  suppressedCount     Int     @default(0)
+  suppressedTruncated Boolean @default(false)
 
   startedAt  DateTime?
   finishedAt DateTime?
@@ -478,13 +493,59 @@ model Finding {
   createdAt DateTime @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  scan Scan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
 
   @@index([organizationId, scanId])
   @@index([scanId, filePath, lineStart])
   @@map("findings")
 }
 
+enum AiProviderId {
+  ANTHROPIC
+  OPENAI
+  OPENAI_COMPATIBLE
+}
 
+// One organization-owned credential per provider (v1.5.1 langkah 1).
+// encryptedKey is EncryptionService output (AES-256-GCM, `iv:tag:ct` hex,
+// ENCRYPTION_KEY) — never returned by the API, only keyLast4 is. Null only
+// for openai_compatible, where a self-hosted server may need no key.
+model AiCredential {
+  organizationId String
+  provider       AiProviderId
+  encryptedKey   String?
+  keyLast4       String?      @db.VarChar(4)
+  // Which ENCRYPTION_KEY generation encrypted this row; rotation is out of
+  // scope, but recording it now means a rotation needs no schema change.
+  keyVersion     Int          @default(1)
+  baseUrl        String?
+  updatedBy      String?
+  updatedAt      DateTime     @updatedAt
 
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  updatedByUser User?        @relation("AiCredentialUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
 
+  @@id([organizationId, provider])
+  @@map("ai_credentials")
+}
+
+enum AiUsageKind {
+  SCAN
+  TEST
+}
+
+// Token usage per organization per day. TEST rows (Settings → Test
+// connection) never count toward aiDailyTokenBudget; SCAN rows do (step 2).
+model AiUsageDaily {
+  organizationId String
+  day            DateTime    @db.Date
+  kind           AiUsageKind
+  calls          Int         @default(0)
+  inputTokens    Int         @default(0)
+  outputTokens   Int         @default(0)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@id([organizationId, day, kind])
+  @@map("ai_usage_daily")
+}
