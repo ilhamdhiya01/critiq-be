@@ -236,6 +236,35 @@ export class GitlabApiService {
     return { diffs: diffs.slice(0, MR_DIFFS_HARD_CAP), truncated };
   }
 
+  // One file at `ref`, as raw text — head-file context for the AI review
+  // prompt (v1.5.1 langkah 2). Best effort: null on any failure; the prompt
+  // falls back to the hunk's own context lines.
+  async fetchRawFile(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    path: string,
+    ref: string,
+  ): Promise<string | null> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get<string>(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/repository/files/${encodeURIComponent(path)}/raw`,
+          {
+            headers: { 'Private-Token': token },
+            timeout: REQUEST_TIMEOUT_MS,
+            params: { ref },
+            responseType: 'text',
+            transformResponse: (data: unknown) => data,
+          },
+        ),
+      );
+      return typeof response.data === 'string' ? response.data : null;
+    } catch {
+      return null;
+    }
+  }
+
   // Registers a webhook on a single project (D6/webhook rollout — called
   // from ReposService.createRepos after a repo's Repository row commits).
   // GitLab returns the created hook's `id`, which the caller persists on

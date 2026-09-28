@@ -21,6 +21,8 @@ export interface GitlabMergeRequestPayload {
   object_attributes?: {
     iid: number;
     title: string;
+    // MR body; null when empty. Context for the AI review prompt.
+    description?: string | null;
     state: string; // opened | closed | merged | locked
     target_branch: string;
     source_branch: string;
@@ -42,6 +44,8 @@ export interface GithubPullRequestPayload {
   pull_request?: {
     number: number;
     title: string;
+    // PR body; null when empty. Context for the AI review prompt.
+    body?: string | null;
     state: string; // open | closed
     merged: boolean;
     user?: { login: string };

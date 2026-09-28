@@ -59,6 +59,13 @@ export default () => ({
     maxDiffBytes: Number(process.env.SCAN_MAX_DIFF_BYTES ?? 1048576),
   },
   ai: {
+    concurrency: Number(process.env.AI_CONCURRENCY ?? 2),
+    maxInputTokens: Number(process.env.AI_MAX_INPUT_TOKENS ?? 60000),
+    maxOutputTokens: Number(process.env.AI_MAX_OUTPUT_TOKENS ?? 4000),
+    timeoutMs: Number(process.env.AI_TIMEOUT_MS ?? 90000),
+    contextLines: Number(process.env.AI_CONTEXT_LINES ?? 30),
+    maxDiffBytes: Number(process.env.AI_MAX_DIFF_BYTES ?? 204800),
+    keepDeduped: process.env.AI_KEEP_DEDUPED === 'true',
     // Hosts an openai_compatible base URL may use over plain http:// or on
     // a private/internal address (self-hosted vLLM, Ollama). Everything else
     // must be public https:// — see src/modules/ai/base-url-guard.ts.

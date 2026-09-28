@@ -49,6 +49,7 @@ model Organization {
   findings           Finding[]
   aiCredentials      AiCredential[]
   aiUsageDaily       AiUsageDaily[]
+  aiSummaries        AiSummary[]
 
   // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
   // live per provider in ai_credentials so switching back and forth never
@@ -347,6 +348,8 @@ enum SuppressionReason {
   // schema in the same order avoids a spurious diff. Priority lives in
   // classifySuppression (test_file > comment > regex_literal).
   COMMENT
+  // An AI finding duplicating a static one, kept only with AI_KEEP_DEDUPED.
+  DEDUPE_STATIC
 }
 
 // One row per PR/MR, upserted from webhook events only (WebhooksService) —
@@ -362,6 +365,10 @@ model PullRequest {
   provider       Provider
   externalId     String
   title          String
+  // PR/MR body from the webhook — context for the AI review prompt
+  // (truncated there to 2000 characters). Null for PRs last seen before
+  // v1.5.1.
+  description    String?          @db.Text
   authorUsername String?
   sourceBranch   String
   targetBranch   String
@@ -444,6 +451,31 @@ model Scan {
   suppressedCount     Int     @default(0)
   suppressedTruncated Boolean @default(false)
 
+  // AI review (v1.5.1 langkah 2). aiStatus null = the AI step never
+  // evaluated this scan (created before v1.5.1, or static FAILED).
+  // criticalCount above includes AI criticals once the AI step is DONE;
+  // majorCount/minorCount are AI-only (static rules are Critical-only).
+  aiStatus           AiScanStatus?
+  aiErrorCode        String?
+  aiProvider         String?
+  aiModel            String?
+  aiPromptVersion    String?
+  aiTokensIn         Int?
+  aiTokensOut        Int?
+  aiCached           Boolean       @default(false)
+  aiStartedAt        DateTime?
+  aiFinishedAt       DateTime?
+  aiFindingsTotal    Int           @default(0)
+  aiFindingsRejected Int           @default(0)
+  aiFindingsDeduped  Int           @default(0)
+  majorCount         Int           @default(0)
+  minorCount         Int           @default(0)
+  aiFlags            String[]      @default([])
+  // Redis key of the encrypted raw provider response, kept 30 days — only
+  // when the response was invalid (debugging). On the scan, not the summary:
+  // an invalid response is exactly the case with no summary row.
+  aiRawRef           String?
+
   startedAt  DateTime?
   finishedAt DateTime?
   createdAt  DateTime  @default(now())
@@ -458,6 +490,7 @@ model Scan {
   // is just what Prisma requires to model the relation named above on
   // PullRequest.
   latestForPullRequests PullRequest[] @relation("PullRequestLatestScan")
+  aiSummary             AiSummary?
 
   @@unique([repositoryId, pullId, headSha, attempt])
   @@index([organizationId, pullId, createdAt(sort: Desc)])
@@ -490,10 +523,21 @@ model Finding {
   // every count, notification and annotation.
   suppressedReason SuppressionReason?
 
+  // Shared vocabulary for static and AI findings, used to dedupe one against
+  // the other. Nullable only for rows the migration backfill could not map.
+  category   FindingCategory?
+  // AI only, 0.00–1.00 as the model reported it.
+  confidence Decimal?         @db.Decimal(3, 2)
+  // AI finding kept although it duplicates this static finding
+  // (AI_KEEP_DEDUPED=true, suppressedReason DEDUPE_STATIC).
+  dedupeOfId String?
+
   createdAt DateTime @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  dedupeOf     Finding?     @relation("FindingDedupeOf", fields: [dedupeOfId], references: [id], onDelete: SetNull)
+  duplicates   Finding[]    @relation("FindingDedupeOf")
 
   @@index([organizationId, scanId])
   @@index([scanId, filePath, lineStart])
@@ -548,4 +592,56 @@ model AiUsageDaily {
 
   @@id([organizationId, day, kind])
   @@map("ai_usage_daily")
+}
+
+enum FindingCategory {
+  SECRET
+  INJECTION
+  INSECURE_TLS
+  ERROR_HANDLING
+  PERFORMANCE
+  LOGIC
+  AUTH
+  CONCURRENCY
+  DATA_LOSS
+  CONFIG
+  OTHER
+}
+
+enum AiScanStatus {
+  QUEUED
+  RUNNING
+  DONE
+  CACHED
+  FAILED
+  SKIPPED_MANUAL_MODE
+  CONSENT_REQUIRED
+  NOT_CONFIGURED
+  SKIPPED_TOO_LARGE
+  BUDGET_EXCEEDED
+}
+
+enum AiRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// The AI review of one scan (v1.5.1 langkah 2). One per scan; a cache hit
+// copies the source scan's summary into a new row for the new scan.
+model AiSummary {
+  id             String      @id @default(cuid())
+  organizationId String
+  scanId         String      @unique
+  pullId         String
+  summaryMd      String      @db.Text
+  riskLevel      AiRiskLevel
+  filesOmitted   String[]    @default([])
+  createdAt      DateTime    @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, pullId])
+  @@map("ai_summaries")
 }

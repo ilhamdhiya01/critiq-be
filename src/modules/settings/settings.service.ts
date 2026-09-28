@@ -11,7 +11,7 @@ import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Prisma } from '../../generated/prisma/client';
-import { AiProviderId, AiUsageKind } from '../../generated/prisma/enums';
+import { AiProviderId, AiUsageKind, Role } from '../../generated/prisma/enums';
 import { completeValidated } from '../ai/ai-call';
 import { AiError, AiErrorCode, toAiError } from '../ai/ai-error';
 import {
@@ -28,6 +28,7 @@ import { assertSafeBaseUrl } from '../ai/base-url-guard';
 import {
   AiCredentialSummary,
   AiSettingsDto,
+  AiSettingsSummaryDto,
   AiTestResultDto,
   AiTestSnapshot,
 } from './dto/ai-settings.dto';
@@ -75,6 +76,39 @@ export class SettingsService {
     private readonly rateLimiter: RateLimiterService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
+
+  // Full settings for an Admin; the minimal read-only view for anyone else.
+  // The route's guard already checked membership; the role is re-read here
+  // for this org, never taken from the token.
+  async getAiForMember(
+    organizationId: string,
+    userId: string,
+  ): Promise<AiSettingsDto | AiSettingsSummaryDto> {
+    const membership = await this.prisma.membership.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+      select: { role: true },
+    });
+    if (membership?.role === Role.ADMIN) {
+      return this.getAi(organizationId);
+    }
+    const organization = await this.prisma.organization.findUniqueOrThrow({
+      where: { id: organizationId },
+      select: {
+        aiProvider: true,
+        aiModel: true,
+        aiConsentAt: true,
+        aiLocale: true,
+      },
+    });
+    return new AiSettingsSummaryDto({
+      provider: organization.aiProvider
+        ? toProviderName(organization.aiProvider)
+        : null,
+      model: organization.aiModel,
+      consent: { granted: organization.aiConsentAt !== null },
+      locale: organization.aiLocale,
+    });
+  }
 
   async getAi(organizationId: string): Promise<AiSettingsDto> {
     const [organization, credentials] = await Promise.all([

@@ -14,8 +14,10 @@ import {
   ScanStatus,
 } from '../generated/prisma/enums';
 import { PullRequestDiffDto } from '../modules/pulls/dto/pull-request-diff.dto';
+import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { analyzeDiff } from './analyze-diff';
+import { categoryForRule } from './finding-category';
 import {
   classifyProviderError,
   sanitizeErrorMessage,
@@ -38,6 +40,7 @@ export class ScanProcessor
   constructor(
     private readonly prisma: PrismaService,
     private readonly pullsService: PullsService,
+    private readonly aiScanService: AiScanService,
     private readonly configService: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
@@ -174,6 +177,7 @@ export class ScanProcessor
             organizationId,
             scanId,
             source: FindingSource.STATIC,
+            category: categoryForRule(finding.ruleId),
             // Every rule in this release is Critical (Rule.severity is the
             // literal 'critical'); the enum carries the full range for later.
             severity: FindingSeverity.CRITICAL,
@@ -220,10 +224,18 @@ export class ScanProcessor
       });
     }
 
-    // 8. TODO: emit `scan.done` { scanId, criticalCount, suppressedCount } via
-    // EventEmitter2 once a consumer exists (AI summary v1.5.1 — which should
-    // receive suppressed findings too, as "probably example/test" context —
-    // and the quality-gate status check v1.5.3).
+    // 8. AI review (v1.5.1 langkah 2) — decided and enqueued here rather
+    // than via a `scan.done` event (no EventEmitter yet; the quality-gate
+    // check of v1.5.3 is the next consumer). Its outcome lands on the scan's
+    // ai* columns; a failure here must never fail the static scan.
+    try {
+      await this.aiScanService.maybeEnqueue(scanId);
+    } catch (error) {
+      this.logger.error('ai.enqueue_failed', {
+        ...log,
+        errorName: error instanceof Error ? error.name : 'Unknown',
+      });
+    }
     await job.updateProgress({ step: 'done', pct: 100 });
   }
 

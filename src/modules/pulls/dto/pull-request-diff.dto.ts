@@ -1,4 +1,7 @@
-import { FindingSeverity } from '../../../generated/prisma/enums';
+import {
+  FindingSeverity,
+  FindingSource,
+} from '../../../generated/prisma/enums';
 
 export class PullRequestFileDto {
   path!: string;
@@ -27,6 +30,7 @@ export interface DiffAnnotation {
   lineStart: number;
   lineEnd: number;
   severity: FindingSeverity;
+  source: FindingSource;
 }
 
 // filePath → the findings to mark on that file's lines.
