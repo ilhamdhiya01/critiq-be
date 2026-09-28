@@ -1,7 +1,6 @@
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import { SuppressionReason } from '../generated/prisma/enums';
-import { analyzeDiff, DiffFile } from './analyze-diff';
+import { analyzeDiff } from './analyze-diff';
+import { loadDiffFixture } from './diff/test-helpers';
 
 // Acceptance 1 of the v1.5.0 suppression delta. The fixture is the real diff
 // of PR #6 on critiq-be (`git diff dff00f7^1...114a29a`), whose scan under
@@ -12,34 +11,8 @@ import { analyzeDiff, DiffFile } from './analyze-diff';
 // test_file) belonged to that older ruleset; rules since then drop prose and
 // comment mentions before suppression ever sees them. What must hold is the
 // outcome: nothing active, and both reasons present.
-const FIXTURE = join(__dirname, 'fixtures/diffs/critiq-self-scan.diff');
-
-// Splits `git diff` output into the per-file shape a provider returns.
-function splitGitDiff(diff: string): DiffFile[] {
-  return diff
-    .split(/^(?=diff --git )/m)
-    .filter((section) => section.startsWith('diff --git '))
-    .map((section) => {
-      const [, from, to] = /^diff --git a\/(\S+) b\/(\S+)/.exec(section) ?? [];
-      const hunkAt = section.search(/^@@ /m);
-      const status: DiffFile['status'] = /^new file mode/m.test(section)
-        ? 'added'
-        : /^deleted file mode/m.test(section)
-          ? 'removed'
-          : from !== to
-            ? 'renamed'
-            : 'modified';
-      return {
-        path: to,
-        previousPath: status === 'renamed' ? from : null,
-        status,
-        patch: hunkAt >= 0 ? section.slice(hunkAt) : null,
-      };
-    });
-}
-
 describe('self-scan of critiq-be PR #6', () => {
-  const files = splitGitDiff(readFileSync(FIXTURE, 'utf8'));
+  const files = loadDiffFixture('critiq-self-scan.diff');
   const result = analyzeDiff(files, { maxDiffBytes: 10_000_000 });
 
   it('parses the whole diff', () => {

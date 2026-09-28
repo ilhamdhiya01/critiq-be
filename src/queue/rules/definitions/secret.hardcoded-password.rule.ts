@@ -1,4 +1,10 @@
 import { Rule, RuleFinding } from '../rule.interface';
+import {
+  hasStructuralPunctuation,
+  isPlaceholderValue,
+  isStateIdentifier,
+  isTemplateValue,
+} from '../value-filter';
 
 const PASSWORD_ASSIGNMENT_PATTERN =
   /(?:password|passwd|pwd)\s*[:=]\s*['"]([^'"]{4,})['"]/i;
@@ -6,9 +12,24 @@ const PASSWORD_ASSIGNMENT_PATTERN =
 const PLACEHOLDER_PATTERN =
   /^(changeme|example|xxx+|<.*>|\$\{.*\}|your[_-]?password)$/i;
 
-// Test/fixture/example paths used to be excluded by a regex here. That is
-// now SECRET_SKIP_GLOBS, applied to the whole `secret.*` family in
-// rule-runner.ts — one tested list instead of a copy per rule.
+// Test/fixture/example paths are not excluded here: the processor stores a
+// hit there as suppressed (src/queue/suppression.ts), for every rule alike.
+
+// Not a password (v1.5.0 delta 2 §3), using ValueFilter's definitions so
+// they cannot drift apart: a template (`{{ vault_password }}`), a
+// placeholder or the key's own name, a state name (`not_configured`), or
+// UI prose with spaces (`'Enter your password'`). The letters-only and
+// entropy checks ValueFilter applies to tokens are deliberately left out —
+// human passwords like `letmein` are short and letters-only, and still real.
+function isNotAPassword(value: string): boolean {
+  return (
+    PLACEHOLDER_PATTERN.test(value) ||
+    isTemplateValue(value) ||
+    isPlaceholderValue(value) ||
+    isStateIdentifier(value) ||
+    hasStructuralPunctuation(value)
+  );
+}
 
 export const secretHardcodedPasswordRule: Rule = {
   id: 'secret.hardcoded_password',
@@ -25,7 +46,7 @@ export const secretHardcodedPasswordRule: Rule = {
         continue;
       }
       const value = match[1];
-      if (PLACEHOLDER_PATTERN.test(value)) {
+      if (isNotAPassword(value)) {
         continue;
       }
       findings.push({

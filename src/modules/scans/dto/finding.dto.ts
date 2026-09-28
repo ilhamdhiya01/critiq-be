@@ -6,7 +6,7 @@ import {
 
 // Lowercase on the wire, matching the PRD's API examples; the Prisma enum
 // stays uppercase like every other enum in the schema.
-export type ApiSuppressionReason = 'test_file' | 'regex_literal';
+export type ApiSuppressionReason = 'test_file' | 'comment' | 'regex_literal';
 
 export function toApiSuppressionReason(
   reason: SuppressionReason | null,
@@ -14,6 +14,8 @@ export function toApiSuppressionReason(
   switch (reason) {
     case SuppressionReason.TEST_FILE:
       return 'test_file';
+    case SuppressionReason.COMMENT:
+      return 'comment';
     case SuppressionReason.REGEX_LITERAL:
       return 'regex_literal';
     default:

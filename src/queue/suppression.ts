@@ -1,5 +1,10 @@
 import { SuppressionReason } from '../generated/prisma/enums';
-import { isDataFixturePath, isTestLikePath } from './rules/path-filter';
+import { isInsideComment } from './rules/comment-span';
+import {
+  isDataFixturePath,
+  isMustScanPath,
+  isTestLikePath,
+} from './rules/path-filter';
 import { isInsideRegexLiteral } from './rules/regex-literal';
 
 export interface SuppressionInput {
@@ -34,12 +39,21 @@ export function suppressesOnTestFile(ruleId: string): boolean {
   return isSecretOrConfig(ruleId) || TEST_SUPPRESSED_CODE_RULES.has(ruleId);
 }
 
+// Same families as test files (v1.5.0 delta 2): a secret or an insecure
+// option in a comment is documentation or dead code. eval / SQL / shell are
+// not — and their rules already skip comment-only lines themselves.
+export function suppressesOnComment(ruleId: string): boolean {
+  return suppressesOnTestFile(ruleId);
+}
+
 export function isRegexAware(ruleId: string): boolean {
   return isSecretOrConfig(ruleId) || REGEX_AWARE_CODE_RULES.has(ruleId);
 }
 
 // Decides, per finding, whether it is stored as active (null) or suppressed.
 // Lives here rather than in each rule so a rule added later cannot forget it.
+// One reason per finding, in priority order: TEST_FILE > COMMENT >
+// REGEX_LITERAL.
 export function classifySuppression(
   input: SuppressionInput,
 ): SuppressionReason | null {
@@ -49,6 +63,17 @@ export function classifySuppression(
   }
   if (isTestLikePath(input.filePath) && suppressesOnTestFile(input.ruleId)) {
     return SuppressionReason.TEST_FILE;
+  }
+  // Config/infra files are exempt: a commented-out key in `.env` is still
+  // in git history (deliberate deviation from the delta-2 spec).
+  if (
+    suppressesOnComment(input.ruleId) &&
+    input.match &&
+    input.lineText !== undefined &&
+    !isMustScanPath(input.filePath) &&
+    isInsideComment(input.lineText, input.match.start, input.filePath)
+  ) {
+    return SuppressionReason.COMMENT;
   }
   if (
     isRegexAware(input.ruleId) &&

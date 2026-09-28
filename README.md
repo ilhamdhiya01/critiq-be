@@ -12,8 +12,8 @@ This repository (`critiq-be`) contains the backend API for Critiq, built with **
 > < 300 ms, no provider I/O); a separate `worker` process (same image,
 > `dist/src/worker.js`) fetches the diff, runs Critical-only static rules on
 > added lines, and stores `scans` / `findings`. Redis 7 + BullMQ. Findings in
-> test files, docs, fixtures, or inside regex literals are **stored but
-> suppressed** — not counted, not notified, not annotated. AI analysis follows
+> test files, docs, fixtures, comments, or inside regex literals are **stored
+> but suppressed** — not counted, not notified, not annotated. AI analysis follows
 > in v1.5.1.
 >
 > Credentials (since v1.4): login (GitHub or GitLab.com) is identity only.
@@ -30,7 +30,7 @@ Critiq unifies pull requests from **GitHub (org)** and **GitLab (self-hosted)** 
 
 - OAuth login (GitHub / GitLab), session issuance, and self-serve organization provisioning
 - Webhook ingestion (PR/MR push → queued diff scan, organization resolved from the connected repo, per-repo scan scope)
-- Diff-only scanning: 31 static Critical rules (secrets, eval/SQL/shell injection, insecure TLS, leftover debugger, Dockerfile/CORS config) in v1.5.0; AI provider analysis in v1.5.1
+- Diff-only scanning: 30 static Critical rules (secrets, eval/SQL/shell injection, insecure TLS, leftover debugger, Dockerfile/CORS config) in v1.5.0; AI provider analysis in v1.5.1
 - Quality gate evaluation, branch policy enforcement, and review decisions
 - Audit logging for every mutation, scoped per organization
 
@@ -72,7 +72,7 @@ These are backend invariants, not UI details:
 
 - **Human-in-the-loop is absolute** — Approve/Request Changes can only be performed by a human, in every review mode. No scan job or AI job ever calls the review endpoint itself.
 - **Diff-only scanning** — one scan per PR push; Critiq never reads the full codebase, and rules only evaluate added (`+`) lines.
-- **Suppressed findings are not findings** — a finding in a test file, doc, fixture, or regex literal is stored with a `suppressedReason` but excluded from `criticalCount`, notifications, and diff annotations.
+- **Suppressed findings are not findings** — a finding in a test file, doc, fixture, source-code comment, or regex literal is stored with a `suppressedReason` (`test_file` > `comment` > `regex_literal`) but excluded from `criticalCount`, notifications, and diff annotations. Config/infra files (`.env`, `docker-compose*`, `Dockerfile*`, `*.tf`, …) are never suppressed as `test_file` or `comment` — a credential commented out there is still in git history.
 - **Quality gate** = `PASSED` when there are 0 active Critical findings on enabled rules and CI is green; `FAILED` otherwise. Both conditions are checked explicitly.
 - **Policy precedence** — branch policy (`Manual only` / `Require both`) overrides the reviewer's personal mode preference. A `branch/*` pattern applies to all branches with that prefix. The `effective_policy` on a PR is snapshotted at open/mode-selection time, not live-joined, so audit history stays accurate if the branch policy changes later.
 - **Require both** — approval is rejected (`422`) until `manual_confirmation: true` is explicitly sent, even when AI analysis is complete.
@@ -275,6 +275,8 @@ Carried over from the product PRD — resolve before relying on the affected beh
 - Diff size limit for AI analysis (context window) — static analysis is already capped at 1 MB (D7); the AI limit is decided in v1.5.1
 - Scans (D7): should PRs already open when v1.5.0 deploys be backfilled automatically, or only via F11 manual re-scan?
 - Scans (D7): Major/Minor rules — per-organization opt-in, or Critical-only until AI summary is stable?
+- Scans (D7): block comments (`/* … */`, `"""…"""`) opened before the first added line are invisible to a diff-only scan, so a secret inside one stays active — acceptable, or fetch file context?
+- Scans (D7): a value-only entropy rule (`secret.high_entropy`, credentials with no telling key name) was removed from v1.5.0 — propose it formally, or leave uncovered?
 - Whether inline comments sync back to GitHub/GitLab as native review comments
 - Audit log retention and export requirements (CSV/SIEM)
 - Final validation of the A/B/C quality rating formula against historical data

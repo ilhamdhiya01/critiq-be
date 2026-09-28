@@ -155,9 +155,17 @@ describe('filterValue', () => {
       ).toBeNull();
     });
 
-    it('keeps a quoted literal that merely contains a parenthesis', () => {
+    // v1.5.0 delta 2 §3.1: brackets are structural punctuation now, quoted
+    // or not — the trade-off for rejecting operator strings and inline JSON.
+    it('rejects a value containing brackets, even quoted', () => {
       const raw = "API_SECRET = 'Passw0rd(2026xyz'";
-      expect(filterValue(candidate('Passw0rd(2026xyz', { raw }))).toBeNull();
+      expect(filterValue(candidate('Passw0rd(2026xyz', { raw }))).toBe(
+        'not_secret_shaped',
+      );
+    });
+
+    it('keeps the symbols real passwords contain', () => {
+      expect(filterValue(candidate('Zx9!qL2#mN8$vB4@kP7&wR3*'))).toBeNull();
     });
 
     it('rejects a bare 40-hex git sha', () => {
