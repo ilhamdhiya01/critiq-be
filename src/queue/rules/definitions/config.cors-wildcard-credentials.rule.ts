@@ -1,4 +1,4 @@
-import { matchesAsCode } from '../line-context';
+import { findCodeMatch } from '../line-context';
 import { Rule, RuleFinding } from '../rule.interface';
 
 // origin: '*' and credentials: true are each individually fine, but
@@ -25,16 +25,31 @@ export const configCorsWildcardCredentialsRule: Rule = {
     for (let i = 0; i < addedLines.length; i++) {
       // Both halves must be actual config, not a comment or a string that
       // merely describes the combination (e.g. this rule's own `message`).
-      if (!matchesAsCode(ORIGIN_WILDCARD_PATTERN, addedLines[i].text)) {
+      const origin = findCodeMatch(
+        ORIGIN_WILDCARD_PATTERN,
+        addedLines[i].text,
+        ctx.language,
+      );
+      if (!origin) {
         continue;
       }
       const windowEnd = Math.min(addedLines.length, i + WINDOW_SIZE);
       for (let j = i; j < windowEnd; j++) {
-        if (matchesAsCode(CREDENTIALS_TRUE_PATTERN, addedLines[j].text)) {
+        if (
+          findCodeMatch(
+            CREDENTIALS_TRUE_PATTERN,
+            addedLines[j].text,
+            ctx.language,
+          )
+        ) {
+          // Position of the origin half, on lineStart — that is the line the
+          // processor checks for a regex literal.
           findings.push({
             lineStart: addedLines[i].newLine,
             lineEnd: addedLines[j].newLine,
             snippet: null,
+            matchStart: origin.start,
+            matchLength: origin.length,
           });
           break;
         }

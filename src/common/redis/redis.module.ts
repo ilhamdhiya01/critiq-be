@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { REDIS_CLIENT } from './redis.constants';
 import Redis from 'ioredis';
 import { ConfigService } from '@nestjs/config';
+import { RateLimiterService } from './rate-limiter.service';
 
 // Separate ioredis instance from BullMQ's own connection (QueueModule) —
 // BullMQ requires maxRetriesPerRequest: null and different blocking-command
@@ -15,7 +16,8 @@ import { ConfigService } from '@nestjs/config';
         new Redis(configService.getOrThrow<string>('redis.url')),
       inject: [ConfigService],
     },
+    RateLimiterService,
   ],
-  exports: [REDIS_CLIENT],
+  exports: [REDIS_CLIENT, RateLimiterService],
 })
 export class RedisModule {}

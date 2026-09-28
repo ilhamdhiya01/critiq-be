@@ -120,6 +120,46 @@ describe('filterValue', () => {
       expect(filterValue(candidate(value))).toBeNull();
     });
 
+    // assignment_literal captures up to the first quote, so a regex built
+    // with a call arrives as the call head (acceptance 10 of the v1.5.0
+    // suppression delta).
+    it.each([
+      ['SECRET_RE = re.compile(r"(api[_-]?key)=\\w{16,}")', 're.compile(r'],
+      ['const API_SECRET = getSecretFrom(vault)', 'getSecretFrom(vault'],
+    ])('rejects the call expression in %s', (raw, value) => {
+      expect(filterValue(candidate(value, { raw }))).toBe('not_secret_shaped');
+    });
+
+    it('rejects a brace template', () => {
+      expect(filterValue(candidate('scan:{repoId}:{prNumber}:{headSha}'))).toBe(
+        'not_secret_shaped',
+      );
+    });
+
+    it('rejects the branches of a ternary', () => {
+      const raw =
+        "reason: repository ? 'no_secret_configured' : 'unknown_repo',";
+      expect(
+        filterValue(
+          candidate('unknown_repo', { key: 'no_secret_configured', raw }),
+        ),
+      ).toBe('not_secret_shaped');
+    });
+
+    // The ternary check must not swallow a credential in a URL query string.
+    it('keeps a query-string credential after a `?`', () => {
+      const raw =
+        'const url = `https://api.example.io/v1?api_key=q8Zr4TkWm2Lx9VbN`;';
+      expect(
+        filterValue(candidate('q8Zr4TkWm2Lx9VbN', { key: 'api_key', raw })),
+      ).toBeNull();
+    });
+
+    it('keeps a quoted literal that merely contains a parenthesis', () => {
+      const raw = "API_SECRET = 'Passw0rd(2026xyz'";
+      expect(filterValue(candidate('Passw0rd(2026xyz', { raw }))).toBeNull();
+    });
+
     it('rejects a bare 40-hex git sha', () => {
       const sha = 'ec10b625ad4e3b3f6544e26f1b5aa2eab5aa7bce';
       expect(filterValue(candidate(sha, { key: 'COMMIT' }))).toBe(

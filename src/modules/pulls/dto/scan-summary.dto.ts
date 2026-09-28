@@ -1,40 +1,5 @@
-import {
-  FindingSeverity,
-  FindingSource,
-  ScanStatus,
-  ScanTrigger,
-} from '../../../generated/prisma/enums';
-
-// One flagged issue from a scan. Mirrors the Finding row minus the internal
-// bookkeeping the FE has no use for (organizationId, scanId, fingerprint) —
-// the usual "never return a raw Prisma entity" rule.
-export class FindingDto {
-  id!: string;
-  source!: FindingSource;
-  ruleId!: string;
-  severity!: FindingSeverity;
-  title!: string;
-  message!: string;
-  filePath!: string;
-  lineStart!: number;
-  lineEnd!: number;
-  snippet!: string | null;
-
-  constructor(partial: {
-    id: string;
-    source: FindingSource;
-    ruleId: string;
-    severity: FindingSeverity;
-    title: string;
-    message: string;
-    filePath: string;
-    lineStart: number;
-    lineEnd: number;
-    snippet: string | null;
-  }) {
-    Object.assign(this, partial);
-  }
-}
+import { ScanStatus, ScanTrigger } from '../../../generated/prisma/enums';
+import { FindingDto } from '../../scans/dto/finding.dto';
 
 // The scan a PR's review page is built from, plus its findings.
 //
@@ -52,6 +17,11 @@ export class ScanSummaryDto {
   // True when this scan hit the 500-findings cap: `findings` below holds the
   // first 500, and the FE should say there were more.
   findingsTruncated!: boolean;
+  // Findings stored for visibility but not counted (test files, regex
+  // literals). They are not in `findings` below — see GET
+  // orgs/:orgId/scans/:scanId/findings.
+  suppressedCount!: number;
+  suppressedTruncated!: boolean;
   filesChanged!: number | null;
   diffBytes!: number | null;
   rulesetVersion!: string;
@@ -59,6 +29,7 @@ export class ScanSummaryDto {
   errorMessage!: string | null;
   startedAt!: Date | null;
   finishedAt!: Date | null;
+  // Active findings only.
   findings!: FindingDto[];
 
   constructor(partial: {
@@ -70,6 +41,8 @@ export class ScanSummaryDto {
     findingsCount: number;
     criticalCount: number;
     findingsTruncated: boolean;
+    suppressedCount: number;
+    suppressedTruncated: boolean;
     filesChanged: number | null;
     diffBytes: number | null;
     rulesetVersion: string;

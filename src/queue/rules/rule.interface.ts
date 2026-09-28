@@ -21,6 +21,11 @@ export interface RuleFinding {
   // credential, even to a security-review UI.
   snippet: string | null;
   candidate?: SecretCandidate;
+  // Column of the match on the `lineStart` line. Used only to decide whether
+  // the match sits inside a regex literal (src/queue/suppression.ts); a rule
+  // that omits it can still be suppressed by path, never as REGEX_LITERAL.
+  matchStart?: number;
+  matchLength?: number;
 }
 
 export interface RuleFileContext {

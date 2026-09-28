@@ -1,3 +1,5 @@
+import { SuppressionReason } from '../../../generated/prisma/enums';
+import { classifySuppression } from '../../suppression';
 import { runRuleAgainstFixture } from '../test-helpers';
 import { secretAssignmentLiteralRule } from './secret.assignment-literal.rule';
 
@@ -57,14 +59,22 @@ describe('secret.assignment_literal', () => {
   });
 
   // Acceptance 16's second half: the same line in an example file is noise.
-  it('does not flag a credential in .env.example', () => {
+  // Since the v1.5.0 suppression delta the rule still reports it, and the
+  // processor stores it suppressed (not counted) rather than dropping it.
+  it('reports a credential in .env.example, which the processor suppresses', () => {
     const result = runRuleAgainstFixture(
       secretAssignmentLiteralRule,
       'positive-2.env',
       { filePath: '.env.example' },
     );
-    expect(result.hits).toHaveLength(0);
-    expect(result.ruleRuns).toBe(0);
+    expect(result.hits.length).toBeGreaterThan(0);
+    expect(
+      classifySuppression({
+        ruleId: secretAssignmentLiteralRule.id,
+        filePath: '.env.example',
+        language: '*',
+      }),
+    ).toBe(SuppressionReason.TEST_FILE);
   });
 
   it('still flags the same line in a real .env', () => {

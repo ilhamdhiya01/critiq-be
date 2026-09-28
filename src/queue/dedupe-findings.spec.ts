@@ -1,3 +1,4 @@
+import { SuppressionReason } from '../generated/prisma/enums';
 import { dedupeFindings, LocatedHit } from './dedupe-findings';
 
 function hit(overrides: Partial<LocatedHit> = {}): LocatedHit {
@@ -124,5 +125,56 @@ describe('dedupeFindings', () => {
       }),
     ]);
     expect(finding.fingerprint).not.toContain('abcd');
+  });
+
+  // v1.5.0 suppression delta, acceptance 11: an identical hit that is both
+  // active and suppressed is stored once, as active — a real hit must never
+  // be hidden because a copy of it also sits in a regex on another line.
+  describe('active vs suppressed', () => {
+    it('keeps one finding, active, ranged over the active lines only', () => {
+      const findings = dedupeFindings([
+        hit({
+          lineStart: 3,
+          lineEnd: 3,
+          suppressedReason: SuppressionReason.REGEX_LITERAL,
+        }),
+        hit({ lineStart: 10, lineEnd: 10 }),
+        hit({ lineStart: 42, lineEnd: 42 }),
+      ]);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0].suppressedReason).toBeNull();
+      expect(findings[0].lineStart).toBe(10);
+      expect(findings[0].lineEnd).toBe(42);
+      expect(findings[0].message).toMatch(/\(muncul di 2 baris\)$/);
+    });
+
+    it('stays suppressed, with the first reason, when nothing is active', () => {
+      const findings = dedupeFindings([
+        hit({
+          lineStart: 3,
+          lineEnd: 3,
+          suppressedReason: SuppressionReason.TEST_FILE,
+        }),
+        hit({
+          lineStart: 8,
+          lineEnd: 8,
+          suppressedReason: SuppressionReason.REGEX_LITERAL,
+        }),
+      ]);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0].suppressedReason).toBe(SuppressionReason.TEST_FILE);
+      expect(findings[0].lineStart).toBe(3);
+      expect(findings[0].lineEnd).toBe(8);
+    });
+
+    it('does not let the reason change the fingerprint', () => {
+      const [active] = dedupeFindings([hit()]);
+      const [suppressed] = dedupeFindings([
+        hit({ suppressedReason: SuppressionReason.TEST_FILE }),
+      ]);
+      expect(suppressed.fingerprint).toBe(active.fingerprint);
+    });
   });
 });

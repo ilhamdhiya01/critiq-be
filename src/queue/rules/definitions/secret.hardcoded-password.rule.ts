@@ -31,6 +31,8 @@ export const secretHardcodedPasswordRule: Rule = {
       findings.push({
         lineStart: line.newLine,
         lineEnd: line.newLine,
+        matchStart: match.index,
+        matchLength: match[0].length,
         snippet: null,
       });
     }
