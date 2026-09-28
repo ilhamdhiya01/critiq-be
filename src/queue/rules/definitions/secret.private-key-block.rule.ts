@@ -13,10 +13,13 @@ export const secretPrivateKeyBlockRule: Rule = {
   test(ctx) {
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
-      if (PRIVATE_KEY_HEADER_PATTERN.test(line.text)) {
+      const match = PRIVATE_KEY_HEADER_PATTERN.exec(line.text);
+      if (match) {
         findings.push({
           lineStart: line.newLine,
           lineEnd: line.newLine,
+          matchStart: match.index,
+          matchLength: match[0].length,
           // The header line alone doesn't leak key material, but the
           // convention for every secret.* rule is to never persist matched
           // text — redact uniformly so reviewers don't need to remember

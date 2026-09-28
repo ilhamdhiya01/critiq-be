@@ -1,7 +1,6 @@
 import { Rule, RuleFileContext, RuleFinding } from './rule.interface';
 import { ruleAppliesTo } from './language-detector';
 import { MAX_LINE_LENGTH } from './rules.constants';
-import { isSecretSkippedPath } from './path-filter';
 import { FilterReason, filterValue } from './value-filter';
 
 // What survives redaction and is safe to carry past the runner: enough to
@@ -22,6 +21,8 @@ export interface RuleHit extends RuleFinding {
   // Present only for rules that emitted a candidate — i.e. where a real
   // value exists to discriminate on.
   identity?: FindingIdentity;
+  // Column of the match on lineStart, for regex-literal suppression.
+  match?: { start: number; length: number };
 }
 
 export interface RuleCrash {
@@ -99,8 +100,6 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
     return { hits, crashes, filtered, ruleRuns, budgetExceeded: true };
   }
 
-  const secretRulesSkipped = isSecretSkippedPath(filePath);
-
   // Clipped rather than dropped, so a long line (e.g. a base64 blob that is
   // actually a key) still gets a chance to match on its first N characters.
   const clippedLines = addedLines.map((line) =>
@@ -122,12 +121,9 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
     if (!ruleAppliesTo(rule.languages, language)) {
       continue;
     }
-    // Documentation, example env files and test fixtures are where fake
-    // credentials legitimately live. Checked as a family prefix rather than
-    // a per-rule opt-in so a rule added later can't forget to honour it.
-    if (secretRulesSkipped && rule.id.startsWith('secret.')) {
-      continue;
-    }
+    // No path-based skipping here any more: rules run on test files and
+    // docs too, and the processor stores those hits as suppressed
+    // (src/queue/suppression.ts) instead of dropping them.
 
     ruleRuns += 1;
     const ruleStartedAt = Date.now();
@@ -170,6 +166,7 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
           severity: rule.severity,
           title: rule.title,
           message: rule.message,
+          match: matchPosition(finding),
           identity: finding.candidate && {
             key: finding.candidate.key ?? '',
             valuePrefix: finding.candidate.value.slice(0, 4),
@@ -191,4 +188,23 @@ export function runRulesForFile(input: RunRulesInput): RunRulesResult {
   }
 
   return { hits, crashes, filtered, ruleRuns, budgetExceeded: false };
+}
+
+// A rule's explicit position wins; otherwise one is derived from the
+// candidate while it is still in hand (it is stripped right after), as the
+// value's offset within the raw line. Nothing but two integers leaves here.
+function matchPosition(
+  finding: RuleFinding,
+): { start: number; length: number } | undefined {
+  if (finding.matchStart !== undefined && finding.matchLength !== undefined) {
+    return { start: finding.matchStart, length: finding.matchLength };
+  }
+  const candidate = finding.candidate;
+  if (candidate) {
+    const start = candidate.raw.indexOf(candidate.value);
+    if (start >= 0) {
+      return { start, length: candidate.value.length };
+    }
+  }
+  return undefined;
 }

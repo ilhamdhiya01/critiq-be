@@ -1,4 +1,9 @@
 import { Rule, RuleFinding } from '../rule.interface';
+import {
+  isPlaceholderValue,
+  isStateIdentifier,
+  isTemplateValue,
+} from '../value-filter';
 
 // `postgresql` as well as `postgres`: that is the spelling PostgreSQL's own
 // docs and Prisma use, so it is what a real DATABASE_URL almost always
@@ -26,12 +31,21 @@ export const secretDbUrlWithPasswordRule: Rule = {
       }
       const scheme = match[1];
       const password = match[2];
-      if (PLACEHOLDER_PATTERN.test(password)) {
+      // Same value definitions as ValueFilter (v1.5.0 delta 2 §3):
+      // `{{db_password}}`, `pass`, `db_password` are not passwords.
+      if (
+        PLACEHOLDER_PATTERN.test(password) ||
+        isTemplateValue(password) ||
+        isPlaceholderValue(password) ||
+        isStateIdentifier(password)
+      ) {
         continue;
       }
       findings.push({
         lineStart: line.newLine,
         lineEnd: line.newLine,
+        matchStart: match.index,
+        matchLength: match[0].length,
         snippet: `${scheme}://****:****@`,
       });
     }

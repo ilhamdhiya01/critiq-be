@@ -1,4 +1,4 @@
-import { matchesAsCode } from '../line-context';
+import { findCodeMatch } from '../line-context';
 import { Rule, RuleFinding } from '../rule.interface';
 
 const PATTERNS = [
@@ -20,12 +20,20 @@ export const codeInsecureTlsRule: Rule = {
     for (const line of ctx.addedLines) {
       // Comments and string prose (docs, error messages — including this
       // rule's own `message`) only mention the option; they don't set it.
-      if (PATTERNS.some((pattern) => matchesAsCode(pattern, line.text))) {
-        findings.push({
-          lineStart: line.newLine,
-          lineEnd: line.newLine,
-          snippet: line.text.trim().slice(0, 200),
-        });
+      // A regex that looks for the option is kept, with its position, so the
+      // processor can store it suppressed as REGEX_LITERAL.
+      for (const pattern of PATTERNS) {
+        const match = findCodeMatch(pattern, line.text, ctx.language);
+        if (match) {
+          findings.push({
+            lineStart: line.newLine,
+            lineEnd: line.newLine,
+            snippet: line.text.trim().slice(0, 200),
+            matchStart: match.start,
+            matchLength: match.length,
+          });
+          break;
+        }
       }
     }
     return findings;

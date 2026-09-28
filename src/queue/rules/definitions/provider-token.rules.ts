@@ -55,6 +55,8 @@ function providerTokenRule(spec: ProviderTokenSpec): Rule {
           findings.push({
             lineStart: line.newLine,
             lineEnd: line.newLine,
+            matchStart: match.index,
+            matchLength: match[0].length,
             snippet: match[0].slice(0, prefixLength) + '****',
           });
         }
