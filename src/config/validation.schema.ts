@@ -34,4 +34,7 @@ export const validationSchema = Joi.object({
   SCAN_CONCURRENCY: Joi.number().default(3),
   SCAN_JOB_TIMEOUT_MS: Joi.number().default(120000),
   SCAN_MAX_DIFF_BYTES: Joi.number().default(1048576),
+  // Comma-separated hostnames, e.g. `vllm.internal,localhost`. Optional:
+  // empty means every openai_compatible base URL must be public https.
+  AI_COMPAT_HTTP_ALLOWLIST: Joi.string().allow('').optional(),
 });

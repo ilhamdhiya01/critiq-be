@@ -58,4 +58,13 @@ export default () => ({
     jobTimeoutMs: Number(process.env.SCAN_JOB_TIMEOUT_MS ?? 120000),
     maxDiffBytes: Number(process.env.SCAN_MAX_DIFF_BYTES ?? 1048576),
   },
+  ai: {
+    // Hosts an openai_compatible base URL may use over plain http:// or on
+    // a private/internal address (self-hosted vLLM, Ollama). Everything else
+    // must be public https:// — see src/modules/ai/base-url-guard.ts.
+    compatHttpAllowlist: (process.env.AI_COMPAT_HTTP_ALLOWLIST ?? '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
+  },
 });
