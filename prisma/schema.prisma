@@ -327,6 +327,10 @@ enum FindingSource {
 enum SuppressionReason {
   TEST_FILE
   REGEX_LITERAL
+  // Last, not in priority order: Postgres ADD VALUE appends, and keeping the
+  // schema in the same order avoids a spurious diff. Priority lives in
+  // classifySuppression (test_file > comment > regex_literal).
+  COMMENT
 }
 
 

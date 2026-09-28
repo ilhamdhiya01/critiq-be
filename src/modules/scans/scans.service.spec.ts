@@ -202,6 +202,7 @@ describe('ScansService', () => {
       expect(result.suppressedCount).toBe(2);
       expect(result.suppressedByReason).toEqual({
         test_file: 1,
+        comment: 0,
         regex_literal: 1,
       });
     });
@@ -223,6 +224,7 @@ describe('ScansService', () => {
       expect(result.suppressedCount).toBe(2);
       expect(result.suppressedByReason).toEqual({
         test_file: 1,
+        comment: 0,
         regex_literal: 1,
       });
     });

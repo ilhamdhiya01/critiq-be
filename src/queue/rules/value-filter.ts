@@ -36,6 +36,11 @@ const ENV_REFERENCE_LINE_MARKERS = [
   'arn:aws:secretsmanager',
   'config(',
   'settings.',
+  // CloudFormation `!Ref X`, 1Password `op://vault/item`, GitHub Actions
+  // `${{ secrets.X }}` (also caught by 'secrets.').
+  '!ref',
+  'op://',
+  '${{',
 ];
 
 // 2. The value is a stand-in a human is expected to replace.
@@ -55,7 +60,9 @@ const PLACEHOLDER_SUBSTRINGS = [
   'fixme',
   'redacted',
   'removed',
-  'xxxx',
+  'masked',
+  'my_',
+  'xxx',
   '****',
   'insert_',
   'replace_',
@@ -65,7 +72,24 @@ const PLACEHOLDER_SUBSTRINGS = [
 
 // Whole-value equality only — 'test' and 'none' appear inside plenty of
 // real credentials, so substring matching them would suppress genuine hits.
-const PLACEHOLDER_EXACT = ['test', 'null', 'none', 'undefined', 'changeme'];
+const PLACEHOLDER_EXACT = [
+  'test',
+  'null',
+  'none',
+  'undefined',
+  'changeme',
+  'tbd',
+  'secret',
+  'password',
+  'pass',
+  'token',
+];
+
+// A generic word as the *first segment* — `secret_value`, `token-here`,
+// `test.key` — is someone naming the slot, not filling it. Only with a
+// separator after it: `secretpass` or `tokenXk29…` could be anything.
+const PLACEHOLDER_PREFIX_PATTERN =
+  /^(?:test|secret|password|token)(?:[_.-]|$)/i;
 
 // 4. The value has a structure that rules out it being a credential.
 const UUID_PATTERN =
@@ -113,7 +137,24 @@ function isPlaceholder(value: string): boolean {
   if (PLACEHOLDER_EXACT.includes(lower)) {
     return true;
   }
+  if (PLACEHOLDER_PREFIX_PATTERN.test(value)) {
+    return true;
+  }
   return PLACEHOLDER_SUBSTRINGS.some((needle) => lower.includes(needle));
+}
+
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// Placeholder words, plus a value that just repeats its own key name
+// (`password = "password"`, `api_key: api-key`). Exported for rules that
+// validate a value without going through filterValue.
+export function isPlaceholderValue(value: string, key?: string): boolean {
+  if (isPlaceholder(value)) {
+    return true;
+  }
+  return key !== undefined && normalizeName(key) === normalizeName(value);
 }
 
 // A value made of one repeated character, or a long run straight off the
@@ -160,6 +201,10 @@ function longestSequentialRun(value: string): number {
   return longest;
 }
 
+// 5. Value-shape checks (v1.5.0 delta 2 §3). Exported so rules that check a
+// value themselves (hardcoded_password, db_url_with_password) apply the same
+// definitions instead of keeping their own copies.
+
 // `${...}` means the real value only exists at runtime, so whatever is in
 // the source is a template, not a credential. Caught here rather than by
 // entropy, because interpolation syntax is itself varied enough to push a
@@ -169,15 +214,80 @@ function longestSequentialRun(value: string): number {
 //
 // `{name}` is the same idea for str.format, route and key templates —
 // `scan:{repoId}:{prNumber}:{headSha}`. Generated credentials (base64, hex,
-// random alphanumerics) never contain a brace-wrapped identifier.
-const INTERPOLATION_PATTERN = /\$\{|#\{|%\(|<%=|\{[A-Za-z_]\w*\}/;
+// random alphanumerics) never contain a brace-wrapped identifier. Likewise
+// printf `%s`, `__VAULT_PASSWORD__` build-time tokens, `<your-key>` and an
+// elided `...` / `…`.
+const INTERPOLATION_PATTERN =
+  /\$\{|#\{|%\(|%s|<%=|\{[A-Za-z_]\w*\}|__[A-Za-z0-9][A-Za-z0-9_]*__|<[^<>]*>|\.\.\.|…/;
 
-// An unquoted value that opens a call — `re.compile(r`, `getSecret(`,
-// `Buffer.from(` — is code on the right-hand side of an assignment, not a
-// literal credential. assignment_literal's value capture stops at the first
-// quote, so `SECRET_RE = re.compile(r"…")` arrives here as `re.compile(r`.
-// Only unquoted values: a quoted 'Passw0rd(2026…' is still a literal.
-const CALL_EXPRESSION_PATTERN = /^[\w$.]+\(/;
+export function isTemplateValue(value: string): boolean {
+  return INTERPOLATION_PATTERN.test(value);
+}
+
+// Characters that surround a value in code but never appear in a generated
+// credential: whitespace, quotes, brackets, `,` and `;`. This is what
+// rejects `'(,=:[!&|?{};+-*%<>~^'`, prose from a comment, inline JSON and a
+// call like `re.compile(r` (assignment_literal's capture stops at the first
+// quote). `!@#$%^&*~` are NOT here — they are exactly what real passwords
+// contain.
+const STRUCTURAL_PUNCTUATION_PATTERN = /[\s"'`()[\]{}<>,;]/;
+
+export function hasStructuralPunctuation(value: string): boolean {
+  return STRUCTURAL_PUNCTUATION_PATTERN.test(value);
+}
+
+// Names of a state or a constant — `no_secret_configured`, `read-only`,
+// `TOKEN_EXPIRED` — rather than a secret. snake/kebab must be letters only:
+// `whsec_a1b2c3…` is a real Stripe webhook secret with the same shape plus
+// digits.
+const SNAKE_OR_KEBAB_WORDS_PATTERN = /^[a-z]+(?:[_-][a-z]+)+$/;
+const SCREAMING_SNAKE_PATTERN = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
+
+function digitRatio(value: string): number {
+  return (value.match(/\d/g) ?? []).length / value.length;
+}
+
+export function isStateIdentifier(value: string): boolean {
+  if (SNAKE_OR_KEBAB_WORDS_PATTERN.test(value)) {
+    return true;
+  }
+  return SCREAMING_SNAKE_PATTERN.test(value) && digitRatio(value) < 0.2;
+}
+
+// Letters-only and short: `NotConfigured`, `unknownRepo`. Generated tokens
+// almost always carry digits. Only for token-style values — a human
+// password like `letmein` is letters-only too, so hardcoded_password does
+// not use this.
+const LETTERS_ONLY_PATTERN = /^[A-Za-z]+$/;
+const MAX_LETTERS_ONLY_IDENTIFIER = 24;
+
+// Shannon entropy floor for token-style values of 16+ characters. The
+// delta-2 prompt asked for 3.0, but that discards
+// `akjsbdkajsbkjabskdjbaskdjbskjdf` (2.69), the very secret the rule was
+// built to catch; 2.5 still rejects fillers like `aaaa…`. Sequential values
+// (`abcdefghijklmnop` = 4.0, `1234567890123456` = 3.25) are high-entropy and
+// are rejected by isPatterned instead.
+const MIN_ENTROPY = 2.5;
+const ENTROPY_MIN_LENGTH = 16;
+
+function shannonEntropy(value: string): number {
+  const counts = new Map<string, number>();
+  for (const char of value) {
+    counts.set(char, (counts.get(char) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const p = count / value.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+function hasLowEntropy(value: string): boolean {
+  return (
+    value.length >= ENTROPY_MIN_LENGTH && shannonEntropy(value) < MIN_ENTROPY
+  );
+}
 
 // `cond ? 'no_secret_configured' : 'unknown_repo'` — assignment_literal reads
 // the true branch as a key and the `:` as an assignment. Only a `:` after a
@@ -205,15 +315,6 @@ function isTernaryBranch(candidate: SecretCandidate): boolean {
   );
 }
 
-function isCallExpression(candidate: SecretCandidate): boolean {
-  if (!CALL_EXPRESSION_PATTERN.test(candidate.value)) {
-    return false;
-  }
-  const at = candidate.raw.indexOf(candidate.value);
-  const before = at > 0 ? candidate.raw[at - 1] : '';
-  return before !== '"' && before !== "'" && before !== '`';
-}
-
 // Identifier-shaped values: CamelCase, snake_case, kebab-case or
 // dot.separated words. Icon names, i18n keys, class names and enum values
 // all look like this, and all of them beat the entropy threshold —
@@ -239,9 +340,10 @@ function isWordSegmented(value: string): boolean {
 function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
   const { value, key } = candidate;
 
-  if (INTERPOLATION_PATTERN.test(value)) return true;
-  if (isCallExpression(candidate)) return true;
+  if (isTemplateValue(value)) return true;
+  if (hasStructuralPunctuation(value)) return true;
   if (isTernaryBranch(candidate)) return true;
+  if (isStateIdentifier(value)) return true;
   if (isWordSegmented(value)) return true;
   if (UUID_PATTERN.test(value)) return true;
   if (SEMVER_PATTERN.test(value)) return true;
@@ -263,10 +365,11 @@ function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
   return false;
 }
 
-// A commented-out line holding a placeholder is documentation. A commented
-// -out line holding a real-looking credential is still a leak — git history
-// does not care that the line starts with `#` — so only the placeholder
-// case is filtered here.
+// A commented-out line holding a placeholder is documentation, so it is not
+// a finding at all. A commented-out line holding a real-looking credential
+// is kept here: the processor stores it suppressed as COMMENT in source code
+// — still visible, since git history does not care about the `#` — and
+// active in config/infra files (src/queue/suppression.ts).
 function isInertComment(candidate: SecretCandidate): boolean {
   const trimmed = candidate.raw.trimStart();
   const isComment = COMMENT_PREFIXES.some((prefix) =>
@@ -291,8 +394,18 @@ export type FilterReason =
 export function filterValue(candidate: SecretCandidate): FilterReason | null {
   if (isEnvReference(candidate)) return 'env_reference';
   if (isStructurallyNotSecret(candidate)) return 'not_secret_shaped';
-  if (isPlaceholder(candidate.value)) return 'placeholder';
-  if (isPatterned(candidate.value)) return 'patterned';
+  if (isPlaceholderValue(candidate.value, candidate.key)) return 'placeholder';
+  if (isPatterned(candidate.value) || hasLowEntropy(candidate.value)) {
+    return 'patterned';
+  }
+  // After `patterned` so `aaaa…` / `abcdefgh…` keep their more specific
+  // reason; what is left here is a short all-letters name.
+  if (
+    LETTERS_ONLY_PATTERN.test(candidate.value) &&
+    candidate.value.length < MAX_LETTERS_ONLY_IDENTIFIER
+  ) {
+    return 'not_secret_shaped';
+  }
   if (isInertComment(candidate)) return 'inert_comment';
   return null;
 }

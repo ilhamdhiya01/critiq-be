@@ -15,7 +15,9 @@ describe('RULES', () => {
 
   // An explicit id list rather than a count: a bare toHaveLength(n) drifts
   // with every add and, worse, still passes when one rule is accidentally
-  // dropped and another added in the same change.
+  // dropped and another added in the same change. This list is also what the
+  // PM checks against the spec (v1.5.0 delta 2, acceptance 2) — change it
+  // only together with the spec.
   it('registers exactly the expected rules', () => {
     expect(RULES.map((rule) => rule.id).sort()).toEqual(
       [
@@ -38,7 +40,6 @@ describe('RULES', () => {
         'secret.gitlab_token',
         'secret.google_api_key',
         'secret.hardcoded_password',
-        'secret.high_entropy_string',
         'secret.jwt_literal',
         'secret.npm_token',
         'secret.openai_key',

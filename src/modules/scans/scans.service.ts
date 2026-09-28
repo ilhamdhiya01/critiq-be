@@ -192,6 +192,7 @@ export class ScansService {
 
     const suppressedByReason: Record<ApiSuppressionReason, number> = {
       test_file: 0,
+      comment: 0,
       regex_literal: 0,
     };
     for (const group of suppressedGroups) {

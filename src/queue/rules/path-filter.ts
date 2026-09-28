@@ -37,6 +37,13 @@ export function isDataFixturePath(filePath: string): boolean {
   return matchesAny(filePath, DATA_FIXTURE_GLOBS);
 }
 
+// Config and infrastructure files (`.env`, docker-compose, Dockerfile,
+// Terraform, …). Never suppressed as test_file or comment: a credential in
+// one — commented out or not — is a real leak in git history.
+export function isMustScanPath(filePath: string): boolean {
+  return matchesAny(filePath, MUST_SCAN_GLOBS);
+}
+
 // Tests, examples and documentation. Whether a finding here is suppressed
 // depends on the rule family (src/queue/suppression.ts) — this only answers
 // "is this a test-like path".
@@ -48,7 +55,7 @@ export function isTestLikePath(filePath: string): boolean {
   if (isDataFixturePath(filePath)) {
     return true;
   }
-  if (matchesAny(filePath, MUST_SCAN_GLOBS)) {
+  if (isMustScanPath(filePath)) {
     return false;
   }
   return matchesAny(filePath, TEST_FILE_GLOBS);

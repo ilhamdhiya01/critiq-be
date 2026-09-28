@@ -6,8 +6,9 @@ import {
   MAX_SUPPRESSED_FINDINGS,
 } from './analyze-diff';
 import { Rule } from './rules/rule.interface';
+import { FIXTURE_SECRETS } from './rules/test-helpers';
 
-const { TEST_FILE, REGEX_LITERAL } = SuppressionReason;
+const { TEST_FILE, REGEX_LITERAL, COMMENT } = SuppressionReason;
 
 function addedFile(path: string, lines: string[]): DiffFile {
   const patch =
@@ -56,11 +57,20 @@ describe('analyzeDiff — suppression', () => {
   });
 
   // Acceptance 4: division is not a regex, so this is not suppressed.
+  // Delta 1 expected this line active; delta 2 supersedes it — the match
+  // sits in a trailing comment, so it is stored as COMMENT. Division not
+  // being read as a regex is what the second line checks.
   it('does not mistake division for a regex literal', () => {
     expect(
       outcomes(
         'src/math.ts',
         'const ratio = a / b / c; // rejectUnauthorized: false',
+      ),
+    ).toEqual({ 'code.insecure_tls': COMMENT });
+    expect(
+      outcomes(
+        'src/math.ts',
+        'const ratio = a / b / c; const o = { rejectUnauthorized: false };',
       ),
     ).toEqual({ 'code.insecure_tls': null });
   });
@@ -108,18 +118,23 @@ describe('analyzeDiff — suppression', () => {
   // Acceptance 9.
   it('suppresses a DB URL in documentation', () => {
     expect(
-      outcomes('README.md', 'DATABASE_URL=postgres://user:pass@host/db'),
+      outcomes('README.md', 'DATABASE_URL=postgres://app:S3cr3t!Pass@host/db'),
     ).toEqual({ 'secret.db_url_with_password': TEST_FILE });
+    // The prompt's own `user:pass` is a placeholder since delta 2 §3 — not
+    // a finding at all, suppressed or otherwise.
+    expect(
+      outcomes('README.md', 'DATABASE_URL=postgres://user:pass@host/db'),
+    ).toEqual({});
   });
 
-  // Acceptance 10. assignment_literal no longer fires at all: ValueFilter
-  // rejects `re.compile(r` as a call expression.
-  it('suppresses a Python re.compile pattern', () => {
+  // Acceptance 10. Nothing active. Since delta 2 nothing fires at all:
+  // ValueFilter rejects `re.compile(r` (structural punctuation), and the
+  // entropy rule that used to be suppressed here was removed.
+  it('reports no active finding for a Python re.compile pattern', () => {
     const result = outcomes(
       'src/detect.py',
       'SECRET_RE = re.compile(r"(api[_-]?key)\\s*=\\s*\\w{16,}")',
     );
-    expect(Object.keys(result).length).toBeGreaterThan(0);
     for (const reason of Object.values(result)) {
       expect(reason).toBe(REGEX_LITERAL);
     }
@@ -210,5 +225,83 @@ describe('analyzeDiff — caps and counts', () => {
     expect(result.diffTooLarge).toBe(true);
     expect(result.ruleRuns).toBe(0);
     expect(result.activeCount).toBe(0);
+  });
+});
+
+// v1.5.0 delta 2, §6. The AWS example key is assembled in test-helpers.ts so
+// no provider-shaped literal exists in the repository.
+describe('analyzeDiff — delta 2: comments and value shape', () => {
+  const AWS = FIXTURE_SECRETS.FAKE_AWS_KEY_EXAMPLE;
+
+  // Acceptance 3.
+  it('suppresses a commented-out key as COMMENT, not dropped', () => {
+    expect(outcomes('src/aws.ts', `// const key = '${AWS}'`)).toEqual({
+      'secret.aws_access_key': COMMENT,
+    });
+  });
+
+  // Acceptance 4 and 5: `//` in a string and `#` in JS are not comments.
+  it.each([
+    `const url = "http://example.com/x"; const key = '${AWS}';`,
+    `color: '#fff'; api_key: '${AWS}'`,
+  ])('keeps the key active in %s', (line) => {
+    expect(outcomes('src/aws.ts', line)['secret.aws_access_key']).toBeNull();
+  });
+
+  // Acceptance 6 and 7.
+  it('tells a trailing Python comment from a commented-out line', () => {
+    expect(
+      outcomes('app.py', `api_key = '${AWS}'  # rotate me`)[
+        'secret.aws_access_key'
+      ],
+    ).toBeNull();
+    expect(
+      outcomes('app.py', `# api_key = '${AWS}'`)['secret.aws_access_key'],
+    ).toBe(COMMENT);
+  });
+
+  // Deliberate deviation: config/infra files keep commented-out keys active.
+  it('keeps a commented-out key in .env active', () => {
+    expect(
+      outcomes('.env', `# AWS_ACCESS_KEY_ID=${AWS}`)['secret.aws_access_key'],
+    ).toBeNull();
+  });
+
+  // Acceptance 8–13 and 15: not a finding at all — not even suppressed.
+  it.each([
+    ['src/config.ts', "SECRET = 'no_secret_configured'"],
+    ['src/config.ts', "STATUS_TOKEN = 'TOKEN_EXPIRED'"],
+    ['config.py', 'password = "{{ vault_password }}"'],
+    ['config.yml', 'token: "${TOKEN}"'],
+    ['config.py', 'key = "<your-api-key>"'],
+    ['config.py', 'password = "password"'],
+    ['config.py', "api_key = 'aaaaaaaaaaaaaaaaaaaa'"],
+    ['src/regex-literal.ts', "const ops = new Set('(,=:[!&|?{};+-*%<>~^');"],
+    ['config/app.conf', 'DATABASE_URL=postgres://app:{{db_password}}@db/prod'],
+    ['config/app.conf', 'DATABASE_URL=postgres://app:password@db/prod'],
+  ])('%s: %s → no finding', (path, line) => {
+    expect(outcomes(path, line)).toEqual({});
+  });
+
+  // Acceptance 12 (second half), 14 (second half) and 16.
+  it.each([
+    [
+      'config.py',
+      "api_key = 'x9Kq2mP7vL4nR8tW1zB5'",
+      'secret.assignment_literal',
+    ],
+    [
+      'config/app.conf',
+      'DATABASE_URL=postgres://app:S3cr3t!Pass@db/prod',
+      'secret.db_url_with_password',
+    ],
+    [
+      '.env',
+      'GITHUB_SECRET=akjsbdkajsbkjabskdjbaskdjbskjdf',
+      'secret.assignment_literal',
+    ],
+  ])('%s: %s stays active', (path, line, ruleId) => {
+    const result = outcomes(path, line);
+    expect(result[ruleId]).toBeNull();
   });
 });
