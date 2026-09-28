@@ -52,3 +52,15 @@ export class AiTestResultDto {
     Object.assign(this, partial);
   }
 }
+
+// GET …/settings/ai for Reviewer/Viewer: no credentials, no budget, no test.
+export class AiSettingsSummaryDto {
+  provider!: AiProviderName | null;
+  model!: string | null;
+  consent!: { granted: boolean };
+  locale!: string;
+
+  constructor(partial: AiSettingsSummaryDto) {
+    Object.assign(this, partial);
+  }
+}

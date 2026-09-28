@@ -108,6 +108,9 @@ function fakePrisma() {
       ),
     },
     aiUsageDaily: { upsert: jest.fn().mockResolvedValue(undefined) },
+    membership: {
+      findUnique: jest.fn().mockResolvedValue({ role: 'ADMIN' }),
+    },
   };
   // Added after the object exists: the transaction client is the fake itself.
   const withTransaction = Object.assign(prisma, {
@@ -420,5 +423,34 @@ describe('SettingsService — test connection', () => {
     const logged = JSON.stringify(logger.warn.mock.calls);
     expect(logged).toContain('sk-***');
     expect(logged).not.toContain('ABCDEFGH12345678');
+  });
+});
+
+describe('SettingsService — read access by role', () => {
+  // Acceptance 18: Reviewer/Viewer see why AI is off, never the credentials.
+  it('gives a non-admin the minimal view', async () => {
+    const { service, prisma } = setup();
+    await service.updateAi(ORG, ADMIN, {
+      provider: 'anthropic',
+      apiKey: ANTHROPIC_KEY,
+      consent: true,
+    });
+    prisma.membership.findUnique.mockResolvedValue({ role: 'VIEWER' });
+
+    const view = await service.getAiForMember(ORG, 'u_viewer');
+
+    expect(view).toEqual({
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+      consent: { granted: true },
+      locale: 'en',
+    });
+    expect(JSON.stringify(view)).not.toContain('4Kd2');
+  });
+
+  it('gives an admin the full settings', async () => {
+    const { service } = setup();
+    const view = await service.getAiForMember(ORG, ADMIN);
+    expect(view).toHaveProperty('credentials');
   });
 });

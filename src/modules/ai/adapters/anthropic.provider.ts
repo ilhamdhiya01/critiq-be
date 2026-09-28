@@ -47,6 +47,7 @@ export class AnthropicProvider implements AiProvider {
       if (!toolUse || toolUse.type !== 'tool_use') {
         throw new AiError('invalid_response', {
           providerMessage: 'Response contained no tool_use block.',
+          raw: response.content,
         });
       }
       return {

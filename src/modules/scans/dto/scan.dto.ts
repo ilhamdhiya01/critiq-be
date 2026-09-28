@@ -3,6 +3,7 @@ import {
   ScanStatus,
   ScanTrigger,
 } from '../../../generated/prisma/enums';
+import { ApiAiScanFields } from './ai-scan-fields';
 
 // What the worker last reported through job.updateProgress() — see
 // ScanProcessor. Only present while the scan is QUEUED/RUNNING and its job
@@ -36,6 +37,14 @@ export class ScanDto {
   createdAt!: Date;
   startedAt!: Date | null;
   finishedAt!: Date | null;
+  // AI review of this scan (v1.5.1).
+  aiStatus!: ApiAiScanFields['aiStatus'];
+  aiErrorCode!: string | null;
+  aiProvider!: string | null;
+  aiModel!: string | null;
+  aiCached!: boolean;
+  majorCount!: number;
+  minorCount!: number;
 
   constructor(partial: ScanDto) {
     Object.assign(this, partial);
@@ -90,17 +99,27 @@ export class ActiveScanDto {
 export class LatestScanDto {
   id!: string;
   status!: ScanStatus;
+  // Static active + AI critical.
   criticalCount!: number;
   suppressedCount!: number;
   finishedAt!: Date | null;
+  aiStatus!: ApiAiScanFields['aiStatus'];
+  aiErrorCode!: string | null;
+  aiProvider!: string | null;
+  aiModel!: string | null;
+  aiCached!: boolean;
+  majorCount!: number;
+  minorCount!: number;
 
-  constructor(partial: {
-    id: string;
-    status: ScanStatus;
-    criticalCount: number;
-    suppressedCount: number;
-    finishedAt: Date | null;
-  }) {
+  constructor(
+    partial: {
+      id: string;
+      status: ScanStatus;
+      criticalCount: number;
+      suppressedCount: number;
+      finishedAt: Date | null;
+    } & ApiAiScanFields,
+  ) {
     Object.assign(this, partial);
   }
 }

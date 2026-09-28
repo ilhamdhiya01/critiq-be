@@ -12,6 +12,7 @@ import { toStrictSchema } from '../json-schema';
 export const HEALTHCHECK_TIMEOUT_MS = 15_000;
 
 export function parseJsonOrThrow(text: string | null | undefined): unknown {
+  const raw = text ?? '';
   // Some servers wrap JSON-mode output in a markdown fence despite being
   // told not to; unwrap it before parsing.
   const unfenced = (text ?? '')
@@ -23,6 +24,7 @@ export function parseJsonOrThrow(text: string | null | undefined): unknown {
   } catch {
     throw new AiError('invalid_response', {
       providerMessage: 'Response was not valid JSON.',
+      raw,
     });
   }
 }
@@ -103,6 +105,7 @@ export class OpenAiProvider implements AiProvider {
     if (!call || call.type !== 'function') {
       throw new AiError('invalid_response', {
         providerMessage: 'Response contained no function tool call.',
+        raw: response.choices[0]?.message ?? null,
       });
     }
     return {

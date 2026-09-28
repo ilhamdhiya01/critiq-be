@@ -250,6 +250,39 @@ export class GithubAppService {
     }
   }
 
+  // One file at `ref`, as raw text — head-file context for the AI review
+  // prompt (v1.5.1 langkah 2). Best effort: null when the file is missing,
+  // binary, too large for the contents API, or the call fails; the prompt
+  // then falls back to the hunk's own context lines.
+  async getFileContent(
+    installationId: string,
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string,
+  ): Promise<string | null> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      const response = await request(
+        'GET /repos/{owner}/{repo}/contents/{path}',
+        {
+          owner,
+          repo,
+          path,
+          ref,
+          headers: {
+            authorization: `bearer ${token}`,
+            accept: 'application/vnd.github.raw+json',
+          },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        },
+      );
+      return typeof response.data === 'string' ? response.data : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async getInstallationToken(installationId: string): Promise<string> {
     try {
       const installationAuthentication = await this.appAuth({

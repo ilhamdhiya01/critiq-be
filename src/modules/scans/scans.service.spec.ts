@@ -204,6 +204,7 @@ describe('ScansService', () => {
         test_file: 1,
         comment: 0,
         regex_literal: 1,
+        dedupe_static: 0,
       });
     });
 
@@ -226,6 +227,7 @@ describe('ScansService', () => {
         test_file: 1,
         comment: 0,
         regex_literal: 1,
+        dedupe_static: 0,
       });
     });
   });

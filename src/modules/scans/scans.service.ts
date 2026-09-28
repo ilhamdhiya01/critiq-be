@@ -13,7 +13,12 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Scan } from '../../generated/prisma/client';
-import { ScanStatus, ScanTrigger } from '../../generated/prisma/enums';
+import {
+  FindingSeverity,
+  FindingSource,
+  ScanStatus,
+  ScanTrigger,
+} from '../../generated/prisma/enums';
 import { ScanJobPayload } from '../../queue/scan-payload.dto';
 import {
   buildScanJobId,
@@ -25,6 +30,7 @@ import {
   FindingDto,
   toApiSuppressionReason,
 } from './dto/finding.dto';
+import { toApiAiScanFields } from './dto/ai-scan-fields';
 import { ScanFindingsDto } from './dto/scan-findings.dto';
 import {
   ActiveScanDto,
@@ -170,7 +176,13 @@ export class ScansService {
           scanId,
           ...(includeSuppressed ? {} : { suppressedReason: null }),
         },
-        orderBy: [{ filePath: 'asc' }, { lineStart: 'asc' }],
+        // Severity is ordered CRITICAL → INFO in the enum, so ascending puts
+        // criticals first.
+        orderBy: [
+          { severity: 'asc' },
+          { filePath: 'asc' },
+          { lineStart: 'asc' },
+        ],
       }),
       // Grouped in the DB rather than from `findings`, so the breakdown is
       // there even when ?includeSuppressed=false left those rows out.
@@ -186,14 +198,24 @@ export class ScansService {
     const suppressed = findings.filter((f) => f.suppressedReason !== null);
 
     const byFile: Record<string, number> = {};
+    const bySource = { static: 0, ai: 0 };
+    const bySeverity = { critical: 0, major: 0, minor: 0 };
     for (const finding of active) {
       byFile[finding.filePath] = (byFile[finding.filePath] ?? 0) + 1;
+      bySource[finding.source === FindingSource.AI ? 'ai' : 'static'] += 1;
+      if (finding.severity === FindingSeverity.CRITICAL)
+        bySeverity.critical += 1;
+      else if (finding.severity === FindingSeverity.MAJOR)
+        bySeverity.major += 1;
+      else if (finding.severity === FindingSeverity.MINOR)
+        bySeverity.minor += 1;
     }
 
     const suppressedByReason: Record<ApiSuppressionReason, number> = {
       test_file: 0,
       comment: 0,
       regex_literal: 0,
+      dedupe_static: 0,
     };
     for (const group of suppressedGroups) {
       const reason = toApiSuppressionReason(group.suppressedReason);
@@ -218,9 +240,13 @@ export class ScansService {
             lineEnd: finding.lineEnd,
             snippet: finding.snippet,
             suppressedReason: finding.suppressedReason,
+            category: finding.category,
+            confidence: finding.confidence,
           }),
       ),
       byFile,
+      bySource,
+      bySeverity,
       criticalCount: scan.criticalCount,
       suppressedCount: scan.suppressedCount,
       suppressedByReason,
@@ -290,6 +316,7 @@ export class ScansService {
       createdAt: scan.createdAt,
       startedAt: scan.startedAt,
       finishedAt: scan.finishedAt,
+      ...toApiAiScanFields(scan),
     });
   }
 

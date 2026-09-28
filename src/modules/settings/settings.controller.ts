@@ -12,18 +12,19 @@ interface RequestWithSession extends Request {
   user: JwtPayload;
 }
 
-// Admin-only throughout: this is where the organization's AI credentials
-// and its consent to send diffs to a provider live. Reviewer/Viewer get 403
-// from OrgRolesGuard (step 2 opens a minimal read-only view).
+// Admin-only for writes and the test: this is where the organization's AI
+// credentials and its consent to send diffs to a provider live.
+// Reviewer/Viewer may GET a minimal view (provider, model, consent, locale)
+// — enough for the PR page to explain why there is no AI summary.
 @Controller('orgs/:orgId/settings/ai')
 export class SettingsController {
   constructor(private readonly settingsService: SettingsService) {}
 
   @Get()
-  @OrgAuth([Role.ADMIN])
+  @OrgAuth([])
   @ResponseMessage('AI settings retrieved successfully')
-  getAi(@Param('orgId') orgId: string) {
-    return this.settingsService.getAi(orgId);
+  getAi(@Req() req: RequestWithSession, @Param('orgId') orgId: string) {
+    return this.settingsService.getAiForMember(orgId, req.user.sub);
   }
 
   @Put()

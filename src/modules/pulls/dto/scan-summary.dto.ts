@@ -1,4 +1,5 @@
 import { ScanStatus, ScanTrigger } from '../../../generated/prisma/enums';
+import { ApiAiScanFields } from '../../scans/dto/ai-scan-fields';
 import { FindingDto } from '../../scans/dto/finding.dto';
 
 // The scan a PR's review page is built from, plus its findings.
@@ -22,6 +23,14 @@ export class ScanSummaryDto {
   // orgs/:orgId/scans/:scanId/findings.
   suppressedCount!: number;
   suppressedTruncated!: boolean;
+  // AI review (v1.5.1); criticalCount above includes AI criticals.
+  aiStatus!: ApiAiScanFields['aiStatus'];
+  aiErrorCode!: string | null;
+  aiProvider!: string | null;
+  aiModel!: string | null;
+  aiCached!: boolean;
+  majorCount!: number;
+  minorCount!: number;
   filesChanged!: number | null;
   diffBytes!: number | null;
   rulesetVersion!: string;
@@ -32,25 +41,27 @@ export class ScanSummaryDto {
   // Active findings only.
   findings!: FindingDto[];
 
-  constructor(partial: {
-    id: string;
-    status: ScanStatus;
-    trigger: ScanTrigger;
-    attempt: number;
-    headSha: string;
-    findingsCount: number;
-    criticalCount: number;
-    findingsTruncated: boolean;
-    suppressedCount: number;
-    suppressedTruncated: boolean;
-    filesChanged: number | null;
-    diffBytes: number | null;
-    rulesetVersion: string;
-    errorMessage: string | null;
-    startedAt: Date | null;
-    finishedAt: Date | null;
-    findings: FindingDto[];
-  }) {
+  constructor(
+    partial: ApiAiScanFields & {
+      id: string;
+      status: ScanStatus;
+      trigger: ScanTrigger;
+      attempt: number;
+      headSha: string;
+      findingsCount: number;
+      criticalCount: number;
+      findingsTruncated: boolean;
+      suppressedCount: number;
+      suppressedTruncated: boolean;
+      filesChanged: number | null;
+      diffBytes: number | null;
+      rulesetVersion: string;
+      errorMessage: string | null;
+      startedAt: Date | null;
+      finishedAt: Date | null;
+      findings: FindingDto[];
+    },
+  ) {
     Object.assign(this, partial);
   }
 }

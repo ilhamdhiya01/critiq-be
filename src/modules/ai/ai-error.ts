@@ -41,10 +41,17 @@ export class AiError extends Error {
   readonly providerMessage: string | null;
   // HTTP status the provider answered with, when there was one.
   readonly status: number | undefined;
+  // For invalid_response only: what the model actually returned, kept for
+  // debugging (stored encrypted, never logged). Never contains the key.
+  readonly raw: unknown;
 
   constructor(
     readonly code: AiErrorCode,
-    options: { providerMessage?: string | null; status?: number } = {},
+    options: {
+      providerMessage?: string | null;
+      status?: number;
+      raw?: unknown;
+    } = {},
   ) {
     super(code);
     this.name = 'AiError';
@@ -54,6 +61,7 @@ export class AiError extends Error {
         ? null
         : sanitizeProviderMessage(options.providerMessage);
     this.status = options.status;
+    this.raw = options.raw;
   }
 }
 
