@@ -166,7 +166,53 @@ function longestSequentialRun(value: string): number {
 // short template over any sensible threshold:
 // `diff-line:${filePath}:${line}` scores 3.75, higher than plenty of real
 // secrets.
-const INTERPOLATION_PATTERN = /\$\{|#\{|%\(|<%=/;
+//
+// `{name}` is the same idea for str.format, route and key templates —
+// `scan:{repoId}:{prNumber}:{headSha}`. Generated credentials (base64, hex,
+// random alphanumerics) never contain a brace-wrapped identifier.
+const INTERPOLATION_PATTERN = /\$\{|#\{|%\(|<%=|\{[A-Za-z_]\w*\}/;
+
+// An unquoted value that opens a call — `re.compile(r`, `getSecret(`,
+// `Buffer.from(` — is code on the right-hand side of an assignment, not a
+// literal credential. assignment_literal's value capture stops at the first
+// quote, so `SECRET_RE = re.compile(r"…")` arrives here as `re.compile(r`.
+// Only unquoted values: a quoted 'Passw0rd(2026…' is still a literal.
+const CALL_EXPRESSION_PATTERN = /^[\w$.]+\(/;
+
+// `cond ? 'no_secret_configured' : 'unknown_repo'` — assignment_literal reads
+// the true branch as a key and the `:` as an assignment. Only a `:` after a
+// `?` counts: `?api_key=…` in a URL query is a real credential and keeps its
+// `=`.
+function isTernaryBranch(candidate: SecretCandidate): boolean {
+  const { key, raw } = candidate;
+  if (!key) {
+    return false;
+  }
+  const at = raw.indexOf(key);
+  if (at < 0) {
+    return false;
+  }
+  const before = raw
+    .slice(0, at)
+    .replace(/["'`]$/, '')
+    .trimEnd();
+  const after = raw
+    .slice(at + key.length)
+    .replace(/^["'`]/, '')
+    .trimStart();
+  return (
+    before.endsWith('?') && after.startsWith(':') && !after.startsWith(':=')
+  );
+}
+
+function isCallExpression(candidate: SecretCandidate): boolean {
+  if (!CALL_EXPRESSION_PATTERN.test(candidate.value)) {
+    return false;
+  }
+  const at = candidate.raw.indexOf(candidate.value);
+  const before = at > 0 ? candidate.raw[at - 1] : '';
+  return before !== '"' && before !== "'" && before !== '`';
+}
 
 // Identifier-shaped values: CamelCase, snake_case, kebab-case or
 // dot.separated words. Icon names, i18n keys, class names and enum values
@@ -194,6 +240,8 @@ function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
   const { value, key } = candidate;
 
   if (INTERPOLATION_PATTERN.test(value)) return true;
+  if (isCallExpression(candidate)) return true;
+  if (isTernaryBranch(candidate)) return true;
   if (isWordSegmented(value)) return true;
   if (UUID_PATTERN.test(value)) return true;
   if (SEMVER_PATTERN.test(value)) return true;

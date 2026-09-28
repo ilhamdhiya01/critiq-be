@@ -1,3 +1,5 @@
+import { SuppressionReason } from '../../../generated/prisma/enums';
+import { classifySuppression } from '../../suppression';
 import { runRuleAgainstFixture } from '../test-helpers';
 import { secretHardcodedPasswordRule } from './secret.hardcoded-password.rule';
 
@@ -16,11 +18,18 @@ describe('secret.hardcoded_password', () => {
     expect(result.hits).toHaveLength(0);
   });
 
-  it('does not flag a *.test.ts file even with a real-looking password', () => {
+  it('reports a *.test.ts password, which the processor suppresses', () => {
     const result = runRuleAgainstFixture(
       secretHardcodedPasswordRule,
       'negative-2.test.ts',
     );
-    expect(result.hits).toHaveLength(0);
+    expect(result.hits).toHaveLength(1);
+    expect(
+      classifySuppression({
+        ruleId: secretHardcodedPasswordRule.id,
+        filePath: 'src/negative-2.test.ts',
+        language: 'js',
+      }),
+    ).toBe(SuppressionReason.TEST_FILE);
   });
 });

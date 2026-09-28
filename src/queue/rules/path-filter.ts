@@ -2,7 +2,8 @@ import { minimatch } from 'minimatch';
 import {
   IGNORE_GLOBS,
   MUST_SCAN_GLOBS,
-  SECRET_SKIP_GLOBS,
+  DATA_FIXTURE_GLOBS,
+  TEST_FILE_GLOBS,
 } from './rules.constants';
 
 // `dot: true` is not optional here: without it minimatch refuses to let any
@@ -30,20 +31,25 @@ export function isIgnoredPath(
   return matchesAny(filePath, globs);
 }
 
-// Skipped for `secret.*` rules only — `code.*` and `config.*` still run.
+// Inert test data (fixtures/, testdata/). Every rule family is suppressed
+// here — see DATA_FIXTURE_GLOBS.
+export function isDataFixturePath(filePath: string): boolean {
+  return matchesAny(filePath, DATA_FIXTURE_GLOBS);
+}
+
+// Tests, examples and documentation. Whether a finding here is suppressed
+// depends on the rule family (src/queue/suppression.ts) — this only answers
+// "is this a test-like path".
 //
-// Applied per rule in the runner rather than up front in the processor,
-// because these files are legitimately scannable for everything else: a
-// README or a test fixture is where example credentials *belong*, but real
-// bugs in test helpers still matter. Keeping the split also leaves
-// diffBytes (computed from the processor's filter) unchanged.
-//
-// MUST_SCAN_GLOBS wins over SECRET_SKIP_GLOBS: `.env.example` is noise, but
-// `.env` is the highest-signal file in the repo, and a naive `*.env*` style
-// skip would swallow it.
-export function isSecretSkippedPath(filePath: string): boolean {
+// MUST_SCAN_GLOBS wins: `.env.example` is noise, but `.env` is the
+// highest-signal file in the repo, and config/infra files are where real
+// credentials get committed even when they sit under a test directory.
+export function isTestLikePath(filePath: string): boolean {
+  if (isDataFixturePath(filePath)) {
+    return true;
+  }
   if (matchesAny(filePath, MUST_SCAN_GLOBS)) {
     return false;
   }
-  return matchesAny(filePath, SECRET_SKIP_GLOBS);
+  return matchesAny(filePath, TEST_FILE_GLOBS);
 }

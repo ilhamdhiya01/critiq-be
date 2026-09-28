@@ -13,10 +13,13 @@ export const configDockerfileRootSecretRule: Rule = {
   test(ctx) {
     const findings: RuleFinding[] = [];
     for (const line of ctx.addedLines) {
-      if (ENV_SECRET_PATTERN.test(line.text)) {
+      const match = ENV_SECRET_PATTERN.exec(line.text);
+      if (match) {
         findings.push({
           lineStart: line.newLine,
           lineEnd: line.newLine,
+          matchStart: match.index,
+          matchLength: match[0].length,
           snippet: null,
         });
       }

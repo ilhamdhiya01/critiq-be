@@ -1,8 +1,10 @@
 import { createHash } from 'crypto';
+import { SuppressionReason } from '../generated/prisma/enums';
 import { RuleHit } from './rules/rule-runner';
 
 export interface LocatedHit extends RuleHit {
   filePath: string;
+  suppressedReason?: SuppressionReason | null;
 }
 
 export interface PreparedFinding {
@@ -14,6 +16,7 @@ export interface PreparedFinding {
   lineEnd: number;
   snippet: string | null;
   fingerprint: string;
+  suppressedReason: SuppressionReason | null;
 }
 
 // One finding per distinct issue, with the line range widened to span every
@@ -38,9 +41,24 @@ export interface PreparedFinding {
 // strictly weaker than the `snippet` already persisted alongside, which is
 // why the old comment's objection to storing "an unsalted hash of the
 // secret" does not apply to this scheme.
+//
+// Suppression: hits carry the reason the processor assigned. When the same
+// fingerprint appears both active and suppressed, the active one wins and the
+// line range covers only the active occurrences — a real hit must never be
+// hidden because a copy of it also sits in a regex on another line.
 export function dedupeFindings(hits: LocatedHit[]): PreparedFinding[] {
-  const byFingerprint = new Map<string, PreparedFinding>();
-  const occurrences = new Map<string, number>();
+  interface Group {
+    base: LocatedHit;
+    fingerprint: string;
+    active: { lineStart: number; lineEnd: number; count: number } | null;
+    suppressed: {
+      lineStart: number;
+      lineEnd: number;
+      count: number;
+      reason: SuppressionReason;
+    } | null;
+  }
+  const groups = new Map<string, Group>();
 
   for (const hit of hits) {
     const key = hit.identity
@@ -53,34 +71,71 @@ export function dedupeFindings(hits: LocatedHit[]): PreparedFinding[] {
       .update(`${hit.ruleId}\0${hit.filePath}\0${key}`)
       .digest('hex');
 
-    occurrences.set(fingerprint, (occurrences.get(fingerprint) ?? 0) + 1);
+    let group = groups.get(fingerprint);
+    if (!group) {
+      group = { base: hit, fingerprint, active: null, suppressed: null };
+      groups.set(fingerprint, group);
+    }
 
-    const existing = byFingerprint.get(fingerprint);
-    if (existing) {
-      existing.lineStart = Math.min(existing.lineStart, hit.lineStart);
-      existing.lineEnd = Math.max(existing.lineEnd, hit.lineEnd);
+    const reason = hit.suppressedReason ?? null;
+    if (reason === null) {
+      if (!group.active) {
+        group.base = hit;
+        group.active = {
+          lineStart: hit.lineStart,
+          lineEnd: hit.lineEnd,
+          count: 0,
+        };
+      }
+      group.active.lineStart = Math.min(group.active.lineStart, hit.lineStart);
+      group.active.lineEnd = Math.max(group.active.lineEnd, hit.lineEnd);
+      group.active.count += 1;
+    } else {
+      if (!group.suppressed) {
+        group.suppressed = {
+          lineStart: hit.lineStart,
+          lineEnd: hit.lineEnd,
+          count: 0,
+          reason,
+        };
+      }
+      group.suppressed.lineStart = Math.min(
+        group.suppressed.lineStart,
+        hit.lineStart,
+      );
+      group.suppressed.lineEnd = Math.max(
+        group.suppressed.lineEnd,
+        hit.lineEnd,
+      );
+      group.suppressed.count += 1;
+    }
+  }
+
+  const findings: PreparedFinding[] = [];
+  for (const group of groups.values()) {
+    const kept = group.active ?? group.suppressed;
+    if (!kept) {
       continue;
     }
-    byFingerprint.set(fingerprint, {
-      ruleId: hit.ruleId,
-      title: hit.title,
-      message: hit.message,
-      filePath: hit.filePath,
-      lineStart: hit.lineStart,
-      lineEnd: hit.lineEnd,
-      snippet: hit.snippet,
-      fingerprint,
+    // The count goes on `message`, not `title`: title is VarChar(120) and a
+    // suffix could push a long rule title past it.
+    const message =
+      kept.count > 1
+        ? `${group.base.message} (muncul di ${kept.count} baris)`
+        : group.base.message;
+    findings.push({
+      ruleId: group.base.ruleId,
+      title: group.base.title,
+      message,
+      filePath: group.base.filePath,
+      lineStart: kept.lineStart,
+      lineEnd: kept.lineEnd,
+      snippet: group.base.snippet,
+      fingerprint: group.fingerprint,
+      suppressedReason: group.active
+        ? null
+        : (group.suppressed?.reason ?? null),
     });
   }
-
-  // The count goes on `message`, not `title`: title is VarChar(120) and a
-  // suffix could push a long rule title past it.
-  for (const [fingerprint, finding] of byFingerprint) {
-    const count = occurrences.get(fingerprint) ?? 1;
-    if (count > 1) {
-      finding.message = `${finding.message} (muncul di ${count} baris)`;
-    }
-  }
-
-  return [...byFingerprint.values()];
+  return findings;
 }

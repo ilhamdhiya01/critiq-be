@@ -15,12 +15,7 @@ import {
 } from '../generated/prisma/enums';
 import { PullRequestDiffDto } from '../modules/pulls/dto/pull-request-diff.dto';
 import { PullsService } from '../modules/pulls/pulls.service';
-import { parsePatch } from './diff/diff-parser';
-import { detectLanguage } from './rules/language-detector';
-import { isIgnoredPath } from './rules/path-filter';
-import { runRulesForFile } from './rules/rule-runner';
-import { RULES } from './rules/rules';
-import { LocatedHit, dedupeFindings } from './dedupe-findings';
+import { analyzeDiff } from './analyze-diff';
 import {
   classifyProviderError,
   sanitizeErrorMessage,
@@ -29,7 +24,6 @@ import {
 import { ScanJobPayload } from './scan-payload.dto';
 import { SCAN_QUEUE_NAME } from './scan-queue.service';
 
-const MAX_FINDINGS_PER_SCAN = 500;
 const SCAN_FAILED_NOTIFY_THROTTLE_SECONDS = 3600;
 
 type LogContext = Record<string, unknown>;
@@ -94,149 +88,45 @@ export class ScanProcessor
     const diff = await this.fetchDiff(job.data, log);
     this.assertWithinDeadline(deadline);
 
-    // 3. Size guard + parse.
-    await job.updateProgress({ step: 'parse', pct: 35 });
-    const maxDiffBytes =
-      this.configService.getOrThrow<number>('scan.maxDiffBytes');
-    const scannableFiles = diff.files.filter(
-      (file) => file.patch !== null && !isIgnoredPath(file.path),
-    );
-    // File rules judge a path, not its contents, so they must also see files
-    // with no patch — which is exactly how a real credential file arrives.
-    // Providers omit the patch for binary blobs and oversized diffs, so
-    // filtering on `patch !== null` first would make
-    // secret.sensitive_file_added blind to a genuine 2048-bit private key
-    // while still passing on a small fixture.
-    const fileRuleCandidates = diff.files.filter(
-      (file) => !isIgnoredPath(file.path),
-    );
-    // Counted over the files that will actually be scanned — generated
-    // files (lockfiles, dist/) shouldn't push a normal PR over the limit.
-    const diffBytes = scannableFiles.reduce(
-      (sum, file) => sum + Buffer.byteLength(file.patch ?? '', 'utf8'),
-      0,
-    );
-    if (diffBytes > maxDiffBytes) {
+    // 3–5. Filter, parse, run rules, classify suppression, dedupe, cap —
+    // all in analyzeDiff (pure, replayable in tests).
+    await job.updateProgress({ step: 'rules', pct: 35 });
+    const analysis = analyzeDiff(diff.files, {
+      maxDiffBytes: this.configService.getOrThrow<number>('scan.maxDiffBytes'),
+      afterFile: () => this.assertWithinDeadline(deadline),
+    });
+    if (analysis.diffTooLarge) {
       throw new ScanFailure(
         ScanErrorCode.DIFF_TOO_LARGE,
-        `Diff is ${diffBytes} bytes, above the ${maxDiffBytes}-byte limit.`,
+        `Diff is ${analysis.diffBytes} bytes, above the scan size limit.`,
       );
     }
     if (diff.truncated) {
       this.logger.warn('scan.diff_truncated', log);
     }
-
-    // 4. Run rules: file rules on every kept file, line rules on the ones
-    // with a parseable patch.
-    await job.updateProgress({ step: 'rules', pct: 60 });
-    const rulesStartedAt = Date.now();
-    const budgetState = { elapsedMs: 0 };
-    const hits: LocatedHit[] = [];
-    let ruleRuns = 0;
-    let ruleCrashes = 0;
-    let budgetExceeded = false;
-
-    const fileRules = RULES.filter((rule) => rule.kind === 'file');
-    const lineRules = RULES.filter((rule) => rule.kind !== 'file');
-
-    for (const file of fileRuleCandidates) {
-      const result = runRulesForFile({
-        rules: fileRules,
-        filePath: file.path,
-        language: detectLanguage(file.path),
-        // File rules ignore these by definition; passing none keeps it
-        // obvious that a file rule deciding on content would be a bug.
-        addedLines: [],
-        budgetState,
-        status: file.status,
-        previousPath: file.previousPath,
-      });
-      ruleRuns += result.ruleRuns;
-      for (const crash of result.crashes) {
-        ruleCrashes += 1;
-        this.logger.warn('rule.crash', {
-          ...log,
-          ...crash,
-          filePath: file.path,
-        });
-      }
-      for (const hit of result.hits) {
-        hits.push({ ...hit, filePath: file.path });
-      }
+    for (const crash of analysis.crashes) {
+      this.logger.warn('rule.crash', { ...log, ...crash });
     }
-
-    for (const file of scannableFiles) {
-      const addedLines = parsePatch(file.patch ?? '')
-        .flatMap((hunk) => hunk.lines)
-        .flatMap((line) =>
-          line.type === 'add' && line.newLine !== null
-            ? [{ newLine: line.newLine, text: line.text }]
-            : [],
-        );
-      if (addedLines.length === 0) {
-        continue;
-      }
-
-      const result = runRulesForFile({
-        rules: lineRules,
-        filePath: file.path,
-        language: detectLanguage(file.path),
-        addedLines,
-        budgetState,
-        status: file.status,
-        previousPath: file.previousPath,
-        sizeBytes: Buffer.byteLength(file.patch ?? '', 'utf8'),
-      });
-      ruleRuns += result.ruleRuns;
-      for (const crash of result.crashes) {
-        ruleCrashes += 1;
-        this.logger.warn('rule.crash', {
-          ...log,
-          ...crash,
-          filePath: file.path,
-        });
-      }
-      // Debug level, and carrying only the reason — never the value that was
-      // rejected. This is the feedback loop for tuning ValueFilter: a rule
-      // firing on real credentials that get filtered shows up here.
-      for (const rejected of result.filtered) {
-        this.logger.debug('secret.filtered', {
-          ...log,
-          ...rejected,
-          filePath: file.path,
-        });
-      }
-      for (const hit of result.hits) {
-        hits.push({ ...hit, filePath: file.path });
-      }
-
-      if (result.budgetExceeded) {
-        budgetExceeded = true;
-        this.logger.warn('rule.budget_exceeded', {
-          ...log,
-          filePath: file.path,
-        });
-        break;
-      }
-      this.assertWithinDeadline(deadline);
+    // Debug level, and carrying only the reason — never the value that was
+    // rejected. This is the feedback loop for tuning ValueFilter.
+    for (const rejected of analysis.filtered) {
+      this.logger.debug('secret.filtered', { ...log, ...rejected });
     }
-    const rulesMs = Date.now() - rulesStartedAt;
-
-    if (ruleRuns > 0 && ruleCrashes === ruleRuns) {
+    if (analysis.budgetExceededAt) {
+      this.logger.warn('rule.budget_exceeded', {
+        ...log,
+        filePath: analysis.budgetExceededAt,
+      });
+    }
+    if (
+      analysis.ruleRuns > 0 &&
+      analysis.crashes.length === analysis.ruleRuns
+    ) {
       throw new ScanFailure(
         ScanErrorCode.RULE_CRASH,
-        `All ${ruleRuns} rule executions crashed.`,
+        `All ${analysis.ruleRuns} rule executions crashed.`,
       );
     }
-
-    // 5. Dedupe + cap.
-    const deduped = dedupeFindings(hits).sort(
-      (a, b) =>
-        a.filePath.localeCompare(b.filePath) || a.lineStart - b.lineStart,
-    );
-    const findings = deduped.slice(0, MAX_FINDINGS_PER_SCAN);
-    const findingsTruncated =
-      budgetExceeded || deduped.length > MAX_FINDINGS_PER_SCAN;
 
     // 6. Persist atomically. The conditional status update is the guard
     // against a newer push having superseded this scan mid-run: if the row
@@ -246,17 +136,22 @@ export class ScanProcessor
     // claim step sees DONE) or nothing did.
     await job.updateProgress({ step: 'persist', pct: 90 });
     const finishedAt = new Date();
+    const toWrite = [...analysis.active, ...analysis.suppressed];
     const persisted = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.scan.updateMany({
         where: { id: scanId, status: ScanStatus.RUNNING },
         data: {
           status: ScanStatus.DONE,
           finishedAt,
-          diffBytes,
-          filesChanged: diff.files.length,
-          findingsCount: findings.length,
-          criticalCount: findings.length,
-          findingsTruncated,
+          diffBytes: analysis.diffBytes,
+          filesChanged: analysis.filesChanged,
+          // Active findings only, and the real totals before the storage
+          // cap — suppressed findings never count toward either.
+          findingsCount: analysis.activeCount,
+          criticalCount: analysis.activeCount,
+          findingsTruncated: analysis.findingsTruncated,
+          suppressedCount: analysis.suppressedCount,
+          suppressedTruncated: analysis.suppressedTruncated,
           // rulesetVersion is deliberately NOT written here. It is set at
           // enqueue (ScanQueueService) and describes the ruleset the scan
           // was created under, which is what the stale-ruleset check
@@ -272,9 +167,9 @@ export class ScanProcessor
       if (updated.count === 0) {
         return false;
       }
-      if (findings.length > 0) {
+      if (toWrite.length > 0) {
         await tx.finding.createMany({
-          data: findings.map((finding) => ({
+          data: toWrite.map((finding) => ({
             ...finding,
             organizationId,
             scanId,
@@ -302,28 +197,33 @@ export class ScanProcessor
     const durationMs = Date.now() - jobStartedAt;
     this.logger.info('audit.scan_completed', {
       ...log,
-      criticalCount: findings.length,
+      criticalCount: analysis.activeCount,
+      suppressedCount: analysis.suppressedCount,
       durationMs,
     });
     this.logger.info('scan.metrics', {
       ...log,
       durationMs,
-      diffBytes,
-      filesChanged: diff.files.length,
-      filesSkipped: diff.files.length - scannableFiles.length,
-      findings: findings.length,
-      rulesMs,
+      diffBytes: analysis.diffBytes,
+      filesChanged: analysis.filesChanged,
+      filesSkipped: analysis.filesSkipped,
+      findings: analysis.activeCount,
+      suppressed: analysis.suppressedCount,
+      rulesMs: analysis.rulesMs,
     });
-    if (findings.length > 0) {
-      // One per scan, never per finding.
+    // Active findings only: a scan whose every finding is suppressed is not
+    // news. One per scan, never per finding.
+    if (analysis.activeCount > 0) {
       this.logger.warn('notification.pull_critical_found', {
         ...log,
-        criticalCount: findings.length,
+        criticalCount: analysis.activeCount,
       });
     }
 
-    // 8. TODO: emit `scan.done` via EventEmitter2 once a consumer exists
-    // (AI summary v1.5.1, quality-gate status check v1.5.3).
+    // 8. TODO: emit `scan.done` { scanId, criticalCount, suppressedCount } via
+    // EventEmitter2 once a consumer exists (AI summary v1.5.1 — which should
+    // receive suppressed findings too, as "probably example/test" context —
+    // and the quality-gate status check v1.5.3).
     await job.updateProgress({ step: 'done', pct: 100 });
   }
 

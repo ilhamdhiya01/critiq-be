@@ -18,6 +18,8 @@ export const secretSlackWebhookRule: Rule = {
         findings.push({
           lineStart: line.newLine,
           lineEnd: line.newLine,
+          matchStart: match.index,
+          matchLength: match[0].length,
           snippet: 'https://hooks.slack.com/services/****',
         });
       }
