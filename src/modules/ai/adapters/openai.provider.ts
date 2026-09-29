@@ -36,6 +36,22 @@ export function usageOf(response: OpenAI.Chat.ChatCompletion) {
   };
 }
 
+// finish_reason "length": the answer stopped at max_tokens, so the tool
+// arguments (or JSON) are cut off — a clearer failure than the parse error
+// it would otherwise become.
+export function throwIfTruncated(
+  response: OpenAI.Chat.ChatCompletion,
+  maxTokens: number,
+): void {
+  const choice = response.choices[0];
+  if (choice?.finish_reason === 'length') {
+    throw new AiError('output_truncated', {
+      providerMessage: `Response hit max_tokens (${maxTokens}).`,
+      raw: choice.message ?? null,
+    });
+  }
+}
+
 export class OpenAiProvider implements AiProvider {
   readonly id: AiProviderName = 'openai';
   protected readonly client: OpenAI;
@@ -101,6 +117,7 @@ export class OpenAiProvider implements AiProvider {
       },
       { timeout: req.timeoutMs },
     );
+    throwIfTruncated(response, req.maxTokens);
     const call = response.choices[0]?.message?.tool_calls?.[0];
     if (!call || call.type !== 'function') {
       throw new AiError('invalid_response', {

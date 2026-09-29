@@ -31,6 +31,7 @@ import {
   RETRY_SYSTEM_SUFFIX,
 } from '../modules/ai/scan/ai-prompt.constants';
 import { validateAiFindings } from '../modules/ai/scan/ai-result-validator';
+import { clampReportReview } from '../modules/ai/scan/report-review-clamp';
 import {
   buildAiRows,
   freshCriticalCount,
@@ -250,19 +251,28 @@ export class AiScanProcessor
 
     // 4. Call. invalid_response is retried once inside completeValidated,
     // with an extra instruction; transport errors go back to BullMQ.
+    // Overlong text is trimmed before the schema check rather than failing
+    // the whole review.
     let completion: AiResult;
+    let clamped: string[] = [];
     try {
-      completion = await completeValidated(
-        provider,
-        prompt.request,
-        (request) => ({
+      completion = await completeValidated(provider, prompt.request, {
+        retryRequest: (request) => ({
           ...request,
           system: request.system + RETRY_SYSTEM_SUFFIX,
         }),
-      );
+        normalize: (toolInput) => {
+          const result = clampReportReview(toolInput);
+          clamped = result.clamped;
+          return result.value;
+        },
+      });
     } catch (error) {
       const aiError = toAiError(error);
-      if (aiError.code === 'invalid_response') {
+      if (
+        aiError.code === 'invalid_response' ||
+        aiError.code === 'output_truncated'
+      ) {
         await this.keepRawResponse(scanId, aiError, log);
         throw new AiJobFailure(aiError.code);
       }
@@ -270,6 +280,10 @@ export class AiScanProcessor
         throw aiError;
       }
       throw new AiJobFailure(aiError.code);
+    }
+
+    if (clamped.length > 0) {
+      this.logger.info('ai.output_clamped', { ...log, fields: clamped });
     }
 
     // 5. Validate against what was sent, dedupe against static, persist.
@@ -526,9 +540,9 @@ export class AiScanProcessor
     return contents;
   }
 
-  // The raw answer of an invalid response, encrypted, 30 days — only for
-  // debugging a provider/model that does not follow the tool schema. Never
-  // logged.
+  // The raw answer of an invalid or truncated response, encrypted, 30 days —
+  // only for debugging a provider/model that does not follow the tool schema
+  // or runs out of output tokens. Never logged.
   private async keepRawResponse(
     scanId: string,
     error: AiError,
