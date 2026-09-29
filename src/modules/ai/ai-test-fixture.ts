@@ -50,14 +50,17 @@ export const TEST_TOOL_SCHEMA = {
 };
 
 export const TEST_REQUEST: AiRequest = {
-  system: 'You are a code reviewer. Reply only via the tool.',
+  system:
+    'You are a code reviewer. Reply only via the tool. Keep the summary to one sentence.',
   user: `Review this diff and report issues.\n\n${TEST_DIFF}`,
   tool: {
     name: 'report_review_test',
     description: 'Report a short summary and the issues found in the diff.',
     schema: TEST_TOOL_SCHEMA,
   },
-  maxTokens: 300,
+  // Room for verbose models: at 300, claude-sonnet-5 was cut off mid-call
+  // and a healthy provider failed the test.
+  maxTokens: 1000,
   temperature: 0,
   timeoutMs: 30_000,
 };

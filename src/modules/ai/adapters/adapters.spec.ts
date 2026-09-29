@@ -93,6 +93,25 @@ describe('AnthropicProvider', () => {
     });
   });
 
+  it('reports output_truncated when the answer stops at max_tokens', async () => {
+    mockAnthropicCreate.mockResolvedValue({
+      model: 'claude-sonnet-5',
+      stop_reason: 'max_tokens',
+      content: [
+        {
+          type: 'tool_use',
+          name: 'report_review_test',
+          input: { summary: '' },
+        },
+      ],
+      usage: { input_tokens: 900, output_tokens: 1000 },
+    });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'output_truncated',
+      retryable: false,
+    });
+  });
+
   it('healthchecks with a one-token message', async () => {
     mockAnthropicCreate.mockResolvedValue({ model: 'claude-sonnet-5' });
     await expect(provider.healthcheck()).resolves.toEqual({
@@ -153,7 +172,18 @@ describe('OpenAiProvider', () => {
     expect(params.tools[0].function.parameters.additionalProperties).toBe(
       false,
     );
-    expect(params.max_completion_tokens).toBe(300);
+    expect(params.max_completion_tokens).toBe(TEST_REQUEST.maxTokens);
+  });
+
+  it('reports output_truncated when finish_reason is length', async () => {
+    const response = toolCallResponse(TOOL_INPUT);
+    mockChatCreate.mockResolvedValue({
+      ...response,
+      choices: [{ ...response.choices[0], finish_reason: 'length' }],
+    });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'output_truncated',
+    });
   });
 
   it('healthchecks by retrieving the model', async () => {
@@ -227,6 +257,20 @@ describe('OpenAiCompatibleProvider', () => {
       });
     await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
       code: 'invalid_response',
+    });
+  });
+
+  it('reports output_truncated when JSON mode stops at max_tokens', async () => {
+    mockChatCreate
+      .mockRejectedValueOnce(httpError(400, 'tools is not supported'))
+      .mockResolvedValueOnce({
+        model: 'm',
+        choices: [
+          { message: { content: '{"summary": "cut' }, finish_reason: 'length' },
+        ],
+      });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'output_truncated',
     });
   });
 
