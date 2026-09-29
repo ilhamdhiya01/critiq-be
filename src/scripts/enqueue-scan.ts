@@ -23,6 +23,8 @@ import { Module } from '@nestjs/common';
 // webhook-driven scans.
 //
 //   pnpm scan:enqueue <pullId>
+//   pnpm scan:enqueue <pullId> --full  # rescan the whole PR, not only what
+//                                      # changed since the last scan
 //   pnpm scan:enqueue --list        # show recent pull requests to pick from
 @Module({
   imports: [CommonModule, RedisModule, QueueModule],
@@ -30,10 +32,15 @@ import { Module } from '@nestjs/common';
 class EnqueueScanModule {}
 
 async function main() {
-  const arg = process.argv[2];
+  const args = process.argv.slice(2);
+  const full = args.includes('--full');
+  const arg = args.includes('--list')
+    ? '--list'
+    : args.find((value) => !value.startsWith('--'));
   if (!arg) {
     console.error(
-      'Usage: pnpm scan:enqueue <pullId>\n' + '       pnpm scan:enqueue --list',
+      'Usage: pnpm scan:enqueue <pullId> [--full]\n' +
+        '       pnpm scan:enqueue --list',
     );
     process.exit(1);
   }
@@ -123,6 +130,9 @@ async function main() {
       baseSha: null,
       provider: pull.provider,
       trigger: ScanTrigger.MANUAL,
+      // Without --full: incremental from the last finished scan (v1.5.1
+      // langkah 3) — nothing to scan when the head has not moved.
+      full,
     });
 
     console.log(
@@ -130,7 +140,8 @@ async function main() {
         `  ${pull.title}\n` +
         `  scanId:  ${result.scanId}\n` +
         `  headSha: ${pull.headSha}\n` +
-        `  status:  ${result.status}${result.deduplicated ? ' (existing scan reused)' : ''}\n\n` +
+        `  status:  ${result.status}${result.deduplicated ? ' (existing scan reused)' : ''}\n` +
+        `  mode:    ${full ? 'full (--full)' : 'incremental unless a full scan is required'}\n\n` +
         'Watch the worker (`pnpm start:worker:dev`) to see it picked up.',
     );
   } finally {

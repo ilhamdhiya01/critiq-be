@@ -319,6 +319,30 @@ describe('AiScanService.maybeEnqueue', () => {
     });
   });
 
+  it('reports the base reason, not an empty CACHED, when the base has no review', async () => {
+    const incremental = {
+      diffMode: 'INCREMENTAL',
+      baseScanId: 'scan_1',
+      prevHeadSha: 'abc123',
+      diffBytes: 0,
+      filesChanged: 0,
+    };
+    const { service, prisma, tx } = setup(scanRow(incremental));
+    prisma.scan.findUnique.mockImplementation(
+      (args: { where: { id: string } }) =>
+        Promise.resolve(
+          args.where.id === 'scan_1'
+            ? { aiStatus: AiScanStatus.SKIPPED_TOO_LARGE, aiSummary: null }
+            : scanRow(incremental),
+        ),
+    );
+
+    await expect(service.maybeEnqueue('scan_2')).resolves.toBe(
+      AiScanStatus.SKIPPED_TOO_LARGE,
+    );
+    expect(tx.aiSummary.create).not.toHaveBeenCalled();
+  });
+
   it('skips the cache when forced', async () => {
     const { service, redis, queue } = setup();
     redis.get.mockResolvedValue('scan_1');
