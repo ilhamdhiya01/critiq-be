@@ -341,12 +341,21 @@ export class AiScanService {
     const base = await this.prisma.scan.findUnique({
       where: { id: scan.baseScanId! },
       select: {
+        aiStatus: true,
         aiProvider: true,
         aiModel: true,
         aiPromptVersion: true,
         aiSummary: true,
       },
     });
+    // No review to copy (the base was skipped as too large or over budget):
+    // report the same reason rather than an empty CACHED.
+    if (!base?.aiSummary) {
+      return this.setStatus(
+        scan.id,
+        base?.aiStatus ?? AiScanStatus.SKIPPED_TOO_LARGE,
+      );
+    }
     await this.prisma.$transaction(async (tx) => {
       const claimed = await tx.scan.updateMany({
         where: { id: scan.id, ...NOT_IN_FLIGHT },

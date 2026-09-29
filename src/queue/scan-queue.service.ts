@@ -6,6 +6,7 @@ import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { Prisma } from '../generated/prisma/client';
 import {
+  AiScanStatus,
   DiffMode,
   FullReason,
   Provider,
@@ -56,15 +57,28 @@ export interface ScanModeDecision {
 // enqueue runs inside the webhook request, which must not call the provider.
 // A force-push cannot be seen here; the worker checks ancestry with the
 // compare API and turns the scan FULL (FORCE_PUSH) when needed.
+// AI outcomes after which the base scan is still a fine incremental base:
+// the review was skipped for the size of the whole diff or a spent budget,
+// and a small next push is exactly what can still get one.
+const INCREMENTAL_AFTER_AI_SKIP: AiScanStatus[] = [
+  AiScanStatus.SKIPPED_TOO_LARGE,
+  AiScanStatus.BUDGET_EXCEEDED,
+];
+
 export function decideScanMode(input: {
   base: {
     id: string;
     headSha: string;
     rulesetVersion: string;
     aiPromptVersion: string | null;
+    aiStatus: AiScanStatus | null;
+    // The base scan has an AI summary (a completed or cached review).
+    aiReviewed: boolean;
   } | null;
   full: boolean;
   effectivePolicy: ReviewPolicy | null;
+  // Provider selected and consent given — the AI will review this scan.
+  aiEnabled: boolean;
 }): ScanModeDecision {
   const full = (fullReason: FullReason): ScanModeDecision => ({
     diffMode: DiffMode.FULL,
@@ -89,6 +103,22 @@ export function decideScanMode(input: {
     input.effectivePolicy !== ReviewPolicy.MANUAL_ONLY
   ) {
     return full(FullReason.PROMPT_CHANGED);
+  }
+  // The AI reviews an incremental scan as a delta against the previous
+  // review. With no previous review (the base ran before the AI was set up,
+  // or its AI step failed) there is nothing to be a delta of: the AI would
+  // only ever see the latest push. Scan in full to give it the whole PR —
+  // FIRST_SCAN, as this is the first scan that reviews the PR completely.
+  if (
+    input.aiEnabled &&
+    input.effectivePolicy !== ReviewPolicy.MANUAL_ONLY &&
+    !input.base.aiReviewed &&
+    !(
+      input.base.aiStatus !== null &&
+      INCREMENTAL_AFTER_AI_SKIP.includes(input.base.aiStatus)
+    )
+  ) {
+    return full(FullReason.FIRST_SCAN);
   }
   return {
     diffMode: DiffMode.INCREMENTAL,
@@ -187,17 +217,25 @@ export class ScanQueueService {
           headSha: true,
           rulesetVersion: true,
           aiPromptVersion: true,
+          aiStatus: true,
+          aiSummary: { select: { id: true } },
         },
       }),
       this.prisma.pullRequest.findUnique({
         where: { id: input.pullId },
-        select: { effectivePolicy: true },
+        select: {
+          effectivePolicy: true,
+          organization: { select: { aiProvider: true, aiConsentAt: true } },
+        },
       }),
     ]);
     const mode = decideScanMode({
-      base,
+      base: base ? { ...base, aiReviewed: base.aiSummary !== null } : null,
       full: input.full ?? false,
       effectivePolicy: pull?.effectivePolicy ?? null,
+      aiEnabled: Boolean(
+        pull?.organization.aiProvider && pull.organization.aiConsentAt,
+      ),
     });
 
     let scanId: string;
