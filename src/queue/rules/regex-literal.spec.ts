@@ -85,13 +85,24 @@ describe('isInsideRegexLiteral', () => {
 // every match, so what must hold is linear time on hostile input. A hard 50 ms
 // wall-clock assertion flakes on a loaded CI box (a bare loop over 1 MB already
 // swings 10–45 ms there), so the absolute bound is generous and the real guard
-// is the growth ratio: quadratic input made 4× longer costs ~16×, linear ~4×.
+// is the growth ratio: input made 16× longer costs ~16× when linear and
+// ~256× when quadratic, so a threshold of 64 separates them with room for
+// noise on a loaded CI box.
 describe('findRegexLiteralSpans — linear time', () => {
+  // Fastest of three runs: a GC pause or a busy CPU (the whole suite runs
+  // in parallel) only ever makes a run slower, never faster.
   function timeMs(line: string, language: string): number {
     findRegexLiteralSpans(line, language); // warm up the JIT
-    const startedAt = process.hrtime.bigint();
-    findRegexLiteralSpans(line, language);
-    return Number(process.hrtime.bigint() - startedAt) / 1e6;
+    let fastest = Infinity;
+    for (let run = 0; run < 3; run += 1) {
+      const startedAt = process.hrtime.bigint();
+      findRegexLiteralSpans(line, language);
+      fastest = Math.min(
+        fastest,
+        Number(process.hrtime.bigint() - startedAt) / 1e6,
+      );
+    }
+    return fastest;
   }
 
   it.each([
@@ -103,7 +114,7 @@ describe('findRegexLiteralSpans — linear time', () => {
     ['python openers', "re.x r'a' ", 'py'],
     ['yaml values', 'pattern x ', '*'],
   ])('%s: 1 MB line stays fast and scales linearly', (_, unit, language) => {
-    const small = unit.repeat(Math.ceil(256_000 / unit.length));
+    const small = unit.repeat(Math.ceil(64_000 / unit.length));
     const large = unit.repeat(Math.ceil(1_024_000 / unit.length));
 
     const smallMs = timeMs(small, language);
@@ -112,6 +123,6 @@ describe('findRegexLiteralSpans — linear time', () => {
     expect(largeMs).toBeLessThan(500);
     // Floor on the small run so timer noise on a sub-millisecond run can't
     // fake a large ratio.
-    expect(largeMs / Math.max(smallMs, 2)).toBeLessThan(10);
+    expect(largeMs / Math.max(smallMs, 2)).toBeLessThan(64);
   });
 });
