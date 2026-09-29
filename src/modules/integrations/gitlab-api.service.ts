@@ -236,6 +236,76 @@ export class GitlabApiService {
     return { diffs: diffs.slice(0, MR_DIFFS_HARD_CAP), truncated };
   }
 
+  // Diff between two commits — the incremental scan's diff (v1.5.1 langkah
+  // 3) — plus whether `from` is an ancestor of `to`, via the merge base: a
+  // force-push/rebase makes them diverge and the caller scans in full.
+  async compareCommits(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    from: string,
+    to: string,
+  ): Promise<{ diffs: GitlabMergeRequestDiff[]; ancestor: boolean }> {
+    const base = `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/repository`;
+    try {
+      const [compare, mergeBase] = await Promise.all([
+        firstValueFrom(
+          this.http.get<{ diffs?: GitlabMergeRequestDiff[] }>(
+            `${base}/compare`,
+            {
+              headers: { 'Private-Token': token },
+              timeout: REQUEST_TIMEOUT_MS,
+              params: { from, to, straight: false },
+            },
+          ),
+        ),
+        firstValueFrom(
+          this.http.get<{ id: string }>(`${base}/merge_base`, {
+            headers: { 'Private-Token': token },
+            timeout: REQUEST_TIMEOUT_MS,
+            params: { 'refs[]': [from, to] },
+            paramsSerializer: { indexes: null },
+          }),
+        ),
+      ]);
+      return {
+        diffs: compare.data.diffs ?? [],
+        ancestor: mergeBase.data.id === from,
+      };
+    } catch (error) {
+      throw this.mapGitlabRequestError(error);
+    }
+  }
+
+  // One file at `ref`, as raw text — head-file context for the AI review
+  // prompt (v1.5.1 langkah 2). Best effort: null on any failure; the prompt
+  // falls back to the hunk's own context lines.
+  async fetchRawFile(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    path: string,
+    ref: string,
+  ): Promise<string | null> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get<string>(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/repository/files/${encodeURIComponent(path)}/raw`,
+          {
+            headers: { 'Private-Token': token },
+            timeout: REQUEST_TIMEOUT_MS,
+            params: { ref },
+            responseType: 'text',
+            transformResponse: (data: unknown) => data,
+          },
+        ),
+      );
+      return typeof response.data === 'string' ? response.data : null;
+    } catch {
+      return null;
+    }
+  }
+
   // Registers a webhook on a single project (D6/webhook rollout — called
   // from ReposService.createRepos after a repo's Repository row commits).
   // GitLab returns the created hook's `id`, which the caller persists on

@@ -9,6 +9,9 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import {
+  FindingSeverity,
+  FindingSource,
+  FindingStatus,
   IntegrationState,
   Provider,
   PullRequestState,
@@ -37,6 +40,17 @@ import {
 } from './dto/pull-request-diff.dto';
 import { FindingDto } from '../scans/dto/finding.dto';
 import { LatestScanDto } from '../scans/dto/scan.dto';
+import {
+  AI_SCAN_FIELDS_SELECT,
+  AiScanFieldsRow,
+  toApiAiScanFields,
+} from '../scans/dto/ai-scan-fields';
+import {
+  LIFECYCLE_FIELDS_SELECT,
+  LifecycleFieldsRow,
+  toApiFindingStatus,
+  toApiLifecycleFields,
+} from '../scans/dto/lifecycle-fields';
 import { ScansService } from '../scans/scans.service';
 
 // What PR lists show of the latest scan — selected, not included, so a list
@@ -47,7 +61,14 @@ const LATEST_SCAN_LIST_SELECT = {
   criticalCount: true,
   suppressedCount: true,
   finishedAt: true,
+  ...AI_SCAN_FIELDS_SELECT,
+  ...LIFECYCLE_FIELDS_SELECT,
 } as const;
+
+const HEAD_FILE_FETCH_CONCURRENCY = 5;
+// Larger files are skipped for AI context: generated or vendored content,
+// and too big to be worth the tokens around a small hunk.
+const MAX_HEAD_FILE_CHARS = 512 * 1024;
 
 export interface UpsertedPullRequest {
   id: string;
@@ -58,6 +79,7 @@ export interface UpsertedPullRequest {
 interface MappedPullRequest {
   externalId: string;
   title: string;
+  description: string | null;
   authorUsername: string | null;
   sourceBranch: string;
   targetBranch: string;
@@ -113,6 +135,7 @@ export class PullsService {
         provider,
         externalId: mapped.externalId,
         title: mapped.title,
+        description: mapped.description,
         authorUsername: mapped.authorUsername,
         sourceBranch: mapped.sourceBranch,
         targetBranch: mapped.targetBranch,
@@ -126,6 +149,7 @@ export class PullsService {
       // PR shows), never re-derived on later events for the same PR.
       update: {
         title: mapped.title,
+        description: mapped.description,
         authorUsername: mapped.authorUsername,
         sourceBranch: mapped.sourceBranch,
         headSha: mapped.headSha,
@@ -244,7 +268,10 @@ export class PullsService {
             // (GET …/scans/:scanId/findings), never mixed into the list the
             // reviewer acts on.
             findings: {
-              where: { suppressedReason: null },
+              where: {
+                suppressedReason: null,
+                status: { not: FindingStatus.RESOLVED },
+              },
               orderBy: [
                 { severity: 'asc' },
                 { filePath: 'asc' },
@@ -281,6 +308,8 @@ export class PullsService {
       effectivePolicy: pull.effectivePolicy,
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
+            ...toApiAiScanFields(pull.latestScan),
+            ...toApiLifecycleFields(pull.latestScan),
             id: pull.latestScan.id,
             status: pull.latestScan.status,
             trigger: pull.latestScan.trigger,
@@ -311,6 +340,12 @@ export class PullsService {
                   lineEnd: finding.lineEnd,
                   snippet: finding.snippet,
                   suppressedReason: finding.suppressedReason,
+                  category: finding.category,
+                  confidence: finding.confidence,
+                  status: finding.status,
+                  firstSeenScanId: finding.firstSeenScanId,
+                  originFindingId: finding.originFindingId,
+                  resolvedInScanId: finding.resolvedInScanId,
                 }),
             ),
           })
@@ -329,35 +364,13 @@ export class PullsService {
     repositoryId: string,
     pullRequestId: string,
   ): Promise<PullRequestDiffDto> {
-    const pull = await this.prisma.pullRequest.findUnique({
-      where: { id: pullRequestId },
-      include: {
-        repository: { include: { integration: true } },
-        latestScan: { select: { id: true, headSha: true } },
-      },
-    });
-    if (
-      !pull ||
-      pull.organizationId !== organizationId ||
-      pull.repositoryId !== repositoryId
-    ) {
-      throw new NotFoundException('Pull request not found.');
-    }
-
+    const pull = await this.loadPullWithAccess(
+      organizationId,
+      repositoryId,
+      pullRequestId,
+    );
     const { repository } = pull;
     const { integration } = repository;
-    if (
-      integration.state === IntegrationState.TOKEN_EXPIRED ||
-      integration.state === IntegrationState.INVALID
-    ) {
-      throw new ConflictException({
-        field: 'organizationId',
-        message:
-          integration.state === IntegrationState.TOKEN_EXPIRED
-            ? 'token_expired'
-            : 'token_invalid',
-      });
-    }
 
     if (integration.source === Provider.GITHUB) {
       if (!integration.installationId) {
@@ -398,6 +411,161 @@ export class PullsService {
     });
   }
 
+  // The diff between two commits of the PR — what an incremental scan
+  // reads (v1.5.1 langkah 3) — in the same shape as getDiff's files.
+  // `ancestor` false = force-push/rebase: the caller must scan in full.
+  async getCompareDiff(
+    organizationId: string,
+    repositoryId: string,
+    pullRequestId: string,
+    fromSha: string,
+    toSha: string,
+  ): Promise<{
+    files: PullRequestFileDto[];
+    ancestor: boolean;
+    truncated: boolean;
+  }> {
+    if (fromSha === toSha) {
+      return { files: [], ancestor: true, truncated: false };
+    }
+    const pull = await this.loadPullWithAccess(
+      organizationId,
+      repositoryId,
+      pullRequestId,
+    );
+    const { repository } = pull;
+    const { integration } = repository;
+    if (integration.source === Provider.GITHUB) {
+      const [owner, repo] = repository.path.split('/');
+      const result = await this.githubAppService.compareCommits(
+        integration.installationId ?? '',
+        owner,
+        repo,
+        fromSha,
+        toSha,
+      );
+      return {
+        files: result.files.map((file) => this.mapGithubFile(file)),
+        ancestor: result.ancestor,
+        truncated: result.truncated,
+      };
+    }
+    const token = this.encryptionService.decrypt(
+      integration.encryptedToken ?? '',
+    );
+    const result = await this.gitlabApiService.compareCommits(
+      integration.instanceUrl ?? '',
+      token,
+      repository.externalId,
+      fromSha,
+      toSha,
+    );
+    return {
+      files: result.diffs.map((diff) => this.mapGitlabDiff(diff)),
+      ancestor: result.ancestor,
+      truncated: false,
+    };
+  }
+
+  // Files at `sha`, for the AI review's head-file context (v1.5.1
+  // langkah 2). Best effort per file: a failed or oversized fetch is null and
+  // the prompt falls back to hunk context. Fetched a few at a time so a
+  // large PR does not open dozens of provider requests at once.
+  async getHeadFileContents(
+    organizationId: string,
+    repositoryId: string,
+    pullRequestId: string,
+    sha: string,
+    paths: string[],
+  ): Promise<Map<string, string | null>> {
+    const pull = await this.loadPullWithAccess(
+      organizationId,
+      repositoryId,
+      pullRequestId,
+    );
+    const { repository } = pull;
+    const { integration } = repository;
+    const fetchOne: (path: string) => Promise<string | null> =
+      integration.source === Provider.GITHUB
+        ? (path) => {
+            const [owner, repo] = repository.path.split('/');
+            return this.githubAppService.getFileContent(
+              integration.installationId ?? '',
+              owner,
+              repo,
+              path,
+              sha,
+            );
+          }
+        : (() => {
+            const token = integration.encryptedToken
+              ? this.encryptionService.decrypt(integration.encryptedToken)
+              : '';
+            return (path: string) =>
+              this.gitlabApiService.fetchRawFile(
+                integration.instanceUrl ?? '',
+                token,
+                repository.externalId,
+                path,
+                sha,
+              );
+          })();
+
+    const contents = new Map<string, string | null>();
+    for (let i = 0; i < paths.length; i += HEAD_FILE_FETCH_CONCURRENCY) {
+      const batch = paths.slice(i, i + HEAD_FILE_FETCH_CONCURRENCY);
+      const results = await Promise.all(batch.map(fetchOne));
+      batch.forEach((path, index) => {
+        const content = results[index];
+        contents.set(
+          path,
+          content !== null && content.length <= MAX_HEAD_FILE_CHARS
+            ? content
+            : null,
+        );
+      });
+    }
+    return contents;
+  }
+
+  // The PR with its repository and integration, tenant-checked (404 across
+  // orgs/repos) and refusing a dead credential — shared by the diff and
+  // head-file fetches so both resolve access the same way.
+  private async loadPullWithAccess(
+    organizationId: string,
+    repositoryId: string,
+    pullRequestId: string,
+  ) {
+    const pull = await this.prisma.pullRequest.findUnique({
+      where: { id: pullRequestId },
+      include: {
+        repository: { include: { integration: true } },
+        latestScan: { select: { id: true, headSha: true } },
+      },
+    });
+    if (
+      !pull ||
+      pull.organizationId !== organizationId ||
+      pull.repositoryId !== repositoryId
+    ) {
+      throw new NotFoundException('Pull request not found.');
+    }
+    const { integration } = pull.repository;
+    if (
+      integration.state === IntegrationState.TOKEN_EXPIRED ||
+      integration.state === IntegrationState.INVALID
+    ) {
+      throw new ConflictException({
+        field: 'organizationId',
+        message:
+          integration.state === IntegrationState.TOKEN_EXPIRED
+            ? 'token_expired'
+            : 'token_invalid',
+      });
+    }
+    return pull;
+  }
+
   // Read after the provider call on purpose: a failed diff fetch shouldn't
   // have cost a findings query.
   private async buildAnnotations(
@@ -427,11 +595,26 @@ export class PullsService {
         lineStart: true,
         lineEnd: true,
         severity: true,
+        source: true,
+        status: true,
         suppressedReason: true,
       },
       orderBy: [{ filePath: 'asc' }, { lineStart: 'asc' }],
     });
     for (const finding of findings) {
+      // Resolved findings are history, not something on these lines now.
+      if (finding.status === FindingStatus.RESOLVED) {
+        continue;
+      }
+      // AI minor findings are listed, never marked on the diff — too noisy
+      // for the line gutter (v1.5.1 langkah 2).
+      if (
+        finding.source === FindingSource.AI &&
+        finding.severity !== FindingSeverity.CRITICAL &&
+        finding.severity !== FindingSeverity.MAJOR
+      ) {
+        continue;
+      }
       const target =
         finding.suppressedReason === null ? annotations : suppressedAnnotations;
       (target[finding.filePath] ??= []).push({
@@ -439,6 +622,8 @@ export class PullsService {
         lineStart: finding.lineStart,
         lineEnd: finding.lineEnd,
         severity: finding.severity,
+        source: finding.source,
+        status: toApiFindingStatus(finding.status),
       });
     }
     return {
@@ -450,15 +635,29 @@ export class PullsService {
   }
 
   private toLatestScanDto(
-    latestScan: {
-      id: string;
-      status: LatestScanDto['status'];
-      criticalCount: number;
-      suppressedCount: number;
-      finishedAt: Date | null;
-    } | null,
+    latestScan:
+      | ({
+          id: string;
+          status: LatestScanDto['status'];
+          criticalCount: number;
+          suppressedCount: number;
+          finishedAt: Date | null;
+        } & AiScanFieldsRow &
+          LifecycleFieldsRow)
+      | null,
   ): LatestScanDto | null {
-    return latestScan ? new LatestScanDto(latestScan) : null;
+    if (!latestScan) {
+      return null;
+    }
+    return new LatestScanDto({
+      id: latestScan.id,
+      status: latestScan.status,
+      criticalCount: latestScan.criticalCount,
+      suppressedCount: latestScan.suppressedCount,
+      finishedAt: latestScan.finishedAt,
+      ...toApiAiScanFields(latestScan),
+      ...toApiLifecycleFields(latestScan),
+    });
   }
 
   private mapGithubFile(file: GithubPullRequestFile): PullRequestFileDto {
@@ -543,6 +742,7 @@ export class PullsService {
     return {
       externalId: String(attrs.iid),
       title: attrs.title,
+      description: attrs.description ?? null,
       authorUsername: payload.user?.username ?? null,
       sourceBranch: attrs.source_branch,
       targetBranch: attrs.target_branch,
@@ -561,6 +761,7 @@ export class PullsService {
     return {
       externalId: String(pr.number),
       title: pr.title,
+      description: pr.body ?? null,
       authorUsername: pr.user?.login ?? null,
       sourceBranch: pr.head.ref,
       targetBranch: pr.base.ref,

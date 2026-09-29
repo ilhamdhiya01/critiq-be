@@ -4,8 +4,11 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import {
+  DiffMode,
   FindingSeverity,
   FindingSource,
+  FindingStatus,
+  FullReason,
   Provider,
   ScanStatus,
   ScanTrigger,
@@ -62,6 +65,14 @@ const scan = {
   findingsTruncated: false,
   suppressedCount: 2,
   suppressedTruncated: false,
+  diffMode: DiffMode.FULL,
+  fullReason: FullReason.FIRST_SCAN,
+  baseScanId: null,
+  prevHeadSha: null,
+  newCount: 1,
+  persistedCount: 0,
+  reopenedCount: 0,
+  resolvedCount: 0,
   startedAt: new Date('2026-09-28T01:00:00Z'),
   finishedAt: new Date('2026-09-28T01:00:05Z'),
   createdAt: new Date('2026-09-28T00:59:59Z'),
@@ -88,6 +99,10 @@ function finding(
     snippet: null,
     fingerprint: `fp_${id}`,
     suppressedReason,
+    status: FindingStatus.NEW,
+    firstSeenScanId: scan.id,
+    originFindingId: null,
+    resolvedInScanId: null,
     createdAt: new Date(),
   };
 }
@@ -183,7 +198,10 @@ describe('ScansService', () => {
     it('lists active first, then suppressed, with lowercase reasons', async () => {
       const { service, prisma } = setup();
       prisma.finding.findMany.mockResolvedValue(rows);
-      prisma.finding.groupBy.mockResolvedValue(groups);
+      // Two groupBy calls: by suppression reason, and by status.
+      prisma.finding.groupBy.mockImplementation((args: { by: string[] }) =>
+        Promise.resolve(args.by.includes('status') ? [] : groups),
+      );
 
       const result = await service.listFindings(ORG, scan.id, true);
 
@@ -204,20 +222,77 @@ describe('ScansService', () => {
         test_file: 1,
         comment: 0,
         regex_literal: 1,
+        dedupe_static: 0,
       });
+    });
+
+    // v1.5.1 langkah 3, acceptance 9.
+    it('filters by status and counts every status', async () => {
+      const { service, prisma } = setup();
+      prisma.finding.findMany.mockResolvedValue([]);
+      prisma.finding.groupBy.mockImplementation((args: { by: string[] }) =>
+        Promise.resolve(
+          args.by.includes('status')
+            ? [
+                { status: FindingStatus.PERSISTED, _count: { _all: 2 } },
+                { status: FindingStatus.RESOLVED, _count: { _all: 2 } },
+              ]
+            : [],
+        ),
+      );
+
+      const result = await service.listFindings(ORG, scan.id, true, 'resolved');
+
+      expect(prisma.finding.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { scanId: scan.id, status: FindingStatus.RESOLVED },
+        }),
+      );
+      expect(result.byStatus).toEqual({
+        new: 0,
+        persisted: 2,
+        reopened: 0,
+        resolved: 2,
+      });
+    });
+
+    it('orders reopened, new, persisted', async () => {
+      const { service, prisma } = setup();
+      prisma.finding.findMany.mockResolvedValue([
+        { ...finding('f_p', 'a.ts', 1, null), status: FindingStatus.PERSISTED },
+        { ...finding('f_n', 'b.ts', 1, null), status: FindingStatus.NEW },
+        { ...finding('f_r', 'c.ts', 1, null), status: FindingStatus.REOPENED },
+      ]);
+      prisma.finding.groupBy.mockResolvedValue([]);
+
+      const result = await service.listFindings(ORG, scan.id, true);
+
+      expect(result.items.map((item) => item.status)).toEqual([
+        'reopened',
+        'new',
+        'persisted',
+      ]);
     });
 
     // Acceptance 13.
     it('leaves suppressed rows out with includeSuppressed=false but keeps the counts', async () => {
       const { service, prisma } = setup();
       prisma.finding.findMany.mockResolvedValue([rows[1]]);
-      prisma.finding.groupBy.mockResolvedValue(groups);
+      // Two groupBy calls: by suppression reason, and by status.
+      prisma.finding.groupBy.mockImplementation((args: { by: string[] }) =>
+        Promise.resolve(args.by.includes('status') ? [] : groups),
+      );
 
       const result = await service.listFindings(ORG, scan.id, false);
 
       expect(prisma.finding.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { scanId: scan.id, suppressedReason: null },
+          where: {
+            scanId: scan.id,
+            // Default ?status=active (v1.5.1 langkah 3).
+            status: { in: ['NEW', 'PERSISTED', 'REOPENED'] },
+            suppressedReason: null,
+          },
         }),
       );
       expect(result.items.map((item) => item.id)).toEqual(['f_active']);
@@ -226,6 +301,7 @@ describe('ScansService', () => {
         test_file: 1,
         comment: 0,
         regex_literal: 1,
+        dedupe_static: 0,
       });
     });
   });
