@@ -11,6 +11,7 @@ import { EncryptionService } from '../../common/encryption/encryption.service';
 import {
   FindingSeverity,
   FindingSource,
+  FindingStatus,
   IntegrationState,
   Provider,
   PullRequestState,
@@ -44,6 +45,12 @@ import {
   AiScanFieldsRow,
   toApiAiScanFields,
 } from '../scans/dto/ai-scan-fields';
+import {
+  LIFECYCLE_FIELDS_SELECT,
+  LifecycleFieldsRow,
+  toApiFindingStatus,
+  toApiLifecycleFields,
+} from '../scans/dto/lifecycle-fields';
 import { ScansService } from '../scans/scans.service';
 
 // What PR lists show of the latest scan — selected, not included, so a list
@@ -55,6 +62,7 @@ const LATEST_SCAN_LIST_SELECT = {
   suppressedCount: true,
   finishedAt: true,
   ...AI_SCAN_FIELDS_SELECT,
+  ...LIFECYCLE_FIELDS_SELECT,
 } as const;
 
 const HEAD_FILE_FETCH_CONCURRENCY = 5;
@@ -260,7 +268,10 @@ export class PullsService {
             // (GET …/scans/:scanId/findings), never mixed into the list the
             // reviewer acts on.
             findings: {
-              where: { suppressedReason: null },
+              where: {
+                suppressedReason: null,
+                status: { not: FindingStatus.RESOLVED },
+              },
               orderBy: [
                 { severity: 'asc' },
                 { filePath: 'asc' },
@@ -298,6 +309,7 @@ export class PullsService {
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
             ...toApiAiScanFields(pull.latestScan),
+            ...toApiLifecycleFields(pull.latestScan),
             id: pull.latestScan.id,
             status: pull.latestScan.status,
             trigger: pull.latestScan.trigger,
@@ -330,6 +342,10 @@ export class PullsService {
                   suppressedReason: finding.suppressedReason,
                   category: finding.category,
                   confidence: finding.confidence,
+                  status: finding.status,
+                  firstSeenScanId: finding.firstSeenScanId,
+                  originFindingId: finding.originFindingId,
+                  resolvedInScanId: finding.resolvedInScanId,
                 }),
             ),
           })
@@ -393,6 +409,62 @@ export class PullsService {
       truncated: result.truncated,
       ...(await this.buildAnnotations(pull.latestScan)),
     });
+  }
+
+  // The diff between two commits of the PR — what an incremental scan
+  // reads (v1.5.1 langkah 3) — in the same shape as getDiff's files.
+  // `ancestor` false = force-push/rebase: the caller must scan in full.
+  async getCompareDiff(
+    organizationId: string,
+    repositoryId: string,
+    pullRequestId: string,
+    fromSha: string,
+    toSha: string,
+  ): Promise<{
+    files: PullRequestFileDto[];
+    ancestor: boolean;
+    truncated: boolean;
+  }> {
+    if (fromSha === toSha) {
+      return { files: [], ancestor: true, truncated: false };
+    }
+    const pull = await this.loadPullWithAccess(
+      organizationId,
+      repositoryId,
+      pullRequestId,
+    );
+    const { repository } = pull;
+    const { integration } = repository;
+    if (integration.source === Provider.GITHUB) {
+      const [owner, repo] = repository.path.split('/');
+      const result = await this.githubAppService.compareCommits(
+        integration.installationId ?? '',
+        owner,
+        repo,
+        fromSha,
+        toSha,
+      );
+      return {
+        files: result.files.map((file) => this.mapGithubFile(file)),
+        ancestor: result.ancestor,
+        truncated: result.truncated,
+      };
+    }
+    const token = this.encryptionService.decrypt(
+      integration.encryptedToken ?? '',
+    );
+    const result = await this.gitlabApiService.compareCommits(
+      integration.instanceUrl ?? '',
+      token,
+      repository.externalId,
+      fromSha,
+      toSha,
+    );
+    return {
+      files: result.diffs.map((diff) => this.mapGitlabDiff(diff)),
+      ancestor: result.ancestor,
+      truncated: false,
+    };
   }
 
   // Files at `sha`, for the AI review's head-file context (v1.5.1
@@ -524,11 +596,16 @@ export class PullsService {
         lineEnd: true,
         severity: true,
         source: true,
+        status: true,
         suppressedReason: true,
       },
       orderBy: [{ filePath: 'asc' }, { lineStart: 'asc' }],
     });
     for (const finding of findings) {
+      // Resolved findings are history, not something on these lines now.
+      if (finding.status === FindingStatus.RESOLVED) {
+        continue;
+      }
       // AI minor findings are listed, never marked on the diff — too noisy
       // for the line gutter (v1.5.1 langkah 2).
       if (
@@ -546,6 +623,7 @@ export class PullsService {
         lineEnd: finding.lineEnd,
         severity: finding.severity,
         source: finding.source,
+        status: toApiFindingStatus(finding.status),
       });
     }
     return {
@@ -564,7 +642,8 @@ export class PullsService {
           criticalCount: number;
           suppressedCount: number;
           finishedAt: Date | null;
-        } & AiScanFieldsRow)
+        } & AiScanFieldsRow &
+          LifecycleFieldsRow)
       | null,
   ): LatestScanDto | null {
     if (!latestScan) {
@@ -577,6 +656,7 @@ export class PullsService {
       suppressedCount: latestScan.suppressedCount,
       finishedAt: latestScan.finishedAt,
       ...toApiAiScanFields(latestScan),
+      ...toApiLifecycleFields(latestScan),
     });
   }
 

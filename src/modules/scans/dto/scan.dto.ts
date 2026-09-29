@@ -4,6 +4,7 @@ import {
   ScanTrigger,
 } from '../../../generated/prisma/enums';
 import { ApiAiScanFields } from './ai-scan-fields';
+import { ApiLifecycleFields } from './lifecycle-fields';
 
 // What the worker last reported through job.updateProgress() — see
 // ScanProcessor. Only present while the scan is QUEUED/RUNNING and its job
@@ -45,6 +46,15 @@ export class ScanDto {
   aiCached!: boolean;
   majorCount!: number;
   minorCount!: number;
+  // Lifecycle (v1.5.1 langkah 3).
+  diffMode!: ApiLifecycleFields['diffMode'];
+  fullReason!: ApiLifecycleFields['fullReason'];
+  baseScanId!: string | null;
+  prevHeadSha!: string | null;
+  newCount!: number;
+  persistedCount!: number;
+  reopenedCount!: number;
+  resolvedCount!: number;
 
   constructor(partial: ScanDto) {
     Object.assign(this, partial);
@@ -110,6 +120,14 @@ export class LatestScanDto {
   aiCached!: boolean;
   majorCount!: number;
   minorCount!: number;
+  diffMode!: ApiLifecycleFields['diffMode'];
+  fullReason!: ApiLifecycleFields['fullReason'];
+  baseScanId!: string | null;
+  prevHeadSha!: string | null;
+  newCount!: number;
+  persistedCount!: number;
+  reopenedCount!: number;
+  resolvedCount!: number;
 
   constructor(
     partial: {
@@ -118,7 +136,8 @@ export class LatestScanDto {
       criticalCount: number;
       suppressedCount: number;
       finishedAt: Date | null;
-    } & ApiAiScanFields,
+    } & ApiAiScanFields &
+      ApiLifecycleFields,
   ) {
     Object.assign(this, partial);
   }

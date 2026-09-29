@@ -9,6 +9,7 @@ import {
   ScanStatus,
 } from '../../generated/prisma/enums';
 import { AiScanService } from '../ai/scan/ai-scan.service';
+import { ScansService } from '../scans/scans.service';
 import { PullSummaryService } from './pull-summary.service';
 
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -19,6 +20,7 @@ jest.mock('../../common/redis/rate-limiter.service', () => ({
   RateLimiterService: class {},
 }));
 jest.mock('../ai/scan/ai-scan.service', () => ({ AiScanService: class {} }));
+jest.mock('../scans/scans.service', () => ({ ScansService: class {} }));
 
 function latestScan(overrides: Record<string, unknown> = {}) {
   return {
@@ -57,16 +59,22 @@ function setup(scan: Record<string, unknown> | null = latestScan()) {
     maybeEnqueue: jest.fn().mockResolvedValue(AiScanStatus.QUEUED),
   };
   const rateLimiter = { tryAcquire: jest.fn().mockResolvedValue(true) };
+  const scansService = {
+    requestRescan: jest
+      .fn()
+      .mockResolvedValue({ scanId: 'scan_2', status: 'QUEUED' }),
+  };
   const config = { getOrThrow: () => 204_800 };
   const logger = { info: jest.fn(), warn: jest.fn() };
   const service = new PullSummaryService(
     prisma as unknown as PrismaService,
     aiScanService as unknown as AiScanService,
+    scansService as unknown as ScansService,
     rateLimiter as unknown as RateLimiterService,
     config as unknown as ConfigService,
     logger as unknown as Logger,
   );
-  return { service, prisma, aiScanService, rateLimiter, logger };
+  return { service, prisma, aiScanService, scansService, rateLimiter, logger };
 }
 
 describe('PullSummaryService.getSummary', () => {
@@ -116,18 +124,33 @@ describe('PullSummaryService.getSummary', () => {
 });
 
 describe('PullSummaryService.regenerate', () => {
-  it('queues a new run', async () => {
-    const { service, aiScanService, logger } = setup();
+  it('re-runs the AI on the existing scan without force', async () => {
+    const { service, aiScanService, scansService, logger } = setup();
     await expect(
-      service.regenerate('org_1', 'repo_1', 'pull_1', 'u_1', true),
+      service.regenerate('org_1', 'repo_1', 'pull_1', 'u_1', false),
     ).resolves.toEqual({ scanId: 'scan_1', aiStatus: 'queued' });
-    expect(aiScanService.maybeEnqueue).toHaveBeenCalledWith('scan_1', {
-      force: true,
-    });
+    expect(aiScanService.maybeEnqueue).toHaveBeenCalledWith('scan_1');
+    expect(scansService.requestRescan).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(
       'audit.ai.regenerate_requested',
-      expect.objectContaining({ by: 'u_1', force: true }),
+      expect.objectContaining({ by: 'u_1', force: false }),
     );
+  });
+
+  // v1.5.1 langkah 3: force = a new FULL scan, static and AI.
+  it('starts a new full scan when forced', async () => {
+    const { service, aiScanService, scansService } = setup();
+    await expect(
+      service.regenerate('org_1', 'repo_1', 'pull_1', 'u_1', true),
+    ).resolves.toEqual({ scanId: 'scan_2', aiStatus: 'queued' });
+    expect(scansService.requestRescan).toHaveBeenCalledWith(
+      'org_1',
+      'repo_1',
+      'pull_1',
+      'u_1',
+      true,
+    );
+    expect(aiScanService.maybeEnqueue).not.toHaveBeenCalled();
   });
 
   it('409s while a run is in flight', async () => {

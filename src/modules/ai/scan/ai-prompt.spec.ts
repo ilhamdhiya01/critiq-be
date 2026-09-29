@@ -12,6 +12,8 @@ import {
 const FINGERPRINT_BY_VERSION: Record<string, string> = {
   'ai-2026.09.2':
     'ec21f13606b1425f26da43e8137b38839c9e164192bf562ddf27487e183d6060',
+  'ai-2026.09.3':
+    'd050adf8a6dca4f9bd8e85314c06d7abe04e348ce2d90208e5654ecca3318327',
 };
 
 describe('AI prompt', () => {

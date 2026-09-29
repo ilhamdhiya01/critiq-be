@@ -9,6 +9,7 @@ import {
   buildSystemPrompt,
   REPORT_REVIEW_SCHEMA,
   REPORT_REVIEW_TOOL,
+  ReviewMode,
 } from './ai-prompt.constants';
 
 // Builds the one report_review request for a scan. Pure: no DB, no
@@ -18,6 +19,7 @@ import {
 export const CHARS_PER_TOKEN = 3.5;
 const MAX_DESCRIPTION_CHARS = 2000;
 const MAX_ALREADY_REPORTED = 50;
+const MAX_LIFECYCLE_ITEMS = 30;
 export const REDACTED = '[REDACTED:secret]';
 
 const RISKY_EXTENSIONS = new Set([
@@ -87,6 +89,20 @@ export interface PromptBuildInput {
   timeoutMs: number;
   // One extra system instruction, for the retry after an invalid answer.
   systemSuffix?: string;
+  // v1.5.1 langkah 3: INCREMENTAL scans review only the latest push, with
+  // what the previous review reported and what this push resolved.
+  mode?: ReviewMode;
+  lifecycle?: {
+    resolved: LifecycleItem[];
+    persisted: LifecycleItem[];
+  };
+}
+
+export interface LifecycleItem {
+  category: FindingCategory | null;
+  filePath: string;
+  lineStart: number;
+  title: string;
 }
 
 export interface SentFile {
@@ -306,6 +322,23 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
         `- [${(f.category ?? 'OTHER').toLowerCase()}] ${f.filePath}:${f.lineStart}-${f.lineEnd} ${f.title}`,
     );
 
+  const item = (f: LifecycleItem) =>
+    `- [${(f.category ?? 'OTHER').toLowerCase()}] ${f.filePath}:${f.lineStart} ${f.title}`;
+  const lifecycleBlocks =
+    input.mode === 'incremental' && input.lifecycle
+      ? [
+          '',
+          'RESOLVED IN THIS PUSH (previously reported; the lines changed. Re-report ONLY if the new code still has the same problem):',
+          ...(input.lifecycle.resolved.length > 0
+            ? input.lifecycle.resolved.slice(0, MAX_LIFECYCLE_ITEMS).map(item)
+            : ['- none']),
+          'PERSISTED FROM PREVIOUS PUSH (unchanged lines, already listed, do not repeat):',
+          ...(input.lifecycle.persisted.length > 0
+            ? input.lifecycle.persisted.slice(0, MAX_LIFECYCLE_ITEMS).map(item)
+            : ['- none']),
+        ]
+      : [];
+
   const header = [
     `REPOSITORY: ${input.repoPath}`,
     `PULL REQUEST TITLE: ${input.pullTitle}`,
@@ -317,9 +350,12 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
     '',
     'ALREADY REPORTED BY STATIC RULES — do not repeat:',
     ...(alreadyReported.length > 0 ? alreadyReported : ['- none']),
+    ...lifecycleBlocks,
   ].join('\n');
 
-  const system = buildSystemPrompt(input.locale) + (input.systemSuffix ?? '');
+  const system =
+    buildSystemPrompt(input.locale, input.mode ?? 'full') +
+    (input.systemSuffix ?? '');
   const diffIntro =
     'DIFF (new-side line numbers; "+" marks added lines — the only lines a finding may point at):';
 

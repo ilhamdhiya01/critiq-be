@@ -12,7 +12,9 @@ import { REDIS_CLIENT } from '../common/redis/redis.constants';
 import {
   AiRiskLevel,
   AiScanStatus,
+  DiffMode,
   FindingSource,
+  FindingStatus,
 } from '../generated/prisma/enums';
 import { completeValidated } from '../modules/ai/ai-call';
 import { AiError, AiErrorCode, toAiError } from '../modules/ai/ai-error';
@@ -30,9 +32,13 @@ import {
 } from '../modules/ai/scan/ai-prompt.constants';
 import { validateAiFindings } from '../modules/ai/scan/ai-result-validator';
 import {
-  countBySeverity,
+  buildAiRows,
+  freshCriticalCount,
+  loadAiLifecycleContext,
   persistAiResult,
 } from '../modules/ai/scan/ai-scan.persistence';
+import { logWindowMisses } from './lifecycle/lifecycle-context';
+import { notifyIfAllCriticalResolved } from './lifecycle/scan-counts';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AI_QUEUE_NAME, aiBackoff, AiJobPayload } from './ai-queue.constants';
@@ -141,22 +147,35 @@ export class AiScanProcessor
             aiFinishedAt: new Date(),
           },
         });
+        await this.notifyResolvedIfDone(scanId, log);
         return;
       }
       throw new AiJobFailure(aiError.code);
     }
 
-    // 3. Inputs: the diff (live, like the static scan), this scan's static
-    // findings, and head-file context.
-    const diff = await this.pullsService.getDiff(
-      organizationId,
-      scan.repositoryId,
-      pullId,
-    );
-    const staticFindings = await this.prisma.finding.findMany({
-      where: { scanId, source: FindingSource.STATIC },
+    // 3. Inputs: the same diff the static step read (only the latest push
+    // for an INCREMENTAL scan — v1.5.1 langkah 3), this scan's live static
+    // findings, the lifecycle blocks, and head-file context.
+    const diff =
+      scan.diffMode === DiffMode.INCREMENTAL && scan.prevHeadSha
+        ? await this.pullsService.getCompareDiff(
+            organizationId,
+            scan.repositoryId,
+            pullId,
+            scan.prevHeadSha,
+            scan.headSha,
+          )
+        : await this.pullsService.getDiff(
+            organizationId,
+            scan.repositoryId,
+            pullId,
+          );
+    const scanFindings = await this.prisma.finding.findMany({
+      where: { scanId },
       select: {
         id: true,
+        source: true,
+        status: true,
         ruleId: true,
         category: true,
         filePath: true,
@@ -166,6 +185,11 @@ export class AiScanProcessor
         suppressedReason: true,
       },
     });
+    const staticFindings = scanFindings.filter(
+      (finding) =>
+        finding.source === FindingSource.STATIC &&
+        finding.status !== FindingStatus.RESOLVED,
+    );
     const contextPaths = diff.files
       .filter(
         (file) =>
@@ -207,6 +231,21 @@ export class AiScanProcessor
       maxOutputTokens:
         this.configService.getOrThrow<number>('ai.maxOutputTokens'),
       timeoutMs: this.configService.getOrThrow<number>('ai.timeoutMs'),
+      mode: scan.diffMode === DiffMode.INCREMENTAL ? 'incremental' : 'full',
+      lifecycle: {
+        resolved: scanFindings.filter(
+          (finding) =>
+            finding.status === FindingStatus.RESOLVED &&
+            finding.suppressedReason === null,
+        ),
+        // Static persisted findings are already under ALREADY REPORTED.
+        persisted: scanFindings.filter(
+          (finding) =>
+            finding.status === FindingStatus.PERSISTED &&
+            finding.source === FindingSource.AI &&
+            finding.suppressedReason === null,
+        ),
+      },
     });
 
     // 4. Call. invalid_response is retried once inside completeValidated,
@@ -247,6 +286,17 @@ export class AiScanProcessor
       staticActive,
     );
 
+    // Lifecycle: matched to the base AI findings (FULL), minus what the
+    // static step already carried (INCREMENTAL), NEW or REOPENED otherwise.
+    const lifecycleContext = await loadAiLifecycleContext(this.prisma, scan);
+    const { rows, newFingerprints } = buildAiRows(
+      scan,
+      kept,
+      duplicates,
+      lifecycleContext,
+      this.configService.get<boolean>('ai.keepDeduped') ?? false,
+    );
+
     const aiProvider = provider.id;
     const aiModel = completion.model;
     const persisted = await this.prisma.$transaction((tx) =>
@@ -258,12 +308,10 @@ export class AiScanProcessor
           summaryMd: review.summary,
           riskLevel: review.risk_level.toUpperCase() as AiRiskLevel,
           filesOmitted: prompt.filesOmitted,
-          kept,
-          duplicates,
-          keepDeduped:
-            this.configService.get<boolean>('ai.keepDeduped') ?? false,
+          rows,
           total: review.findings.length,
           rejected: validation.rejected.length,
+          deduped: duplicates.length,
           provider: aiProvider,
           model: aiModel,
           promptVersion: AI_PROMPT_VERSION,
@@ -290,6 +338,8 @@ export class AiScanProcessor
           promptVersion: AI_PROMPT_VERSION,
           provider: aiProvider,
           model: scan.aiModel ?? aiModel,
+          diffMode: scan.diffMode,
+          prevHeadSha: scan.prevHeadSha,
         },
         scanId,
       );
@@ -297,23 +347,53 @@ export class AiScanProcessor
       this.logger.warn('ai.cache_write_failed', log);
     }
 
-    const counts = countBySeverity(kept);
-    // The static scan already notified when it found criticals; the AI adds
-    // a notification only when it is the first to find one.
-    if (counts.critical > 0 && scan.findingsCount === 0) {
+    await logWindowMisses(
+      this.prisma,
+      this.logger,
+      {
+        pullId,
+        currentScanId: scanId,
+        windowScanIds: lifecycleContext.windowScanIds,
+        fingerprints: newFingerprints,
+      },
+      log,
+    );
+
+    // Only criticals this push brought or brought back, and only when the
+    // static step did not already notify for this scan.
+    const aiFresh = freshCriticalCount(rows);
+    const staticFresh = scanFindings.filter(
+      (finding) =>
+        finding.source === FindingSource.STATIC &&
+        finding.suppressedReason === null &&
+        (finding.status === FindingStatus.NEW ||
+          finding.status === FindingStatus.REOPENED),
+    ).length;
+    if (aiFresh > 0 && staticFresh === 0) {
       this.logger.warn('notification.pull_critical_found', {
         ...log,
-        criticalCount: counts.critical,
+        criticalCount: aiFresh,
         source: 'ai',
       });
     }
+    await notifyIfAllCriticalResolved(
+      this.prisma,
+      this.redis,
+      this.logger,
+      {
+        id: scanId,
+        headSha: scan.headSha,
+        criticalCount: persisted.criticalCount,
+      },
+      log,
+    );
     this.logger.info('audit.ai.completed', {
       ...log,
       provider: aiProvider,
       model: aiModel,
       tokensIn: completion.usage.inputTokens,
       tokensOut: completion.usage.outputTokens,
-      findings: kept.length,
+      findings: rows.length,
       rejected: validation.rejected.length,
       deduped: duplicates.length,
       cached: false,
@@ -358,11 +438,37 @@ export class AiScanProcessor
         },
       });
       this.logger.error('ai.failed', { ...log, code });
+      await this.notifyResolvedIfDone(scanId, log);
       if (code === 'auth_failed') {
         await this.notifyAuthFailed(organizationId, log);
       }
     } catch {
       this.logger.error('ai.failed_finalize_error', log);
+    }
+  }
+
+  // The AI step was this scan's last one, so it decides "all criticals
+  // resolved" — also when it ends without a result.
+  private async notifyResolvedIfDone(
+    scanId: string,
+    log: LogContext,
+  ): Promise<void> {
+    const scan = await this.prisma.scan.findUnique({
+      where: { id: scanId },
+      select: { headSha: true, criticalCount: true },
+    });
+    if (scan) {
+      await notifyIfAllCriticalResolved(
+        this.prisma,
+        this.redis,
+        this.logger,
+        {
+          id: scanId,
+          headSha: scan.headSha,
+          criticalCount: scan.criticalCount,
+        },
+        log,
+      );
     }
   }
 

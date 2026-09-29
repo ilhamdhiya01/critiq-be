@@ -16,6 +16,7 @@ import { Scan } from '../../generated/prisma/client';
 import {
   FindingSeverity,
   FindingSource,
+  FindingStatus,
   ScanStatus,
   ScanTrigger,
 } from '../../generated/prisma/enums';
@@ -31,6 +32,22 @@ import {
   toApiSuppressionReason,
 } from './dto/finding.dto';
 import { toApiAiScanFields } from './dto/ai-scan-fields';
+import {
+  toApiFindingStatus,
+  toApiLifecycleFields,
+} from './dto/lifecycle-fields';
+
+const ACTIVE_STATUSES: FindingStatus[] = [
+  FindingStatus.NEW,
+  FindingStatus.PERSISTED,
+  FindingStatus.REOPENED,
+];
+const STATUS_RANK: Record<FindingStatus, number> = {
+  [FindingStatus.REOPENED]: 0,
+  [FindingStatus.NEW]: 1,
+  [FindingStatus.PERSISTED]: 2,
+  [FindingStatus.RESOLVED]: 3,
+};
 import { ScanFindingsDto } from './dto/scan-findings.dto';
 import {
   ActiveScanDto,
@@ -77,11 +94,14 @@ export class ScansService {
 
   // Manual rescan (Admin/Reviewer). Always a new attempt on the PR's current
   // head sha — unlike a webhook, a person asking again is never a duplicate.
+  // Incremental by default (only what changed since the last finished scan,
+  // often nothing); `full` rescans the whole PR (v1.5.1 langkah 3).
   async requestRescan(
     organizationId: string,
     repositoryId: string,
     pullId: string,
     actorUserId: string,
+    full = false,
   ): Promise<ScanRequestedDto> {
     const pull = await this.findPullOrThrow(
       organizationId,
@@ -127,6 +147,7 @@ export class ScansService {
       baseSha: null,
       provider: pull.provider,
       trigger: ScanTrigger.RESCAN,
+      full,
     });
 
     // TODO(audit log model): persisted AuditLog row once the table exists —
@@ -137,6 +158,7 @@ export class ScansService {
       pullId,
       scanId: result.scanId,
       actorUserId,
+      full,
     });
     return new ScanRequestedDto({
       scanId: result.scanId,
@@ -167,13 +189,21 @@ export class ScansService {
     organizationId: string,
     scanId: string,
     includeSuppressed: boolean,
+    statusFilter: 'active' | 'resolved' | 'all' = 'active',
   ): Promise<ScanFindingsDto> {
     const scan = await this.findScanOrThrow(organizationId, scanId);
 
-    const [findings, suppressedGroups] = await Promise.all([
+    const statusWhere =
+      statusFilter === 'active'
+        ? { status: { in: ACTIVE_STATUSES } }
+        : statusFilter === 'resolved'
+          ? { status: FindingStatus.RESOLVED }
+          : {};
+    const [findings, suppressedGroups, statusGroups] = await Promise.all([
       this.prisma.finding.findMany({
         where: {
           scanId,
+          ...statusWhere,
           ...(includeSuppressed ? {} : { suppressedReason: null }),
         },
         // Severity is ordered CRITICAL → INFO in the enum, so ascending puts
@@ -188,19 +218,45 @@ export class ScansService {
       // there even when ?includeSuppressed=false left those rows out.
       this.prisma.finding.groupBy({
         by: ['suppressedReason'],
-        where: { scanId, suppressedReason: { not: null } },
+        where: {
+          scanId,
+          suppressedReason: { not: null },
+          status: { not: FindingStatus.RESOLVED },
+        },
+        _count: { _all: true },
+      }),
+      this.prisma.finding.groupBy({
+        by: ['status'],
+        where: { scanId, suppressedReason: null },
         _count: { _all: true },
       }),
     ]);
 
-    // Stable partition: active first, each half keeping file/line order.
-    const active = findings.filter((f) => f.suppressedReason === null);
-    const suppressed = findings.filter((f) => f.suppressedReason !== null);
+    // Not suppressed first, then suppressed; within each, reopened → new →
+    // persisted → resolved (stable, so the DB's severity/file/line order
+    // holds inside a status).
+    const byStatusRank = (
+      a: { status: FindingStatus },
+      b: { status: FindingStatus },
+    ) => STATUS_RANK[a.status] - STATUS_RANK[b.status];
+    const active = findings
+      .filter((f) => f.suppressedReason === null)
+      .sort(byStatusRank);
+    const suppressed = findings
+      .filter((f) => f.suppressedReason !== null)
+      .sort(byStatusRank);
 
     const byFile: Record<string, number> = {};
     const bySource = { static: 0, ai: 0 };
     const bySeverity = { critical: 0, major: 0, minor: 0 };
+    const byStatus = { new: 0, persisted: 0, reopened: 0, resolved: 0 };
+    for (const group of statusGroups) {
+      byStatus[toApiFindingStatus(group.status)] = group._count._all;
+    }
     for (const finding of active) {
+      if (finding.status === FindingStatus.RESOLVED) {
+        continue; // counts describe what is live, not history
+      }
       byFile[finding.filePath] = (byFile[finding.filePath] ?? 0) + 1;
       bySource[finding.source === FindingSource.AI ? 'ai' : 'static'] += 1;
       if (finding.severity === FindingSeverity.CRITICAL)
@@ -242,11 +298,16 @@ export class ScansService {
             suppressedReason: finding.suppressedReason,
             category: finding.category,
             confidence: finding.confidence,
+            status: finding.status,
+            firstSeenScanId: finding.firstSeenScanId,
+            originFindingId: finding.originFindingId,
+            resolvedInScanId: finding.resolvedInScanId,
           }),
       ),
       byFile,
       bySource,
       bySeverity,
+      byStatus,
       criticalCount: scan.criticalCount,
       suppressedCount: scan.suppressedCount,
       suppressedByReason,
@@ -317,6 +378,7 @@ export class ScansService {
       startedAt: scan.startedAt,
       finishedAt: scan.finishedAt,
       ...toApiAiScanFields(scan),
+      ...toApiLifecycleFields(scan),
     });
   }
 

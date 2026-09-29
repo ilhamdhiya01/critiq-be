@@ -197,4 +197,48 @@ describe('buildReviewPrompt', () => {
     expect(result.request.tool.name).toBe('report_review');
     expect(result.request.temperature).toBe(0);
   });
+
+  // Acceptance 11.
+  it('adds the lifecycle blocks and the incremental mode', () => {
+    const result = buildReviewPrompt(
+      input({
+        mode: 'incremental',
+        lifecycle: {
+          resolved: [
+            {
+              category: FindingCategory.ERROR_HANDLING,
+              filePath: 'src/auth/session.ts',
+              lineStart: 110,
+              title: 'Missing error handling in critical path',
+            },
+          ],
+          persisted: [
+            {
+              category: FindingCategory.PERFORMANCE,
+              filePath: 'src/auth/roles.ts',
+              lineStart: 88,
+              title: 'N+1 query in role resolver',
+            },
+          ],
+        },
+      }),
+    );
+    expect(result.request.user).toContain(
+      'RESOLVED IN THIS PUSH (previously reported; the lines changed. Re-report ONLY if the new code still has the same problem):\n- [error_handling] src/auth/session.ts:110 Missing error handling in critical path',
+    );
+    expect(result.request.user).toContain(
+      'PERSISTED FROM PREVIOUS PUSH (unchanged lines, already listed, do not repeat):\n- [performance] src/auth/roles.ts:88 N+1 query in role resolver',
+    );
+    expect(result.request.system).toContain(
+      'Do not restate the original PR summary',
+    );
+  });
+
+  it('leaves the blocks out of a full review', () => {
+    const result = buildReviewPrompt(input());
+    expect(result.request.user).not.toContain('RESOLVED IN THIS PUSH');
+    expect(result.request.system).toContain(
+      'Describe what the pull request changes',
+    );
+  });
 });

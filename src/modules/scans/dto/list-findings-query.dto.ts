@@ -8,4 +8,10 @@ export class ListFindingsQueryDto {
   @IsOptional()
   @IsIn(['true', 'false'])
   includeSuppressed?: 'true' | 'false';
+
+  // active = new + persisted + reopened (default); resolved = closed by
+  // this scan's push ("resolved since last push"); all = both.
+  @IsOptional()
+  @IsIn(['active', 'resolved', 'all'])
+  status?: 'active' | 'resolved' | 'all';
 }

@@ -14,7 +14,7 @@ import {
   ScanStatus,
 } from '../../../generated/prisma/enums';
 import { AiJobPayload } from '../../../queue/ai-queue.constants';
-import { AiScanService } from './ai-scan.service';
+import { aiCacheKey, AiScanService } from './ai-scan.service';
 
 // ESM-only packages this CommonJS Jest setup cannot load.
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -40,7 +40,11 @@ function scanRow(overrides: Record<string, unknown> = {}) {
     status: ScanStatus.DONE,
     diffBytes: 50_000,
     findingsCount: 1,
+    filesChanged: 3,
     aiStatus: null,
+    diffMode: 'FULL',
+    baseScanId: null,
+    prevHeadSha: null,
     pullRequest: { effectivePolicy: ReviewPolicy.ALLOW_AI },
     organization: {
       aiProvider: AiProviderId.ANTHROPIC,
@@ -54,10 +58,15 @@ function scanRow(overrides: Record<string, unknown> = {}) {
 
 function setup(scan = scanRow()) {
   const tx = {
-    scan: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    scan: {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn(),
+    },
     finding: {
       deleteMany: jest.fn(),
       createMany: jest.fn(),
+      groupBy: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
     },
     aiSummary: { deleteMany: jest.fn(), create: jest.fn() },
   };
@@ -70,6 +79,7 @@ function setup(scan = scanRow()) {
       ),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
     },
     aiCredential: {
       findUnique: jest
@@ -254,9 +264,59 @@ describe('AiScanService.maybeEnqueue', () => {
     expect(update.data).toMatchObject({
       aiStatus: AiScanStatus.CACHED,
       aiCached: true,
-      criticalCount: 2, // 1 static + 1 AI critical
     });
-    expect(tx.finding.createMany).toHaveBeenCalled();
+    const [created] = tx.finding.createMany.mock.calls[0] as [
+      { data: Record<string, unknown>[] },
+    ];
+    expect(created.data).toEqual([
+      expect.objectContaining({ source: 'AI', status: 'NEW' }),
+    ]);
+    // Counts are rebuilt from the rows.
+    expect(tx.finding.groupBy).toHaveBeenCalled();
+  });
+
+  // v1.5.1 langkah 3, acceptance 8: nothing new since the base scan.
+  it('copies the base summary for an empty incremental diff', async () => {
+    const { service, prisma, tx, queue } = setup(
+      scanRow({
+        diffMode: 'INCREMENTAL',
+        baseScanId: 'scan_1',
+        prevHeadSha: 'abc123',
+        diffBytes: 0,
+        filesChanged: 0,
+      }),
+    );
+    prisma.scan.findUnique.mockImplementation(
+      (args: { where: { id: string } }) =>
+        Promise.resolve(
+          args.where.id === 'scan_1'
+            ? {
+                aiProvider: 'anthropic',
+                aiModel: 'claude-sonnet-5',
+                aiPromptVersion: 'ai-2026.09.3',
+                aiSummary: {
+                  summaryMd: 'Adds refresh.',
+                  riskLevel: AiRiskLevel.LOW,
+                  filesOmitted: [],
+                },
+              }
+            : scanRow({
+                diffMode: 'INCREMENTAL',
+                baseScanId: 'scan_1',
+                prevHeadSha: 'abc123',
+                diffBytes: 0,
+                filesChanged: 0,
+              }),
+        ),
+    );
+
+    await expect(service.maybeEnqueue('scan_2')).resolves.toBe(
+      AiScanStatus.CACHED,
+    );
+    expect(queue.add).not.toHaveBeenCalled();
+    expect(tx.aiSummary.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ summaryMd: 'Adds refresh.' }) as unknown,
+    });
   });
 
   it('skips the cache when forced', async () => {
@@ -267,5 +327,25 @@ describe('AiScanService.maybeEnqueue', () => {
     );
     expect(redis.get).not.toHaveBeenCalled();
     expect(queue.add).toHaveBeenCalled();
+  });
+});
+
+// Acceptance 11: an incremental review of a push is a different cached
+// result from a full review of the same head.
+describe('aiCacheKey', () => {
+  it('differs between full and incremental for the same head', () => {
+    const parts = {
+      repositoryId: 'repo_1',
+      headSha: 'abc123',
+      rulesetVersion: '2026.09.5',
+      promptVersion: 'ai-2026.09.3',
+      provider: 'anthropic' as const,
+      model: 'claude-sonnet-5',
+    };
+    expect(
+      aiCacheKey({ ...parts, diffMode: 'FULL', prevHeadSha: null }),
+    ).not.toBe(
+      aiCacheKey({ ...parts, diffMode: 'INCREMENTAL', prevHeadSha: 'aaa111' }),
+    );
   });
 });

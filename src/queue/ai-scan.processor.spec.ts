@@ -72,6 +72,8 @@ const STATIC_SECRET = {
   lineEnd: 2,
   title: 'Hardcoded credential',
   suppressedReason: null,
+  source: FindingSource.STATIC,
+  status: 'NEW',
 };
 
 interface Review {
@@ -108,14 +110,27 @@ function setup(
   options: { findingsCount?: number; staticFindings?: unknown[] } = {},
 ) {
   const tx = {
-    scan: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-    finding: { deleteMany: jest.fn(), createMany: jest.fn() },
+    scan: {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      update: jest.fn(),
+    },
+    finding: {
+      deleteMany: jest.fn(),
+      createMany: jest.fn(),
+      // recomputeScanCounts
+      groupBy: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+    },
     aiSummary: { deleteMany: jest.fn(), create: jest.fn() },
   };
   const prisma = {
     scan: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest
+        .fn()
+        .mockResolvedValue({ headSha: 'abc123', criticalCount: 0 }),
       findUniqueOrThrow: jest.fn().mockResolvedValue({
         id: 'scan_1',
         organizationId: 'org_1',
@@ -126,6 +141,9 @@ function setup(
         status: ScanStatus.DONE,
         findingsCount: options.findingsCount ?? 1,
         aiModel: 'claude-sonnet-5',
+        diffMode: 'FULL',
+        baseScanId: null,
+        prevHeadSha: null,
         pullRequest: {
           title: 'Rotate sessions',
           description: null,
@@ -137,9 +155,17 @@ function setup(
       }),
     },
     finding: {
-      findMany: jest
-        .fn()
-        .mockResolvedValue(options.staticFindings ?? [STATIC_SECRET]),
+      // This scan's findings; the lifecycle queries (resolved pool,
+      // window misses) find nothing.
+      findMany: jest.fn(
+        (args: { where?: Record<string, unknown>; distinct?: unknown }) =>
+          Promise.resolve(
+            args.distinct || args.where?.status === 'RESOLVED' || args.where?.OR
+              ? []
+              : (options.staticFindings ?? [STATIC_SECRET]),
+          ),
+      ),
+      count: jest.fn().mockResolvedValue(0),
     },
     $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
       run(tx),
@@ -247,9 +273,9 @@ describe('AiScanProcessor', () => {
       aiStatus: AiScanStatus.DONE,
       aiTokensIn: 1200,
       aiTokensOut: 150,
-      criticalCount: 2, // 1 static + 1 AI
-      majorCount: 0,
     });
+    // Counts are rebuilt from the rows (v1.5.1 langkah 3).
+    expect(tx.finding.groupBy).toHaveBeenCalled();
     expect(tx.aiSummary.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         summaryMd: 'Adds rotation.',
@@ -262,6 +288,9 @@ describe('AiScanProcessor', () => {
         ruleId: 'ai.error_handling',
         category: FindingCategory.ERROR_HANDLING,
         lineStart: 4,
+        status: 'NEW',
+        firstSeenScanId: 'scan_1',
+        pullId: 'pull_1',
       }),
     ]);
     expect(aiScanService.recordUsage).toHaveBeenCalledWith('org_1', {
@@ -296,7 +325,6 @@ describe('AiScanProcessor', () => {
     await processor.process(job);
     expect(scanUpdate(tx)).toMatchObject({
       aiFindingsDeduped: 1,
-      criticalCount: 1,
     });
     expect(createdFindings(tx)).toEqual([]);
   });
@@ -318,7 +346,6 @@ describe('AiScanProcessor', () => {
       result({ summary: 's', risk_level: 'high', findings: [aiFinding()] }),
     );
     await loud.processor.process(job);
-    expect(scanUpdate(loud.tx)).toMatchObject({ criticalCount: 3 });
     expect(loud.logger.warn).not.toHaveBeenCalledWith(
       'notification.pull_critical_found',
       expect.anything(),
