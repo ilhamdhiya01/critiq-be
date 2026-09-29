@@ -19,7 +19,7 @@ describe('completeValidated', () => {
     const complete = jest.fn().mockResolvedValue(VALID);
     await expect(
       completeValidated(provider(complete), TEST_REQUEST),
-    ).resolves.toBe(VALID);
+    ).resolves.toEqual(VALID);
   });
 
   it('retries once when the tool input does not match the schema', async () => {
@@ -29,7 +29,7 @@ describe('completeValidated', () => {
       .mockResolvedValueOnce(VALID);
     await expect(
       completeValidated(provider(complete), TEST_REQUEST),
-    ).resolves.toBe(VALID);
+    ).resolves.toEqual(VALID);
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
@@ -41,6 +41,31 @@ describe('completeValidated', () => {
       completeValidated(provider(complete), TEST_REQUEST),
     ).rejects.toMatchObject({ code: 'invalid_response' });
     expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('validates and returns the normalized tool input', async () => {
+    const complete = jest
+      .fn()
+      .mockResolvedValue({ ...VALID, toolInput: { summary: 'x'.repeat(5) } });
+    const normalize = jest.fn(() => ({ summary: 'short', findings: [] }));
+    await expect(
+      completeValidated(provider(complete), TEST_REQUEST, { normalize }),
+    ).resolves.toEqual({
+      ...VALID,
+      toolInput: { summary: 'short', findings: [] },
+    });
+    expect(normalize).toHaveBeenCalledWith({ summary: 'xxxxx' });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a truncated answer', async () => {
+    const complete = jest
+      .fn()
+      .mockRejectedValue(new AiError('output_truncated'));
+    await expect(
+      completeValidated(provider(complete), TEST_REQUEST),
+    ).rejects.toMatchObject({ code: 'output_truncated' });
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry other errors', async () => {

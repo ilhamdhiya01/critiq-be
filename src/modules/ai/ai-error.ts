@@ -8,6 +8,9 @@ export type AiErrorCode =
   | 'timeout'
   | 'provider_unreachable'
   | 'invalid_response'
+  // The provider stopped at max_tokens before the tool call was complete.
+  // Not retryable: the same request stops at the same limit again.
+  | 'output_truncated'
   | 'bad_request'
   // Configuration problems, raised before any call is made.
   | 'insecure_base_url'

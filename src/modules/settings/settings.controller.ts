@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, Post, Put, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Put,
+  Req,
+} from '@nestjs/common';
 import type { Request } from 'express';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
@@ -41,6 +51,7 @@ export class SettingsController {
   // 200 whether or not the provider call succeeds — the outcome is the
   // body's `ok`; only a rate limit (429) or invalid input is an HTTP error.
   @Post('test')
+  @HttpCode(HttpStatus.OK)
   @OrgAuth([Role.ADMIN])
   @ResponseMessage('AI connection tested')
   testAi(@Param('orgId') orgId: string, @Body() dto: TestAiSettingsDto) {

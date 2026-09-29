@@ -39,7 +39,7 @@ export const validationSchema = Joi.object({
   AI_COMPAT_HTTP_ALLOWLIST: Joi.string().allow('').optional(),
   AI_CONCURRENCY: Joi.number().integer().min(1).default(2),
   AI_MAX_INPUT_TOKENS: Joi.number().integer().min(1000).default(60000),
-  AI_MAX_OUTPUT_TOKENS: Joi.number().integer().min(256).default(4000),
+  AI_MAX_OUTPUT_TOKENS: Joi.number().integer().min(256).default(8000),
   AI_TIMEOUT_MS: Joi.number().integer().min(1000).default(90000),
   AI_CONTEXT_LINES: Joi.number().integer().min(0).default(30),
   AI_MAX_DIFF_BYTES: Joi.number().integer().min(1024).default(204800),

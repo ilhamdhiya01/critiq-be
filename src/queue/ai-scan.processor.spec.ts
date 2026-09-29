@@ -377,6 +377,51 @@ describe('AiScanProcessor', () => {
     });
   });
 
+  // A summary past maxLength used to fail the whole review (claude-sonnet-5).
+  it('trims an overlong summary instead of failing the review', async () => {
+    const { processor, tx, provider, logger } = setup();
+    provider.complete.mockResolvedValue(
+      result({
+        summary: 'Kalimat panjang tentang perubahan. '.repeat(60),
+        risk_level: 'medium',
+        findings: [aiFinding()],
+      }),
+    );
+
+    await processor.process(job);
+
+    expect(provider.complete.mock.calls).toHaveLength(1);
+    expect(scanUpdate(tx)).toMatchObject({ aiStatus: AiScanStatus.DONE });
+    const [{ data }] = tx.aiSummary.create.mock.calls[0] as [
+      { data: { summaryMd: string } },
+    ];
+    expect(data.summaryMd.length).toBeLessThanOrEqual(1500);
+    expect(createdFindings(tx)).toHaveLength(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      'ai.output_clamped',
+      expect.objectContaining({ fields: ['summary'] }),
+    );
+  });
+
+  it('fails a truncated answer at once and keeps the raw answer', async () => {
+    const { processor, provider, redis } = setup();
+    provider.complete.mockRejectedValue(
+      new AiError('output_truncated', { raw: { partial: true } }),
+    );
+
+    const error = await processor.process(job).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AiJobFailure);
+    expect(error).toMatchObject({ code: 'output_truncated' });
+    expect(provider.complete.mock.calls).toHaveLength(1);
+    expect(redis.set).toHaveBeenCalledWith(
+      'ai:raw:scan_1',
+      expect.stringMatching(/^enc\(/),
+      'EX',
+      30 * 86_400,
+    );
+  });
+
   // Acceptance 10.
   it('hands retryable errors back to BullMQ and fails auth errors at once', async () => {
     const limited = setup();

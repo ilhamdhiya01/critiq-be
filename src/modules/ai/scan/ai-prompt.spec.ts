@@ -14,6 +14,8 @@ const FINGERPRINT_BY_VERSION: Record<string, string> = {
     'ec21f13606b1425f26da43e8137b38839c9e164192bf562ddf27487e183d6060',
   'ai-2026.09.3':
     'd050adf8a6dca4f9bd8e85314c06d7abe04e348ce2d90208e5654ecca3318327',
+  'ai-2026.09.4':
+    '05b7cfb140b5af975a4ca502f5112ea2ce7f38349df2ee34c95091a13fbad069',
 };
 
 describe('AI prompt', () => {
@@ -27,6 +29,13 @@ describe('AI prompt', () => {
     expect(prompt).toContain('Indonesian (Bahasa Indonesia)');
     expect(prompt).toContain('every "title" in short English');
     expect(buildSystemPrompt('en')).toContain('in English');
+  });
+
+  // The model used to report "files omitted" on PRs where nothing was.
+  it('mentions omitted files only when the input lists them', () => {
+    const prompt = buildSystemPrompt('en');
+    expect(prompt).not.toContain('Mention any files omitted for size');
+    expect(prompt).toContain('never claim a file was omitted otherwise');
   });
 
   it('treats repository content as data, not instructions', () => {
