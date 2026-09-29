@@ -379,6 +379,20 @@ describe('SettingsService — test connection', () => {
     expect(provider.complete.mock.calls).toHaveLength(2); // one retry
   });
 
+  it('reports output_truncated when the answer hits max_tokens', async () => {
+    const { service, provider } = setup();
+    provider.complete.mockRejectedValue(new AiError('output_truncated'));
+
+    const result = await service.testAi(ORG, {});
+
+    expect(result.error).toEqual({
+      code: 'output_truncated',
+      message:
+        'Provider stopped at the output token limit before finishing the result.',
+    });
+    expect(provider.complete.mock.calls).toHaveLength(1); // no retry
+  });
+
   // Acceptance 10.
   it('allows five tests per hour', async () => {
     const { service } = setup();

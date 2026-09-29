@@ -61,7 +61,7 @@ export default () => ({
   ai: {
     concurrency: Number(process.env.AI_CONCURRENCY ?? 2),
     maxInputTokens: Number(process.env.AI_MAX_INPUT_TOKENS ?? 60000),
-    maxOutputTokens: Number(process.env.AI_MAX_OUTPUT_TOKENS ?? 4000),
+    maxOutputTokens: Number(process.env.AI_MAX_OUTPUT_TOKENS ?? 8000),
     timeoutMs: Number(process.env.AI_TIMEOUT_MS ?? 90000),
     contextLines: Number(process.env.AI_CONTEXT_LINES ?? 30),
     maxDiffBytes: Number(process.env.AI_MAX_DIFF_BYTES ?? 204800),
