@@ -32,6 +32,7 @@ export class ScansController {
       orgId,
       scanId,
       query.includeSuppressed !== 'false',
+      query.status ?? 'active',
     );
   }
 }

@@ -5,7 +5,15 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { Prisma } from '../generated/prisma/client';
-import { Provider, ScanStatus, ScanTrigger } from '../generated/prisma/enums';
+import {
+  DiffMode,
+  FullReason,
+  Provider,
+  ReviewPolicy,
+  ScanStatus,
+  ScanTrigger,
+} from '../generated/prisma/enums';
+import { AI_PROMPT_VERSION } from '../modules/ai/scan/ai-prompt.constants';
 import { RULESET_VERSION } from './rules/rules.constants';
 import { ScanJobPayload } from './scan-payload.dto';
 
@@ -32,6 +40,62 @@ export interface EnqueueScanInput {
   baseSha: string | null;
   provider: Provider;
   trigger: ScanTrigger;
+  // Force a FULL scan (manual rescan `{full: true}`, regenerate
+  // `{force: true}`) instead of an incremental one.
+  full?: boolean;
+}
+
+export interface ScanModeDecision {
+  diffMode: DiffMode;
+  fullReason: FullReason | null;
+  baseScanId: string | null;
+  prevHeadSha: string | null;
+}
+
+// FULL or INCREMENTAL for a new scan (v1.5.1 langkah 3), from the DB only —
+// enqueue runs inside the webhook request, which must not call the provider.
+// A force-push cannot be seen here; the worker checks ancestry with the
+// compare API and turns the scan FULL (FORCE_PUSH) when needed.
+export function decideScanMode(input: {
+  base: {
+    id: string;
+    headSha: string;
+    rulesetVersion: string;
+    aiPromptVersion: string | null;
+  } | null;
+  full: boolean;
+  effectivePolicy: ReviewPolicy | null;
+}): ScanModeDecision {
+  const full = (fullReason: FullReason): ScanModeDecision => ({
+    diffMode: DiffMode.FULL,
+    fullReason,
+    baseScanId: input.base?.id ?? null,
+    prevHeadSha: null,
+  });
+  if (!input.base) {
+    return full(FullReason.FIRST_SCAN);
+  }
+  if (input.full) {
+    return full(FullReason.MANUAL);
+  }
+  if (input.base.rulesetVersion !== RULESET_VERSION) {
+    return full(FullReason.RULESET_CHANGED);
+  }
+  // Only when the AI runs on this PR: a Manual-only branch never sent a
+  // prompt, so a prompt change is irrelevant to it.
+  if (
+    input.base.aiPromptVersion !== null &&
+    input.base.aiPromptVersion !== AI_PROMPT_VERSION &&
+    input.effectivePolicy !== ReviewPolicy.MANUAL_ONLY
+  ) {
+    return full(FullReason.PROMPT_CHANGED);
+  }
+  return {
+    diffMode: DiffMode.INCREMENTAL,
+    fullReason: null,
+    baseScanId: input.base.id,
+    prevHeadSha: input.base.headSha,
+  };
 }
 
 export interface EnqueueScanResult {
@@ -112,6 +176,30 @@ export class ScanQueueService {
 
     await this.cancelPending(input.pullId);
 
+    // The last finished scan of this PR is what an incremental scan diffs
+    // from and carries findings forward from.
+    const [base, pull] = await Promise.all([
+      this.prisma.scan.findFirst({
+        where: { pullId: input.pullId, status: ScanStatus.DONE },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          headSha: true,
+          rulesetVersion: true,
+          aiPromptVersion: true,
+        },
+      }),
+      this.prisma.pullRequest.findUnique({
+        where: { id: input.pullId },
+        select: { effectivePolicy: true },
+      }),
+    ]);
+    const mode = decideScanMode({
+      base,
+      full: input.full ?? false,
+      effectivePolicy: pull?.effectivePolicy ?? null,
+    });
+
     let scanId: string;
     try {
       const scan = await this.prisma.scan.create({
@@ -125,6 +213,7 @@ export class ScanQueueService {
           trigger,
           attempt: (latestForSha?.attempt ?? 0) + 1,
           rulesetVersion: RULESET_VERSION,
+          ...mode,
         },
         select: { id: true },
       });
@@ -195,6 +284,8 @@ export class ScanQueueService {
       pullId: input.pullId,
       scanId,
       trigger,
+      diffMode: mode.diffMode,
+      fullReason: mode.fullReason,
     });
     return { scanId, status: ScanStatus.QUEUED, deduplicated: false };
   }

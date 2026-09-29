@@ -29,4 +29,30 @@ export class RateLimiterService {
       return true;
     }
   }
+
+  // Up to `limit` calls per fixed window of `windowSeconds` — e.g. 5 AI test
+  // connections per organization per hour. The window starts at the first
+  // call (EXPIRE NX), so it is fixed, not sliding. Fails open for the same
+  // reason as tryAcquire.
+  async tryConsume(
+    key: string,
+    limit: number,
+    windowSeconds: number,
+  ): Promise<boolean> {
+    try {
+      const results = await this.redis
+        .multi()
+        .incr(key)
+        .expire(key, windowSeconds, 'NX')
+        .exec();
+      const count = Number(results?.[0]?.[1] ?? 0);
+      return count <= limit;
+    } catch (error) {
+      this.logger.warn('ratelimit.redis_unavailable', {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return true;
+    }
+  }
 }
