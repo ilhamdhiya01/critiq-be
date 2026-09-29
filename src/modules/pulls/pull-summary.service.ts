@@ -13,6 +13,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { AiScanStatus, ScanStatus } from '../../generated/prisma/enums';
 import { AiScanService } from '../ai/scan/ai-scan.service';
+import { ScansService } from '../scans/scans.service';
 import { toApiAiStatus } from '../scans/dto/ai-scan-fields';
 import { PullSummaryDto } from './dto/pull-summary.dto';
 
@@ -28,6 +29,7 @@ export class PullSummaryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly aiScanService: AiScanService,
+    private readonly scansService: ScansService,
     private readonly rateLimiter: RateLimiterService,
     private readonly configService: ConfigService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
@@ -90,6 +92,26 @@ export class PullSummaryService {
     actorUserId: string,
     force: boolean,
   ): Promise<{ scanId: string; aiStatus: string }> {
+    // force (v1.5.1 langkah 3): a new FULL scan — static and AI — rather than
+    // re-running the AI on the existing one. Rescan's own checks apply
+    // (scan in progress, no head sha, rate limit).
+    if (force) {
+      this.logger.info('audit.ai.regenerate_requested', {
+        orgId: organizationId,
+        pullId,
+        by: actorUserId,
+        force,
+      });
+      const requested = await this.scansService.requestRescan(
+        organizationId,
+        repositoryId,
+        pullId,
+        actorUserId,
+        true,
+      );
+      return { scanId: requested.scanId, aiStatus: 'queued' };
+    }
+
     const pull = await this.findPullOrThrow(
       organizationId,
       repositoryId,
@@ -128,7 +150,7 @@ export class PullSummaryService {
       force,
     });
 
-    const status = await this.aiScanService.maybeEnqueue(scan.id, { force });
+    const status = await this.aiScanService.maybeEnqueue(scan.id);
     if (status === AiScanStatus.QUEUED || status === AiScanStatus.CACHED) {
       return { scanId: scan.id, aiStatus: toApiAiStatus(status)! };
     }

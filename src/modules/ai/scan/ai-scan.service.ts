@@ -12,7 +12,9 @@ import {
   AiProviderId,
   AiScanStatus,
   AiUsageKind,
+  DiffMode,
   FindingSource,
+  FindingStatus,
   ReviewPolicy,
   ScanStatus,
 } from '../../../generated/prisma/enums';
@@ -27,7 +29,12 @@ import { AiProviderName } from '../ai-provider.interface';
 import { dedupeAiFindings } from './ai-deduper';
 import { CHARS_PER_TOKEN } from './ai-prompt-builder';
 import { AI_PROMPT_VERSION } from './ai-prompt.constants';
-import { persistAiResult } from './ai-scan.persistence';
+import {
+  buildAiRows,
+  loadAiLifecycleContext,
+  persistAiResult,
+  ScanForAi,
+} from './ai-scan.persistence';
 
 const CACHE_TTL_SECONDS = 30 * 86_400;
 const BUDGET_NOTIFY_TTL_SECONDS = 26 * 3600;
@@ -45,6 +52,10 @@ export interface AiCacheKeyParts {
   promptVersion: string;
   provider: AiProviderName;
   model: string;
+  // v1.5.1 langkah 3: an incremental review of a push is a different
+  // result from a full review of the same head.
+  diffMode: string;
+  prevHeadSha: string | null;
 }
 
 export function aiCacheKey(parts: AiCacheKeyParts): string {
@@ -57,6 +68,8 @@ export function aiCacheKey(parts: AiCacheKeyParts): string {
         parts.promptVersion,
         parts.provider,
         parts.model,
+        parts.diffMode,
+        parts.prevHeadSha ?? '',
       ].join('|'),
     )
     .digest('hex');
@@ -143,13 +156,26 @@ export class AiScanService {
       return settle(AiScanStatus.CONSENT_REQUIRED);
     }
 
-    // 4. Size — the scannable patch bytes the static scan measured.
+    // 4. Nothing changed since the base scan (a rescan of the same head):
+    // every finding was carried forward, so the previous summary still
+    // holds — no provider call.
+    if (
+      scan.diffMode === DiffMode.INCREMENTAL &&
+      scan.baseScanId &&
+      (scan.diffBytes ?? 0) === 0 &&
+      scan.filesChanged === 0
+    ) {
+      return this.copySummaryFromBase(scan);
+    }
+
+    // 5. Size — the scannable patch bytes the static scan measured, which
+    // for an incremental scan is only the latest push.
     const diffBytes = scan.diffBytes ?? 0;
     if (diffBytes > this.configService.getOrThrow<number>('ai.maxDiffBytes')) {
       return settle(AiScanStatus.SKIPPED_TOO_LARGE);
     }
 
-    // 5. Daily budget (TEST usage never counts).
+    // 6. Daily budget (TEST usage never counts).
     const estimate = Math.ceil(diffBytes / CHARS_PER_TOKEN);
     const used = await this.usedTokensToday(scan.organizationId);
     if (organization.aiDailyTokenBudget - used < estimate) {
@@ -157,7 +183,7 @@ export class AiScanService {
       return settle(AiScanStatus.BUDGET_EXCEEDED);
     }
 
-    // 6. Cache.
+    // 7. Cache.
     const cacheKey = aiCacheKey({
       repositoryId: scan.repositoryId,
       headSha: scan.headSha,
@@ -165,6 +191,8 @@ export class AiScanService {
       promptVersion: AI_PROMPT_VERSION,
       provider,
       model,
+      diffMode: scan.diffMode,
+      prevHeadSha: scan.prevHeadSha,
     });
     if (!options.force) {
       const cached = await this.copyFromCache(scan, cacheKey);
@@ -179,7 +207,7 @@ export class AiScanService {
       }
     }
 
-    // 7. Enqueue — at most one run per scan: the transition to QUEUED is
+    // 8. Enqueue — at most one run per scan: the transition to QUEUED is
     // conditional on no run being in flight.
     const claimed = await this.prisma.scan.updateMany({
       where: { id: scanId, ...NOT_IN_FLIGHT },
@@ -302,16 +330,61 @@ export class AiScanService {
     }
   }
 
+  // A rescan with no new commits: copy the base scan's summary. The
+  // findings are already here (carried forward by the static step).
+  private async copySummaryFromBase(scan: {
+    id: string;
+    organizationId: string;
+    pullId: string;
+    baseScanId: string | null;
+  }): Promise<AiScanStatus> {
+    const base = await this.prisma.scan.findUnique({
+      where: { id: scan.baseScanId! },
+      select: {
+        aiProvider: true,
+        aiModel: true,
+        aiPromptVersion: true,
+        aiSummary: true,
+      },
+    });
+    await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.scan.updateMany({
+        where: { id: scan.id, ...NOT_IN_FLIGHT },
+        data: {
+          aiStatus: AiScanStatus.CACHED,
+          aiCached: true,
+          aiFinishedAt: new Date(),
+          aiProvider: base?.aiProvider ?? null,
+          aiModel: base?.aiModel ?? null,
+          aiPromptVersion: base?.aiPromptVersion ?? null,
+          aiTokensIn: null,
+          aiTokensOut: null,
+        },
+      });
+      if (claimed.count === 0 || !base?.aiSummary) {
+        return;
+      }
+      await tx.aiSummary.deleteMany({ where: { scanId: scan.id } });
+      await tx.aiSummary.create({
+        data: {
+          organizationId: scan.organizationId,
+          scanId: scan.id,
+          pullId: scan.pullId,
+          summaryMd: base.aiSummary.summaryMd,
+          riskLevel: base.aiSummary.riskLevel,
+          filesOmitted: base.aiSummary.filesOmitted,
+        },
+      });
+    });
+    return AiScanStatus.CACHED;
+  }
+
   // A previous AI result for the same diff, provider, model, prompt and
-  // ruleset — copied onto this scan and deduped again against this scan's
-  // own static findings. No provider call.
+  // ruleset — copied onto this scan, deduped again against this scan's own
+  // static findings, and given lifecycle statuses like a fresh run. No
+  // provider call.
   private async copyFromCache(
-    scan: {
-      id: string;
-      organizationId: string;
-      pullId: string;
-      findingsCount: number;
-    },
+    scan: ScanForAi,
     cacheKey: string,
   ): Promise<boolean> {
     let sourceScanId: string | null;
@@ -328,7 +401,11 @@ export class AiScanService {
       include: {
         aiSummary: true,
         findings: {
-          where: { source: FindingSource.AI, suppressedReason: null },
+          where: {
+            source: FindingSource.AI,
+            suppressedReason: null,
+            status: { not: FindingStatus.RESOLVED },
+          },
         },
       },
     });
@@ -346,6 +423,7 @@ export class AiScanService {
         scanId: scan.id,
         source: FindingSource.STATIC,
         suppressedReason: null,
+        status: { not: FindingStatus.RESOLVED },
       },
       select: {
         id: true,
@@ -366,8 +444,16 @@ export class AiScanService {
       confidence: Number(finding.confidence ?? 0),
     }));
     const { kept, duplicates } = dedupeAiFindings(drafts, staticActive);
+    const context = await loadAiLifecycleContext(this.prisma, scan);
+    const { rows } = buildAiRows(
+      scan,
+      kept,
+      duplicates,
+      context,
+      this.configService.get<boolean>('ai.keepDeduped') ?? false,
+    );
 
-    return this.prisma.$transaction((tx) =>
+    const counts = await this.prisma.$transaction((tx) =>
       persistAiResult(
         tx,
         scan,
@@ -376,12 +462,10 @@ export class AiScanService {
           summaryMd: source.aiSummary!.summaryMd,
           riskLevel: source.aiSummary!.riskLevel,
           filesOmitted: source.aiSummary!.filesOmitted,
-          kept,
-          duplicates,
-          keepDeduped:
-            this.configService.get<boolean>('ai.keepDeduped') ?? false,
+          rows,
           total: drafts.length,
           rejected: 0,
+          deduped: duplicates.length,
           provider: source.aiProvider ?? '',
           model: source.aiModel ?? '',
           promptVersion: source.aiPromptVersion ?? AI_PROMPT_VERSION,
@@ -393,5 +477,6 @@ export class AiScanService {
         NOT_IN_FLIGHT,
       ),
     );
+    return counts !== null;
   }
 }

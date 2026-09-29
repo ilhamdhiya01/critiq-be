@@ -250,6 +250,49 @@ export class GithubAppService {
     }
   }
 
+  // Files changed between two commits — the incremental scan's diff (v1.5.1
+  // langkah 3). `ancestor` is false when `base` is not an ancestor of
+  // `head` (force-push/rebase): GitHub reports `diverged` or `behind`, and
+  // the caller falls back to a full scan. GitHub lists at most 300 files.
+  async compareCommits(
+    installationId: string,
+    owner: string,
+    repo: string,
+    base: string,
+    head: string,
+  ): Promise<{
+    files: GithubPullRequestFile[];
+    ancestor: boolean;
+    truncated: boolean;
+  }> {
+    const token = await this.getInstallationToken(installationId);
+    try {
+      const response = await request(
+        'GET /repos/{owner}/{repo}/compare/{basehead}',
+        {
+          owner,
+          repo,
+          basehead: `${base}...${head}`,
+          headers: { authorization: `bearer ${token}` },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+          per_page: PR_FILES_PAGE_SIZE,
+        },
+      );
+      const data = response.data as {
+        status: string;
+        files?: GithubPullRequestFile[];
+      };
+      const files = data.files ?? [];
+      return {
+        files,
+        ancestor: data.status === 'ahead' || data.status === 'identical',
+        truncated: files.length >= 300,
+      };
+    } catch (error) {
+      throw this.mapGithubRequestError(error);
+    }
+  }
+
   // One file at `ref`, as raw text — head-file context for the AI review
   // prompt (v1.5.1 langkah 2). Best effort: null when the file is missing,
   // binary, too large for the contents API, or the call fails; the prompt

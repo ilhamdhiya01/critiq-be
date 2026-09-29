@@ -1,5 +1,6 @@
 import { ScanStatus, ScanTrigger } from '../../../generated/prisma/enums';
 import { ApiAiScanFields } from '../../scans/dto/ai-scan-fields';
+import { ApiLifecycleFields } from '../../scans/dto/lifecycle-fields';
 import { FindingDto } from '../../scans/dto/finding.dto';
 
 // The scan a PR's review page is built from, plus its findings.
@@ -31,6 +32,14 @@ export class ScanSummaryDto {
   aiCached!: boolean;
   majorCount!: number;
   minorCount!: number;
+  diffMode!: ApiLifecycleFields['diffMode'];
+  fullReason!: ApiLifecycleFields['fullReason'];
+  baseScanId!: string | null;
+  prevHeadSha!: string | null;
+  newCount!: number;
+  persistedCount!: number;
+  reopenedCount!: number;
+  resolvedCount!: number;
   filesChanged!: number | null;
   diffBytes!: number | null;
   rulesetVersion!: string;
@@ -42,25 +51,26 @@ export class ScanSummaryDto {
   findings!: FindingDto[];
 
   constructor(
-    partial: ApiAiScanFields & {
-      id: string;
-      status: ScanStatus;
-      trigger: ScanTrigger;
-      attempt: number;
-      headSha: string;
-      findingsCount: number;
-      criticalCount: number;
-      findingsTruncated: boolean;
-      suppressedCount: number;
-      suppressedTruncated: boolean;
-      filesChanged: number | null;
-      diffBytes: number | null;
-      rulesetVersion: string;
-      errorMessage: string | null;
-      startedAt: Date | null;
-      finishedAt: Date | null;
-      findings: FindingDto[];
-    },
+    partial: ApiAiScanFields &
+      ApiLifecycleFields & {
+        id: string;
+        status: ScanStatus;
+        trigger: ScanTrigger;
+        attempt: number;
+        headSha: string;
+        findingsCount: number;
+        criticalCount: number;
+        findingsTruncated: boolean;
+        suppressedCount: number;
+        suppressedTruncated: boolean;
+        filesChanged: number | null;
+        diffBytes: number | null;
+        rulesetVersion: string;
+        errorMessage: string | null;
+        startedAt: Date | null;
+        finishedAt: Date | null;
+        findings: FindingDto[];
+      },
   ) {
     Object.assign(this, partial);
   }

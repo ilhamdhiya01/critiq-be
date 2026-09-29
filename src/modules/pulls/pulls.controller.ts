@@ -14,6 +14,7 @@ import { PullsService } from './pulls.service';
 import { ScansService } from '../scans/scans.service';
 import { PullSummaryService } from './pull-summary.service';
 import { RegenerateSummaryDto } from './dto/pull-summary.dto';
+import { RequestScanDto } from '../scans/dto/request-scan.dto';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { Role } from '../../generated/prisma/enums';
@@ -82,8 +83,15 @@ export class PullsController {
     @Param('orgId') orgId: string,
     @Param('repoId') repoId: string,
     @Param('id') id: string,
+    @Body() dto: RequestScanDto,
   ) {
-    return this.scansService.requestRescan(orgId, repoId, id, req.user.sub);
+    return this.scansService.requestRescan(
+      orgId,
+      repoId,
+      id,
+      req.user.sub,
+      dto.full ?? false,
+    );
   }
 
   // Every role may read the AI summary. Polled by the FE every few seconds

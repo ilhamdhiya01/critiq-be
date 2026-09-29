@@ -406,6 +406,8 @@ model PullRequest {
 
   // Repeated webhook events (opened, then synchronize, then closed) for
   // the same PR/MR must upsert the same row, never duplicate it.
+  findings Finding[]
+
   @@unique([repositoryId, externalId])
   @@index([organizationId])
   @@map("pull_requests")
@@ -476,6 +478,18 @@ model Scan {
   // an invalid response is exactly the case with no summary row.
   aiRawRef           String?
 
+  // Lifecycle (v1.5.1 langkah 3). INCREMENTAL = only the diff
+  // prevHeadSha → headSha was scanned; findings of baseScanId were carried
+  // forward. fullReason says why a scan was FULL.
+  diffMode       DiffMode    @default(FULL)
+  fullReason     FullReason?
+  baseScanId     String?
+  prevHeadSha    String?
+  newCount       Int         @default(0)
+  persistedCount Int         @default(0)
+  reopenedCount  Int         @default(0)
+  resolvedCount  Int         @default(0)
+
   startedAt  DateTime?
   finishedAt DateTime?
   createdAt  DateTime  @default(now())
@@ -491,6 +505,10 @@ model Scan {
   // PullRequest.
   latestForPullRequests PullRequest[] @relation("PullRequestLatestScan")
   aiSummary             AiSummary?
+  baseScan              Scan?         @relation("ScanBase", fields: [baseScanId], references: [id], onDelete: SetNull)
+  derivedScans          Scan[]        @relation("ScanBase")
+  firstSeenFindings     Finding[]     @relation("FindingFirstSeen")
+  resolvedFindings      Finding[]     @relation("FindingResolvedIn")
 
   @@unique([repositoryId, pullId, headSha, attempt])
   @@index([organizationId, pullId, createdAt(sort: Desc)])
@@ -532,15 +550,32 @@ model Finding {
   // (AI_KEEP_DEDUPED=true, suppressedReason DEDUPE_STATIC).
   dedupeOfId String?
 
+  // Lifecycle (v1.5.1 langkah 3). pullId is denormalized from the scan so
+  // lifecycle queries across a PR's scans stay cheap. A RESOLVED row lives
+  // in the scan that closed it; originFindingId points at the finding it
+  // continues (PERSISTED/REOPENED) or closes (RESOLVED).
+  pullId           String
+  status           FindingStatus @default(NEW)
+  firstSeenScanId  String
+  resolvedInScanId String?
+  originFindingId  String?
+
   createdAt DateTime @default(now())
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
-  dedupeOf     Finding?     @relation("FindingDedupeOf", fields: [dedupeOfId], references: [id], onDelete: SetNull)
-  duplicates   Finding[]    @relation("FindingDedupeOf")
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  scan          Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  dedupeOf      Finding?     @relation("FindingDedupeOf", fields: [dedupeOfId], references: [id], onDelete: SetNull)
+  duplicates    Finding[]    @relation("FindingDedupeOf")
+  pullRequest   PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  firstSeenIn   Scan         @relation("FindingFirstSeen", fields: [firstSeenScanId], references: [id], onDelete: Cascade)
+  resolvedIn    Scan?        @relation("FindingResolvedIn", fields: [resolvedInScanId], references: [id], onDelete: SetNull)
+  origin        Finding?     @relation("FindingOrigin", fields: [originFindingId], references: [id], onDelete: SetNull)
+  continuations Finding[]    @relation("FindingOrigin")
 
   @@index([organizationId, scanId])
   @@index([scanId, filePath, lineStart])
+  @@index([organizationId, pullId, fingerprint, status])
+  @@index([organizationId, pullId, status])
   @@map("findings")
 }
 
@@ -644,4 +679,24 @@ model AiSummary {
 
   @@index([organizationId, pullId])
   @@map("ai_summaries")
+}
+
+enum DiffMode {
+  FULL
+  INCREMENTAL
+}
+
+enum FullReason {
+  FIRST_SCAN
+  FORCE_PUSH
+  RULESET_CHANGED
+  PROMPT_CHANGED
+  MANUAL
+}
+
+enum FindingStatus {
+  NEW
+  PERSISTED
+  REOPENED
+  RESOLVED
 }

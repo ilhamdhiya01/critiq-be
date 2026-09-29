@@ -8,8 +8,12 @@ import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { REDIS_CLIENT } from '../common/redis/redis.constants';
 import {
+  AiScanStatus,
+  DiffMode,
   FindingSeverity,
   FindingSource,
+  FindingStatus,
+  FullReason,
   ScanErrorCode,
   ScanStatus,
 } from '../generated/prisma/enums';
@@ -18,6 +22,16 @@ import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { analyzeDiff } from './analyze-diff';
 import { categoryForRule } from './finding-category';
+import {
+  loadBaseFindings,
+  loadRecentResolved,
+  logWindowMisses,
+} from './lifecycle/lifecycle-context';
+import { CandidateFinding, planFindings } from './lifecycle/plan-findings';
+import {
+  notifyIfAllCriticalResolved,
+  recomputeScanCounts,
+} from './lifecycle/scan-counts';
 import {
   classifyProviderError,
   sanitizeErrorMessage,
@@ -85,10 +99,47 @@ export class ScanProcessor
       return;
     }
 
-    // 2. Fetch diff (reuses PullsService.getDiff: credential resolution,
-    // integration-state check, both providers).
+    // 2. Fetch the diff this scan reads: the whole PR (FULL), or only what
+    // changed since the base scan's head (INCREMENTAL, v1.5.1 langkah 3).
+    // A base that is no longer an ancestor of head (force-push, rebase)
+    // turns the scan FULL here — enqueue cannot call the provider.
     await job.updateProgress({ step: 'fetch_diff', pct: 10 });
-    const diff = await this.fetchDiff(job.data, log);
+    const scanRow = await this.prisma.scan.findUniqueOrThrow({
+      where: { id: scanId },
+      select: {
+        headSha: true,
+        diffMode: true,
+        baseScanId: true,
+        prevHeadSha: true,
+      },
+    });
+    let diffMode = scanRow.diffMode;
+    let diff: { files: PullRequestDiffDto['files']; truncated: boolean };
+    if (diffMode === DiffMode.INCREMENTAL && scanRow.prevHeadSha) {
+      const compared = await this.fetchCompare(
+        job.data,
+        scanRow.prevHeadSha,
+        scanRow.headSha,
+        log,
+      );
+      if (compared.ancestor) {
+        diff = compared;
+      } else {
+        diffMode = DiffMode.FULL;
+        await this.prisma.scan.update({
+          where: { id: scanId },
+          data: {
+            diffMode: DiffMode.FULL,
+            fullReason: FullReason.FORCE_PUSH,
+            prevHeadSha: null,
+          },
+        });
+        this.logger.info('scan.force_push_detected', log);
+        diff = await this.fetchDiff(job.data, log);
+      }
+    } else {
+      diff = await this.fetchDiff(job.data, log);
+    }
     this.assertWithinDeadline(deadline);
 
     // 3–5. Filter, parse, run rules, classify suppression, dedupe, cap —
@@ -131,16 +182,63 @@ export class ScanProcessor
       );
     }
 
-    // 6. Persist atomically. The conditional status update is the guard
+    // 6. Lifecycle (v1.5.1 langkah 3): continue or close the base scan's
+    // findings, and give this scan's own findings NEW or REOPENED.
+    await job.updateProgress({ step: 'persist', pct: 90 });
+    const candidates: CandidateFinding[] = [
+      ...analysis.active,
+      ...analysis.suppressed,
+    ].map((finding) => ({
+      ...finding,
+      source: FindingSource.STATIC,
+      category: categoryForRule(finding.ruleId),
+      // Every rule in this release is Critical (Rule.severity is the
+      // literal 'critical'); the enum carries the full range for later.
+      severity: FindingSeverity.CRITICAL,
+      confidence: null,
+    }));
+    const base = scanRow.baseScanId
+      ? await loadBaseFindings(this.prisma, scanRow.baseScanId)
+      : [];
+    const recent = await loadRecentResolved(this.prisma, pullId, scanId);
+    const plan = planFindings({
+      scanId,
+      candidates,
+      // Incremental: every base finding, static and AI, goes through the
+      // diff. Full with a base: static ones are matched by fingerprint;
+      // the AI step matches its own.
+      carry:
+        diffMode === DiffMode.INCREMENTAL
+          ? { base, files: diff.files }
+          : undefined,
+      match:
+        diffMode === DiffMode.FULL && base.length > 0
+          ? {
+              base: base.filter((f) => f.source === FindingSource.STATIC),
+            }
+          : undefined,
+      recentResolved: recent.rows,
+    });
+    // Suppressed static findings carried over from the base scan (kept
+    // visible, never counted) join this scan's own suppressed total.
+    const carriedSuppressed =
+      diffMode === DiffMode.INCREMENTAL
+        ? plan.rows.filter(
+            (row) =>
+              row.status === FindingStatus.PERSISTED &&
+              row.source === FindingSource.STATIC &&
+              row.suppressedReason !== null,
+          ).length
+        : 0;
+
+    // 7. Persist atomically. The conditional status update is the guard
     // against a newer push having superseded this scan mid-run: if the row
     // is no longer RUNNING, nothing is written (no findings, no
     // latestScanId move). Being one transaction also makes a retry after a
     // crash idempotent — either everything committed (and the retry's
     // claim step sees DONE) or nothing did.
-    await job.updateProgress({ step: 'persist', pct: 90 });
     const finishedAt = new Date();
-    const toWrite = [...analysis.active, ...analysis.suppressed];
-    const persisted = await this.prisma.$transaction(async (tx) => {
+    const counts = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.scan.updateMany({
         where: { id: scanId, status: ScanStatus.RUNNING },
         data: {
@@ -148,12 +246,8 @@ export class ScanProcessor
           finishedAt,
           diffBytes: analysis.diffBytes,
           filesChanged: analysis.filesChanged,
-          // Active findings only, and the real totals before the storage
-          // cap — suppressed findings never count toward either.
-          findingsCount: analysis.activeCount,
-          criticalCount: analysis.activeCount,
           findingsTruncated: analysis.findingsTruncated,
-          suppressedCount: analysis.suppressedCount,
+          suppressedCount: analysis.suppressedCount + carriedSuppressed,
           suppressedTruncated: analysis.suppressedTruncated,
           // rulesetVersion is deliberately NOT written here. It is set at
           // enqueue (ScanQueueService) and describes the ruleset the scan
@@ -168,46 +262,59 @@ export class ScanProcessor
         },
       });
       if (updated.count === 0) {
-        return false;
+        return null;
       }
-      if (toWrite.length > 0) {
+      if (plan.rows.length > 0) {
         await tx.finding.createMany({
-          data: toWrite.map((finding) => ({
-            ...finding,
+          data: plan.rows.map((row) => ({
+            ...row,
             organizationId,
             scanId,
-            source: FindingSource.STATIC,
-            category: categoryForRule(finding.ruleId),
-            // Every rule in this release is Critical (Rule.severity is the
-            // literal 'critical'); the enum carries the full range for later.
-            severity: FindingSeverity.CRITICAL,
+            pullId,
           })),
         });
       }
+      const recomputed = await recomputeScanCounts(tx, scanId);
       await tx.pullRequest.update({
         where: { id: pullId },
         data: { latestScanId: scanId },
       });
-      return true;
+      return recomputed;
     });
 
-    if (!persisted) {
+    if (!counts) {
       this.logger.info('scan.superseded_during_run', log);
       return;
     }
+    await logWindowMisses(
+      this.prisma,
+      this.logger,
+      {
+        pullId,
+        currentScanId: scanId,
+        windowScanIds: recent.windowScanIds,
+        fingerprints: plan.newFingerprints,
+      },
+      log,
+    );
 
-    // 7. Audit / notification stand-ins — structured logs until the
-    // AuditLog model and notifications module exist.
+    // Audit / notification stand-ins — structured logs until the AuditLog
+    // model and notifications module exist.
     const durationMs = Date.now() - jobStartedAt;
     this.logger.info('audit.scan_completed', {
       ...log,
-      criticalCount: analysis.activeCount,
-      suppressedCount: analysis.suppressedCount,
+      diffMode,
+      criticalCount: counts.criticalCount,
+      newCount: counts.newCount,
+      persistedCount: counts.persistedCount,
+      reopenedCount: counts.reopenedCount,
+      resolvedCount: counts.resolvedCount,
       durationMs,
     });
     this.logger.info('scan.metrics', {
       ...log,
       durationMs,
+      diffMode,
       diffBytes: analysis.diffBytes,
       filesChanged: analysis.filesChanged,
       filesSkipped: analysis.filesSkipped,
@@ -215,12 +322,20 @@ export class ScanProcessor
       suppressed: analysis.suppressedCount,
       rulesMs: analysis.rulesMs,
     });
-    // Active findings only: a scan whose every finding is suppressed is not
-    // news. One per scan, never per finding.
-    if (analysis.activeCount > 0) {
+    // Only criticals this push brought (NEW) or brought back (REOPENED):
+    // PERSISTED ones were notified when they first appeared.
+    const freshCritical = plan.rows.filter(
+      (row) =>
+        row.source === FindingSource.STATIC &&
+        row.suppressedReason === null &&
+        row.severity === FindingSeverity.CRITICAL &&
+        (row.status === FindingStatus.NEW ||
+          row.status === FindingStatus.REOPENED),
+    ).length;
+    if (freshCritical > 0) {
       this.logger.warn('notification.pull_critical_found', {
         ...log,
-        criticalCount: analysis.activeCount,
+        criticalCount: freshCritical,
       });
     }
 
@@ -228,13 +343,34 @@ export class ScanProcessor
     // than via a `scan.done` event (no EventEmitter yet; the quality-gate
     // check of v1.5.3 is the next consumer). Its outcome lands on the scan's
     // ai* columns; a failure here must never fail the static scan.
+    let aiStatus: AiScanStatus | null = null;
     try {
-      await this.aiScanService.maybeEnqueue(scanId);
+      aiStatus = await this.aiScanService.maybeEnqueue(scanId);
     } catch (error) {
       this.logger.error('ai.enqueue_failed', {
         ...log,
         errorName: error instanceof Error ? error.name : 'Unknown',
       });
+    }
+    // The last step of the scan decides "all criticals resolved": here when
+    // no AI review follows, otherwise at the end of the AI step.
+    if (aiStatus !== AiScanStatus.QUEUED) {
+      // Re-read: a cached AI result may have just changed the counts.
+      const settled = await this.prisma.scan.findUnique({
+        where: { id: scanId },
+        select: { criticalCount: true },
+      });
+      await notifyIfAllCriticalResolved(
+        this.prisma,
+        this.redis,
+        this.logger,
+        {
+          id: scanId,
+          headSha: scanRow.headSha,
+          criticalCount: settled?.criticalCount ?? counts.criticalCount,
+        },
+        log,
+      );
     }
     await job.updateProgress({ step: 'done', pct: 100 });
   }
@@ -311,6 +447,32 @@ export class ScanProcessor
         errorName:
           finalizeError instanceof Error ? finalizeError.name : 'Unknown',
       });
+    }
+  }
+
+  private async fetchCompare(
+    payload: ScanJobPayload,
+    fromSha: string,
+    toSha: string,
+    log: LogContext,
+  ) {
+    try {
+      return await this.pullsService.getCompareDiff(
+        payload.organizationId,
+        payload.repositoryId,
+        payload.pullId,
+        fromSha,
+        toSha,
+      );
+    } catch (error) {
+      if (classifyProviderError(error) === 'credential') {
+        this.logger.warn('notification.integration_token_invalid', log);
+        throw new ScanFailure(
+          ScanErrorCode.TOKEN_EXPIRED,
+          'The code host rejected the organization credential.',
+        );
+      }
+      throw error;
     }
   }
 

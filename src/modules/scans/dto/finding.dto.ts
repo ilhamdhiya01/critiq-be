@@ -2,9 +2,11 @@ import {
   FindingCategory,
   FindingSeverity,
   FindingSource,
+  FindingStatus,
   SuppressionReason,
 } from '../../../generated/prisma/enums';
 import { ApiFindingCategory, toApiCategory } from './ai-scan-fields';
+import { ApiFindingStatus, toApiFindingStatus } from './lifecycle-fields';
 
 // Lowercase on the wire, matching the PRD's API examples; the Prisma enum
 // stays uppercase like every other enum in the schema.
@@ -49,6 +51,11 @@ export class FindingDto {
   category!: ApiFindingCategory | null;
   // AI findings only.
   confidence!: number | null;
+  // Lifecycle across the PR's pushes (v1.5.1 langkah 3).
+  status!: ApiFindingStatus;
+  firstSeenScanId!: string | null;
+  originFindingId!: string | null;
+  resolvedInScanId!: string | null;
 
   constructor(partial: {
     id: string;
@@ -65,10 +72,18 @@ export class FindingDto {
     category?: FindingCategory | null;
     // Prisma Decimal, or a plain number.
     confidence?: { toNumber(): number } | number | null;
+    status?: FindingStatus;
+    firstSeenScanId?: string | null;
+    originFindingId?: string | null;
+    resolvedInScanId?: string | null;
   }) {
-    const { confidence, category, ...rest } = partial;
+    const { confidence, category, status, ...rest } = partial;
     Object.assign(this, {
+      firstSeenScanId: null,
+      originFindingId: null,
+      resolvedInScanId: null,
       ...rest,
+      status: toApiFindingStatus(status ?? FindingStatus.NEW),
       suppressedReason: toApiSuppressionReason(partial.suppressedReason),
       category: toApiCategory(category ?? null),
       confidence:
