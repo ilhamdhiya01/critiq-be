@@ -1,6 +1,8 @@
 import {
+  Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -10,6 +12,9 @@ import {
 import type { Request } from 'express';
 import { PullsService } from './pulls.service';
 import { ScansService } from '../scans/scans.service';
+import { PullSummaryService } from './pull-summary.service';
+import { RegenerateSummaryDto } from './dto/pull-summary.dto';
+import { RequestScanDto } from '../scans/dto/request-scan.dto';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { Role } from '../../generated/prisma/enums';
@@ -24,6 +29,7 @@ export class PullsController {
   constructor(
     private readonly pullsService: PullsService,
     private readonly scansService: ScansService,
+    private readonly pullSummaryService: PullSummaryService,
   ) {}
 
   @Get()
@@ -77,7 +83,49 @@ export class PullsController {
     @Param('orgId') orgId: string,
     @Param('repoId') repoId: string,
     @Param('id') id: string,
+    @Body() dto: RequestScanDto,
   ) {
-    return this.scansService.requestRescan(orgId, repoId, id, req.user.sub);
+    return this.scansService.requestRescan(
+      orgId,
+      repoId,
+      id,
+      req.user.sub,
+      dto.full ?? false,
+    );
+  }
+
+  // Every role may read the AI summary. Polled by the FE every few seconds
+  // while aiStatus is queued/running, so never cached.
+  @Get(':id/summary')
+  @OrgAuth([])
+  @Header('Cache-Control', 'no-store')
+  @ResponseMessage('AI summary retrieved successfully')
+  getSummary(
+    @Param('orgId') orgId: string,
+    @Param('repoId') repoId: string,
+    @Param('id') id: string,
+  ) {
+    return this.pullSummaryService.getSummary(orgId, repoId, id);
+  }
+
+  // 202: queued (or served from cache) — poll GET …/summary.
+  @Post(':id/summary/regenerate')
+  @OrgAuth([Role.ADMIN, Role.REVIEWER])
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ResponseMessage('AI summary regeneration requested')
+  regenerateSummary(
+    @Req() req: RequestWithSession,
+    @Param('orgId') orgId: string,
+    @Param('repoId') repoId: string,
+    @Param('id') id: string,
+    @Body() dto: RegenerateSummaryDto,
+  ) {
+    return this.pullSummaryService.regenerate(
+      orgId,
+      repoId,
+      id,
+      req.user.sub,
+      dto.force ?? false,
+    );
   }
 }

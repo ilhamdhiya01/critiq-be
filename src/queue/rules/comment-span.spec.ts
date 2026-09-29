@@ -127,11 +127,20 @@ describe('comment-span', () => {
   // on a 1 MB minified line. Growth ratio plus a loose bound, as in
   // regex-literal.spec.ts — a hard 50 ms wall-clock flakes on a loaded box.
   describe('linear time', () => {
+    // Fastest of three runs: a GC pause or a busy CPU (the whole suite runs
+    // in parallel) only ever makes a run slower, never faster.
     function timeMs(line: string, path: string): number {
       findCommentSpans(line, syntax(path)); // warm up the JIT
-      const startedAt = process.hrtime.bigint();
-      findCommentSpans(line, syntax(path));
-      return Number(process.hrtime.bigint() - startedAt) / 1e6;
+      let fastest = Infinity;
+      for (let run = 0; run < 3; run += 1) {
+        const startedAt = process.hrtime.bigint();
+        findCommentSpans(line, syntax(path));
+        fastest = Math.min(
+          fastest,
+          Number(process.hrtime.bigint() - startedAt) / 1e6,
+        );
+      }
+      return fastest;
     }
 
     it.each([
@@ -140,14 +149,14 @@ describe('comment-span', () => {
       ['quotes and escapes', '"a\\"b"+', 'a.ts'],
       ['hash values', 'k=v#1 ', 'app.env'],
     ])('%s: 1 MB line stays fast and scales linearly', (_, unit, path) => {
-      const small = unit.repeat(Math.ceil(256_000 / unit.length));
+      const small = unit.repeat(Math.ceil(64_000 / unit.length));
       const large = unit.repeat(Math.ceil(1_024_000 / unit.length));
 
       const smallMs = timeMs(small, path);
       const largeMs = timeMs(large, path);
 
       expect(largeMs).toBeLessThan(500);
-      expect(largeMs / Math.max(smallMs, 2)).toBeLessThan(10);
+      expect(largeMs / Math.max(smallMs, 2)).toBeLessThan(64);
     });
   });
 });

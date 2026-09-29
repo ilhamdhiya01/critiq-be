@@ -5,6 +5,7 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { ReposModule } from './modules/repos/repos.module';
 import { PullsModule } from './modules/pulls/pulls.module';
 import { ScansModule } from './modules/scans/scans.module';
+import { SettingsModule } from './modules/settings/settings.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
@@ -20,6 +21,7 @@ import { RedisModule } from './common/redis/redis.module';
     ReposModule,
     PullsModule,
     ScansModule,
+    SettingsModule,
     WebhooksModule,
     QueueModule,
   ],

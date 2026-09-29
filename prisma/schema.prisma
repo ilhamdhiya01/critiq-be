@@ -22,6 +22,8 @@ model User {
   memberships           Membership[]
   createdOrgs           Organization[] @relation("OrganizationCreatedBy")
   connectedIntegrations Integration[]  @relation("IntegrationConnectedBy")
+  aiConsentOrgs         Organization[] @relation("OrganizationAiConsentBy")
+  updatedAiCredentials  AiCredential[] @relation("AiCredentialUpdatedBy")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -30,10 +32,10 @@ model User {
 }
 
 model Organization {
-  id        String @id @default(cuid())
-  name      String @db.VarChar(100)
-  slug      String @unique @db.VarChar(100)
-  createdBy String
+  id                  String  @id @default(cuid())
+  name                String  @db.VarChar(100)
+  slug                String  @unique @db.VarChar(100)
+  createdBy           String
   onboardingCompleted Boolean @default(false)
 
   creator            User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
@@ -45,7 +47,22 @@ model Organization {
   pullRequests       PullRequest[]
   scans              Scan[]
   findings           Finding[]
+  aiCredentials      AiCredential[]
+  aiUsageDaily       AiUsageDaily[]
+  aiSummaries        AiSummary[]
 
+  // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
+  // live per provider in ai_credentials so switching back and forth never
+  // drops a key. No consent = step 2 never sends a diff anywhere.
+  aiProvider         AiProviderId?
+  aiModel            String?
+  aiConsentAt        DateTime?
+  aiConsentBy        String?
+  aiConsentUser      User?         @relation("OrganizationAiConsentBy", fields: [aiConsentBy], references: [id], onDelete: SetNull)
+  aiLocale           String        @default("en")
+  aiDailyTokenBudget Int           @default(2000000)
+  // Result of the last "Test connection" — shown back in GET settings/ai.
+  aiLastTest         Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -211,7 +228,7 @@ model Repository {
   scanConfig     RepoScanConfig?
   branchPolicies BranchScanPolicy[]
   pullRequests   PullRequest[]
-  scans              Scan[]
+  scans          Scan[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -331,8 +348,9 @@ enum SuppressionReason {
   // schema in the same order avoids a spurious diff. Priority lives in
   // classifySuppression (test_file > comment > regex_literal).
   COMMENT
+  // An AI finding duplicating a static one, kept only with AI_KEEP_DEDUPED.
+  DEDUPE_STATIC
 }
-
 
 // One row per PR/MR, upserted from webhook events only (WebhooksService) —
 // no polling/pull path exists. Deliberately GET-only at this phase (Fase
@@ -341,12 +359,16 @@ enum SuppressionReason {
 // RepoScanConfig/BranchScanPolicy) so tenant-scoped queries never need a
 // join to enforce isolation.
 model PullRequest {
-  id             String            @id @default(cuid())
+  id             String           @id @default(cuid())
   organizationId String
   repositoryId   String
   provider       Provider
   externalId     String
   title          String
+  // PR/MR body from the webhook — context for the AI review prompt
+  // (truncated there to 2000 characters). Null for PRs last seen before
+  // v1.5.1.
+  description    String?          @db.Text
   authorUsername String?
   sourceBranch   String
   targetBranch   String
@@ -384,6 +406,8 @@ model PullRequest {
 
   // Repeated webhook events (opened, then synchronize, then closed) for
   // the same PR/MR must upsert the same row, never duplicate it.
+  findings Finding[]
+
   @@unique([repositoryId, externalId])
   @@index([organizationId])
   @@map("pull_requests")
@@ -396,7 +420,7 @@ model PullRequest {
 // tenant-isolation reason as every other model here — no join needed to
 // enforce it.
 model Scan {
-  id             String        @id @default(cuid())
+  id             String         @id @default(cuid())
   organizationId String
   repositoryId   String
   pullId         String
@@ -404,13 +428,13 @@ model Scan {
   baseSha        String?
   status         ScanStatus
   trigger        ScanTrigger
-  attempt        Int           @default(1)
+  attempt        Int            @default(1)
   errorCode      ScanErrorCode?
-  errorMessage   String?       @db.Text
+  errorMessage   String?        @db.Text
   diffBytes      Int?
   filesChanged   Int?
-  findingsCount  Int           @default(0)
-  criticalCount  Int           @default(0)
+  findingsCount  Int            @default(0)
+  criticalCount  Int            @default(0)
 
   // Static rules snapshot at scan time (RulesModule's RULESET_VERSION) —
   // kept even though only one ruleset version exists today, so a future
@@ -426,8 +450,45 @@ model Scan {
   // Suppressed findings, counted separately from findingsCount/criticalCount
   // (which are active-only). Capped at 200 stored rows per scan; the count is
   // the real total before the cap.
-  suppressedCount      Int     @default(0)
-  suppressedTruncated  Boolean @default(false)
+  suppressedCount     Int     @default(0)
+  suppressedTruncated Boolean @default(false)
+
+  // AI review (v1.5.1 langkah 2). aiStatus null = the AI step never
+  // evaluated this scan (created before v1.5.1, or static FAILED).
+  // criticalCount above includes AI criticals once the AI step is DONE;
+  // majorCount/minorCount are AI-only (static rules are Critical-only).
+  aiStatus           AiScanStatus?
+  aiErrorCode        String?
+  aiProvider         String?
+  aiModel            String?
+  aiPromptVersion    String?
+  aiTokensIn         Int?
+  aiTokensOut        Int?
+  aiCached           Boolean       @default(false)
+  aiStartedAt        DateTime?
+  aiFinishedAt       DateTime?
+  aiFindingsTotal    Int           @default(0)
+  aiFindingsRejected Int           @default(0)
+  aiFindingsDeduped  Int           @default(0)
+  majorCount         Int           @default(0)
+  minorCount         Int           @default(0)
+  aiFlags            String[]      @default([])
+  // Redis key of the encrypted raw provider response, kept 30 days — only
+  // when the response was invalid (debugging). On the scan, not the summary:
+  // an invalid response is exactly the case with no summary row.
+  aiRawRef           String?
+
+  // Lifecycle (v1.5.1 langkah 3). INCREMENTAL = only the diff
+  // prevHeadSha → headSha was scanned; findings of baseScanId were carried
+  // forward. fullReason says why a scan was FULL.
+  diffMode       DiffMode    @default(FULL)
+  fullReason     FullReason?
+  baseScanId     String?
+  prevHeadSha    String?
+  newCount       Int         @default(0)
+  persistedCount Int         @default(0)
+  reopenedCount  Int         @default(0)
+  resolvedCount  Int         @default(0)
 
   startedAt  DateTime?
   finishedAt DateTime?
@@ -443,6 +504,11 @@ model Scan {
   // is just what Prisma requires to model the relation named above on
   // PullRequest.
   latestForPullRequests PullRequest[] @relation("PullRequestLatestScan")
+  aiSummary             AiSummary?
+  baseScan              Scan?         @relation("ScanBase", fields: [baseScanId], references: [id], onDelete: SetNull)
+  derivedScans          Scan[]        @relation("ScanBase")
+  firstSeenFindings     Finding[]     @relation("FindingFirstSeen")
+  resolvedFindings      Finding[]     @relation("FindingResolvedIn")
 
   @@unique([repositoryId, pullId, headSha, attempt])
   @@index([organizationId, pullId, createdAt(sort: Desc)])
@@ -475,16 +541,162 @@ model Finding {
   // every count, notification and annotation.
   suppressedReason SuppressionReason?
 
+  // Shared vocabulary for static and AI findings, used to dedupe one against
+  // the other. Nullable only for rows the migration backfill could not map.
+  category   FindingCategory?
+  // AI only, 0.00–1.00 as the model reported it.
+  confidence Decimal?         @db.Decimal(3, 2)
+  // AI finding kept although it duplicates this static finding
+  // (AI_KEEP_DEDUPED=true, suppressedReason DEDUPE_STATIC).
+  dedupeOfId String?
+
+  // Lifecycle (v1.5.1 langkah 3). pullId is denormalized from the scan so
+  // lifecycle queries across a PR's scans stay cheap. A RESOLVED row lives
+  // in the scan that closed it; originFindingId points at the finding it
+  // continues (PERSISTED/REOPENED) or closes (RESOLVED).
+  pullId           String
+  status           FindingStatus @default(NEW)
+  firstSeenScanId  String
+  resolvedInScanId String?
+  originFindingId  String?
+
   createdAt DateTime @default(now())
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  scan Scan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  scan          Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  dedupeOf      Finding?     @relation("FindingDedupeOf", fields: [dedupeOfId], references: [id], onDelete: SetNull)
+  duplicates    Finding[]    @relation("FindingDedupeOf")
+  pullRequest   PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  firstSeenIn   Scan         @relation("FindingFirstSeen", fields: [firstSeenScanId], references: [id], onDelete: Cascade)
+  resolvedIn    Scan?        @relation("FindingResolvedIn", fields: [resolvedInScanId], references: [id], onDelete: SetNull)
+  origin        Finding?     @relation("FindingOrigin", fields: [originFindingId], references: [id], onDelete: SetNull)
+  continuations Finding[]    @relation("FindingOrigin")
 
   @@index([organizationId, scanId])
   @@index([scanId, filePath, lineStart])
+  @@index([organizationId, pullId, fingerprint, status])
+  @@index([organizationId, pullId, status])
   @@map("findings")
 }
 
+enum AiProviderId {
+  ANTHROPIC
+  OPENAI
+  OPENAI_COMPATIBLE
+}
 
+// One organization-owned credential per provider (v1.5.1 langkah 1).
+// encryptedKey is EncryptionService output (AES-256-GCM, `iv:tag:ct` hex,
+// ENCRYPTION_KEY) — never returned by the API, only keyLast4 is. Null only
+// for openai_compatible, where a self-hosted server may need no key.
+model AiCredential {
+  organizationId String
+  provider       AiProviderId
+  encryptedKey   String?
+  keyLast4       String?      @db.VarChar(4)
+  // Which ENCRYPTION_KEY generation encrypted this row; rotation is out of
+  // scope, but recording it now means a rotation needs no schema change.
+  keyVersion     Int          @default(1)
+  baseUrl        String?
+  updatedBy      String?
+  updatedAt      DateTime     @updatedAt
 
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  updatedByUser User?        @relation("AiCredentialUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
 
+  @@id([organizationId, provider])
+  @@map("ai_credentials")
+}
+
+enum AiUsageKind {
+  SCAN
+  TEST
+}
+
+// Token usage per organization per day. TEST rows (Settings → Test
+// connection) never count toward aiDailyTokenBudget; SCAN rows do (step 2).
+model AiUsageDaily {
+  organizationId String
+  day            DateTime    @db.Date
+  kind           AiUsageKind
+  calls          Int         @default(0)
+  inputTokens    Int         @default(0)
+  outputTokens   Int         @default(0)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@id([organizationId, day, kind])
+  @@map("ai_usage_daily")
+}
+
+enum FindingCategory {
+  SECRET
+  INJECTION
+  INSECURE_TLS
+  ERROR_HANDLING
+  PERFORMANCE
+  LOGIC
+  AUTH
+  CONCURRENCY
+  DATA_LOSS
+  CONFIG
+  OTHER
+}
+
+enum AiScanStatus {
+  QUEUED
+  RUNNING
+  DONE
+  CACHED
+  FAILED
+  SKIPPED_MANUAL_MODE
+  CONSENT_REQUIRED
+  NOT_CONFIGURED
+  SKIPPED_TOO_LARGE
+  BUDGET_EXCEEDED
+}
+
+enum AiRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// The AI review of one scan (v1.5.1 langkah 2). One per scan; a cache hit
+// copies the source scan's summary into a new row for the new scan.
+model AiSummary {
+  id             String      @id @default(cuid())
+  organizationId String
+  scanId         String      @unique
+  pullId         String
+  summaryMd      String      @db.Text
+  riskLevel      AiRiskLevel
+  filesOmitted   String[]    @default([])
+  createdAt      DateTime    @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, pullId])
+  @@map("ai_summaries")
+}
+
+enum DiffMode {
+  FULL
+  INCREMENTAL
+}
+
+enum FullReason {
+  FIRST_SCAN
+  FORCE_PUSH
+  RULESET_CHANGED
+  PROMPT_CHANGED
+  MANUAL
+}
+
+enum FindingStatus {
+  NEW
+  PERSISTED
+  REOPENED
+  RESOLVED
+}
