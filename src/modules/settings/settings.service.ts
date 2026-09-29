@@ -50,6 +50,8 @@ function userMessage(error: AiError): string {
     provider_unreachable: `Provider could not be reached${status}.`,
     invalid_response:
       'Provider replied, but not with a valid structured result.',
+    output_truncated:
+      'Provider stopped at the output token limit before finishing the result.',
     bad_request: `Provider rejected the request${status}: ${error.providerMessage ?? ''}`,
     insecure_base_url: error.providerMessage ?? 'Base URL is not allowed.',
     not_configured: error.providerMessage ?? 'No AI provider is configured.',

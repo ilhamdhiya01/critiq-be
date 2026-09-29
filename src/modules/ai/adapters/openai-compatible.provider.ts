@@ -9,6 +9,7 @@ import {
   HEALTHCHECK_TIMEOUT_MS,
   OpenAiProvider,
   parseJsonOrThrow,
+  throwIfTruncated,
   usageOf,
 } from './openai.provider';
 
@@ -102,6 +103,7 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
       },
       { timeout: req.timeoutMs },
     );
+    throwIfTruncated(response, req.maxTokens);
     return {
       toolInput: parseJsonOrThrow(response.choices[0]?.message?.content),
       usage: usageOf(response),

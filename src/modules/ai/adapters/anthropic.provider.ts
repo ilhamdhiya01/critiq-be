@@ -41,6 +41,12 @@ export class AnthropicProvider implements AiProvider {
         },
         { timeout: req.timeoutMs },
       );
+      if (response.stop_reason === 'max_tokens') {
+        throw new AiError('output_truncated', {
+          providerMessage: `Response hit max_tokens (${req.maxTokens}).`,
+          raw: response.content,
+        });
+      }
       const toolUse = response.content.find(
         (block) => block.type === 'tool_use',
       );
