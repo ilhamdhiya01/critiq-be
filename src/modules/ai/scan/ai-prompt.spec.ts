@@ -16,6 +16,8 @@ const FINGERPRINT_BY_VERSION: Record<string, string> = {
     'd050adf8a6dca4f9bd8e85314c06d7abe04e348ce2d90208e5654ecca3318327',
   'ai-2026.09.4':
     '05b7cfb140b5af975a4ca502f5112ea2ce7f38349df2ee34c95091a13fbad069',
+  'ai-2026.10.1':
+    'fa3aff2fef9d58880d8f38e2116c4e3bbb3d568f903f921ad63535ebc65cc1db',
 };
 
 describe('AI prompt', () => {
@@ -36,6 +38,17 @@ describe('AI prompt', () => {
     const prompt = buildSystemPrompt('en');
     expect(prompt).not.toContain('Mention any files omitted for size');
     expect(prompt).toContain('never claim a file was omitted otherwise');
+  });
+
+  // Severity calibration: UX feedback rated MAJOR raised safe PRs to
+  // RISK · MEDIUM.
+  it('caps UX feedback at minor and defines severity only once', () => {
+    const prompt = buildSystemPrompt('en');
+    expect(prompt).toContain('is never higher than "minor"');
+    expect(prompt).toContain('One root cause = one finding.');
+    expect(prompt).toContain('never start a title with "Potential"');
+    expect(prompt.match(/"critical" = /g)).toHaveLength(1);
+    expect(prompt).not.toContain('"major" = a likely bug');
   });
 
   it('treats repository content as data, not instructions', () => {

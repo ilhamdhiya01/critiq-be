@@ -459,26 +459,32 @@ model Scan {
   // evaluated this scan (created before v1.5.1, or static FAILED).
   // criticalCount above includes AI criticals once the AI step is DONE;
   // majorCount/minorCount are AI-only (static rules are Critical-only).
-  aiStatus           AiScanStatus?
-  aiErrorCode        String?
-  aiProvider         String?
-  aiModel            String?
-  aiPromptVersion    String?
-  aiTokensIn         Int?
-  aiTokensOut        Int?
-  aiCached           Boolean       @default(false)
-  aiStartedAt        DateTime?
-  aiFinishedAt       DateTime?
-  aiFindingsTotal    Int           @default(0)
-  aiFindingsRejected Int           @default(0)
-  aiFindingsDeduped  Int           @default(0)
-  majorCount         Int           @default(0)
-  minorCount         Int           @default(0)
-  aiFlags            String[]      @default([])
+  aiStatus            AiScanStatus?
+  aiErrorCode         String?
+  aiProvider          String?
+  aiModel             String?
+  aiPromptVersion     String?
+  aiTokensIn          Int?
+  aiTokensOut         Int?
+  aiCached            Boolean       @default(false)
+  aiStartedAt         DateTime?
+  aiFinishedAt        DateTime?
+  aiFindingsTotal     Int           @default(0)
+  aiFindingsRejected  Int           @default(0)
+  aiFindingsDeduped   Int           @default(0)
+  // AI findings not stored because the model's confidence was below 0.5 —
+  // shown as "N skipped (low confidence)".
+  aiFindingsDropped   Int           @default(0)
+  // The model's own risk_level; ai_summaries.riskLevel is recomputed from
+  // the active findings.
+  aiReportedRiskLevel AiRiskLevel?
+  majorCount          Int           @default(0)
+  minorCount          Int           @default(0)
+  aiFlags             String[]      @default([])
   // Redis key of the encrypted raw provider response, kept 30 days — only
   // when the response was invalid (debugging). On the scan, not the summary:
   // an invalid response is exactly the case with no summary row.
-  aiRawRef           String?
+  aiRawRef            String?
 
   // Lifecycle (v1.5.1 langkah 3). INCREMENTAL = only the diff
   // prevHeadSha → headSha was scanned; findings of baseScanId were carried
@@ -545,12 +551,15 @@ model Finding {
 
   // Shared vocabulary for static and AI findings, used to dedupe one against
   // the other. Nullable only for rows the migration backfill could not map.
-  category   FindingCategory?
+  category         FindingCategory?
   // AI only, 0.00–1.00 as the model reported it.
-  confidence Decimal?         @db.Decimal(3, 2)
+  confidence       Decimal?         @db.Decimal(3, 2)
+  // AI only: the severity the model reported, before Critiq's calibration
+  // (confidence downgrade, hedged-title guard) — kept to evaluate it.
+  reportedSeverity FindingSeverity?
   // AI finding kept although it duplicates this static finding
   // (AI_KEEP_DEDUPED=true, suppressedReason DEDUPE_STATIC).
-  dedupeOfId String?
+  dedupeOfId       String?
 
   // Lifecycle (v1.5.1 langkah 3). pullId is denormalized from the scan so
   // lifecycle queries across a PR's scans stay cheap. A RESOLVED row lives
