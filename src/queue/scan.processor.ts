@@ -34,6 +34,7 @@ import {
 } from './lifecycle/scan-counts';
 import {
   classifyProviderError,
+  providerErrorDetail,
   sanitizeErrorMessage,
   ScanFailure,
 } from './scan-errors';
@@ -465,14 +466,7 @@ export class ScanProcessor
         toSha,
       );
     } catch (error) {
-      if (classifyProviderError(error) === 'credential') {
-        this.logger.warn('notification.integration_token_invalid', log);
-        throw new ScanFailure(
-          ScanErrorCode.TOKEN_EXPIRED,
-          'The code host rejected the organization credential.',
-        );
-      }
-      throw error;
+      this.rethrowProviderError(error, log);
     }
   }
 
@@ -487,17 +481,32 @@ export class ScanProcessor
         payload.pullId,
       );
     } catch (error) {
-      if (classifyProviderError(error) === 'credential') {
-        this.logger.warn('notification.integration_token_invalid', log);
-        throw new ScanFailure(
-          ScanErrorCode.TOKEN_EXPIRED,
-          'The code host rejected the organization credential.',
-        );
-      }
-      // Provider 5xx/timeouts and anything unexpected: let BullMQ retry
-      // with backoff; the failed handler maps exhaustion to an error code.
-      throw error;
+      this.rethrowProviderError(error, log);
     }
+  }
+
+  // Provider failures retrying cannot fix end the scan at once: a refused
+  // credential (an Admin must act) or a request the provider rejected as
+  // malformed (the same request would be rejected again). Provider
+  // 5xx/timeouts and anything unexpected: let BullMQ retry with backoff;
+  // the failed handler maps exhaustion to an error code.
+  private rethrowProviderError(error: unknown, log: LogContext): never {
+    const kind = classifyProviderError(error);
+    if (kind === 'credential') {
+      this.logger.warn('notification.integration_token_invalid', log);
+      throw new ScanFailure(
+        ScanErrorCode.TOKEN_EXPIRED,
+        'The code host rejected the organization credential.',
+      );
+    }
+    if (kind === 'rejected') {
+      const detail = providerErrorDetail(error);
+      throw new ScanFailure(
+        ScanErrorCode.PROVIDER_REJECTED,
+        `The code host rejected the request${detail ? `: ${detail}` : ''}.`,
+      );
+    }
+    throw error;
   }
 
   private assertWithinDeadline(deadline: number) {
