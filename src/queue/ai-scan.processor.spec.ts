@@ -14,7 +14,7 @@ import {
 import { AiError } from '../modules/ai/ai-error';
 import { AiProviderFactory } from '../modules/ai/ai-provider.factory';
 import { AiProvider, AiResult } from '../modules/ai/ai-provider.interface';
-import { capRiskLevel } from '../modules/ai/scan/ai-scan.persistence';
+import { riskLevelFromCounts } from '../modules/ai/scan/ai-scan.persistence';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AiJobPayload } from './ai-queue.constants';
@@ -507,7 +507,7 @@ describe('AiScanProcessor', () => {
   // Acceptance 17.
   // critiq-be PR #6: "RISK · HIGH" next to "0 critical" after the fixtures'
   // findings were suppressed.
-  it('caps the risk level at what the active findings support', async () => {
+  it('computes the risk level from the active findings, keeping the model one', async () => {
     const { processor, tx, provider } = setup();
     provider.complete.mockResolvedValue(
       result({ summary: 's', risk_level: 'high', findings: [] }),
@@ -516,26 +516,37 @@ describe('AiScanProcessor', () => {
     await processor.process(job);
 
     expect(summaryRisk(tx)).toBe('LOW');
-    expect(tx.scan.update).toHaveBeenCalledWith({
-      where: { id: 'scan_1' },
-      data: { aiFlags: ['risk_capped_from_high'] },
-    });
+    expect(scanUpdate(tx)).toMatchObject({ aiReportedRiskLevel: 'HIGH' });
   });
 
-  it('keeps a high risk level backed by an active critical', async () => {
+  // Recomputed both ways: a critical the model under-rated raises it.
+  it('raises the risk level when an active critical remains', async () => {
     const { processor, tx, provider } = setup();
     tx.finding.groupBy.mockResolvedValue([activeCritical()]);
     provider.complete.mockResolvedValue(
-      result({ summary: 's', risk_level: 'high', findings: [aiFinding()] }),
+      result({ summary: 's', risk_level: 'low', findings: [aiFinding()] }),
     );
 
     await processor.process(job);
 
     expect(summaryRisk(tx)).toBe('HIGH');
-    const flagWrites = (
-      tx.scan.update.mock.calls as [{ data: Record<string, unknown> }][]
-    ).filter(([args]) => 'aiFlags' in args.data);
-    expect(flagWrites).toHaveLength(0);
+    expect(scanUpdate(tx)).toMatchObject({ aiReportedRiskLevel: 'LOW' });
+  });
+
+  it('counts findings dropped below the confidence gate', async () => {
+    const { processor, tx, provider } = setup();
+    provider.complete.mockResolvedValue(
+      result({
+        summary: 's',
+        risk_level: 'medium',
+        findings: [aiFinding({ confidence: 0.3 })],
+      }),
+    );
+
+    await processor.process(job);
+
+    expect(scanUpdate(tx)).toMatchObject({ aiFindingsDropped: 1 });
+    expect(createdFindings(tx)).toEqual([]);
   });
 
   it('flags a low-risk empty review of a scan with static criticals', async () => {
@@ -572,22 +583,18 @@ describe('AiScanProcessor', () => {
   });
 });
 
-describe('capRiskLevel', () => {
+describe('riskLevelFromCounts', () => {
   it.each([
-    ['HIGH', 0, 0, 'LOW'],
-    ['HIGH', 0, 2, 'MEDIUM'],
-    ['HIGH', 1, 0, 'HIGH'],
-    ['MEDIUM', 0, 0, 'LOW'],
-    ['MEDIUM', 0, 1, 'MEDIUM'],
-    // A lower rating than the findings support is the model's to give.
-    ['LOW', 3, 0, 'LOW'],
-    ['MEDIUM', 1, 0, 'MEDIUM'],
+    [0, 0, 'LOW'],
+    [0, 2, 'MEDIUM'],
+    [1, 0, 'HIGH'],
+    [3, 4, 'HIGH'],
   ] as const)(
-    '%s with %i critical / %i major → %s',
-    (model, criticalCount, majorCount, expected) => {
-      expect(
-        capRiskLevel(AiRiskLevel[model], { criticalCount, majorCount }),
-      ).toBe(expected);
+    '%i critical / %i major → %s',
+    (criticalCount, majorCount, expected) => {
+      expect(riskLevelFromCounts({ criticalCount, majorCount })).toBe(
+        AiRiskLevel[expected],
+      );
     },
   );
 });

@@ -25,6 +25,7 @@ export const STORED_FINDING_SELECT = {
   suppressedReason: true,
   category: true,
   confidence: true,
+  reportedSeverity: true,
   firstSeenScanId: true,
   dedupeOfId: true,
 } as const;

@@ -5,7 +5,7 @@ import { JsonSchema } from '../ai-provider.interface';
 // part of the AI cache key and stored on every scan, so a result is always
 // attributable to the exact prompt that produced it. ai-prompt.spec.ts pins
 // a hash of both — changing either without bumping this fails the suite.
-export const AI_PROMPT_VERSION = 'ai-2026.09.4';
+export const AI_PROMPT_VERSION = 'ai-2026.10.1';
 
 export const REPORT_REVIEW_TOOL = 'report_review';
 
@@ -89,8 +89,17 @@ Rules:
 - Do not comment on style, formatting, naming or personal preference.
 - Do not repeat anything listed under "ALREADY REPORTED BY STATIC RULES".
 - Every finding must point at added lines (marked "+") of a file shown in the diff, using the new-side line numbers exactly as printed.
-- severity: "critical" = will break production, lose or leak data, or is exploitable; "major" = a likely bug or significant risk; "minor" = a small but real issue.
+- severity — apply the strictest reading:
+  "critical" = the added code will break production, lose or leak data, or is exploitable (hard-coded secret, injection, missing auth/tenant check, destructive query without filter, disabled TLS verification, unhandled failure on a payment/auth/token path).
+  "major"    = a bug that will occur under normal use, or a significant risk you can point to in the code (inverted condition, null dereference on the main path, race on shared state, N+1 query, swallowed error that continues as success, CORS wildcard with credentials).
+  "minor"    = a real but small defect: unhelpful error text, missing cleanup of a timer or listener, magic number that belongs in config, redundant validation.
+- Missing user feedback (no toast, no message, silent return), UX polish, or "the user may be confused" is never higher than "minor". A guard clause that returns early on invalid input is correct code, not a finding.
+- One root cause = one finding. If the same problem appears on several lines of the same file, report it once with line_start..line_end covering the range. Never report the same problem twice with different wording.
+- Do not report a finding that contradicts another finding you make (e.g. "validation is missing" when you also describe that validation).
+- Titles are assertions, not guesses: never start a title with "Potential", "Possible", "May", or "Might". If you are not certain, omit the finding or set confidence below 0.5.
 - confidence: your probability, from 0 to 1, that the finding is a real problem.
+- confidence below 0.5 means you would not raise this in a human code review; prefer omitting it.
+- risk_level reflects the worst finding you report: "high" only if there is at least one critical; "medium" if there is at least one major; otherwise "low". A PR with only minor findings is "low".
 - Write "summary" and every "message" in {{LANGUAGE}}. Write every "title" in short English (at most 80 characters). Each "message" is at most 600 characters.
 - "summary" is light markdown of at most 1500 characters (about 200 words) — stay well under it. {{MODE}} Mention omitted files only when the input lists them under "OMITTED FOR SIZE" or "NOT SENT"; never claim a file was omitted otherwise.
 - Reply only by calling the ${REPORT_REVIEW_TOOL} tool.

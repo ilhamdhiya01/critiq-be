@@ -292,7 +292,7 @@ export class AiScanProcessor
     for (const rejected of validation.rejected) {
       this.logger.info('ai.reject', { ...log, reason: rejected.reason });
     }
-    const { kept, duplicates } = dedupeAiFindings(
+    const { kept, merged, duplicates } = dedupeAiFindings(
       validation.accepted,
       staticFindings,
     );
@@ -317,12 +317,13 @@ export class AiScanProcessor
         {
           status: AiScanStatus.DONE,
           summaryMd: review.summary,
-          riskLevel: review.risk_level.toUpperCase() as AiRiskLevel,
+          reportedRiskLevel: review.risk_level.toUpperCase() as AiRiskLevel,
           filesOmitted: prompt.filesOmitted,
           rows,
           total: review.findings.length,
           rejected: validation.rejected.length,
-          deduped: duplicates.length,
+          dropped: validation.droppedLowConfidence,
+          deduped: merged + duplicates.length,
           provider: aiProvider,
           model: aiModel,
           promptVersion: AI_PROMPT_VERSION,
@@ -406,7 +407,8 @@ export class AiScanProcessor
       tokensOut: completion.usage.outputTokens,
       findings: rows.length,
       rejected: validation.rejected.length,
-      deduped: duplicates.length,
+      dropped: validation.droppedLowConfidence,
+      deduped: merged + duplicates.length,
       cached: false,
     });
   }

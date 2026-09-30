@@ -52,6 +52,7 @@ export class PullSummaryService {
         aiStatus: null,
         summaryMd: null,
         riskLevel: null,
+        reportedRiskLevel: null,
         provider: null,
         model: null,
         generatedAt: null,
@@ -72,6 +73,11 @@ export class PullSummaryService {
       riskLevel: summary
         ? (summary.riskLevel.toLowerCase() as 'low' | 'medium' | 'high')
         : null,
+      reportedRiskLevel:
+        summary && scan.aiReportedRiskLevel
+          ? (scan.aiReportedRiskLevel.toLowerCase() as
+              'low' | 'medium' | 'high')
+          : null,
       provider: scan.aiProvider,
       model: scan.aiModel,
       generatedAt: summary?.createdAt ?? null,
