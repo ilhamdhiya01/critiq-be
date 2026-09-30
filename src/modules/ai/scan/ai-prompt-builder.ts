@@ -108,6 +108,9 @@ export interface LifecycleItem {
 export interface SentFile {
   // New-side numbers of the "+" lines the model saw for this file.
   addedLines: Set<number>;
+  // New-side line number → the text the model saw there (redacted lines as
+  // REDACTED) — for checking a finding against the code it points at.
+  lines: Map<number, string>;
 }
 
 export interface PromptBuildResult {
@@ -154,6 +157,7 @@ interface RenderedFile {
   path: string;
   text: string;
   addedLines: Set<number>;
+  lines: Map<number, string>;
 }
 
 // One file, every line prefixed with its new-side number. With the head
@@ -231,6 +235,7 @@ export function renderFile(
   }
 
   const out: string[] = [`### ${file.path} (${file.status})`];
+  const shown = new Map<number, string>();
   merged.forEach(([start, end], index) => {
     if (index > 0) {
       out.push('  ...');
@@ -244,13 +249,19 @@ export function renderFile(
         continue; // outside both the hunk and the head file
       }
       const text = secretLines.has(n) ? REDACTED : known;
+      shown.set(n, text);
       out.push(`${added.has(n) ? '+' : ' '} ${pad(n)} | ${text}`);
     }
   });
   for (const deleted of trailingDeleted) {
     out.push(`-       | ${deleted}`);
   }
-  return { path: file.path, text: out.join('\n'), addedLines: added };
+  return {
+    path: file.path,
+    text: out.join('\n'),
+    addedLines: added,
+    lines: shown,
+  };
 }
 
 function dominantLanguage(paths: string[]): string {
@@ -393,7 +404,7 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
   ].join('\n');
 
   const sentFiles = new Map<string, SentFile>(
-    kept.map((f) => [f.path, { addedLines: f.addedLines }]),
+    kept.map((f) => [f.path, { addedLines: f.addedLines, lines: f.lines }]),
   );
 
   return {
