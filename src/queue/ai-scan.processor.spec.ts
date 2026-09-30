@@ -5,6 +5,7 @@ import { Logger } from 'winston';
 import { EncryptionService } from '../common/encryption/encryption.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import {
+  AiRiskLevel,
   AiScanStatus,
   FindingCategory,
   FindingSource,
@@ -13,6 +14,7 @@ import {
 import { AiError } from '../modules/ai/ai-error';
 import { AiProviderFactory } from '../modules/ai/ai-provider.factory';
 import { AiProvider, AiResult } from '../modules/ai/ai-provider.interface';
+import { capRiskLevel } from '../modules/ai/scan/ai-scan.persistence';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AiJobPayload } from './ai-queue.constants';
@@ -235,6 +237,23 @@ function setup(
   };
 }
 
+// A recomputeScanCounts group: one active AI critical.
+function activeCritical() {
+  return {
+    status: 'NEW',
+    severity: 'CRITICAL',
+    source: 'AI',
+    _count: { _all: 1 },
+  };
+}
+
+function summaryRisk(tx: ReturnType<typeof setup>['tx']) {
+  const [{ data }] = tx.aiSummary.create.mock.calls[0] as [
+    { data: { riskLevel: string } },
+  ];
+  return data.riskLevel;
+}
+
 const job = {
   id: 'ai-scan_1-1',
   data: { scanId: 'scan_1', organizationId: 'org_1', pullId: 'pull_1' },
@@ -259,6 +278,7 @@ describe('AiScanProcessor', () => {
   // Acceptance 1.
   it('stores the summary and AI findings, and records usage and cache', async () => {
     const { processor, tx, provider, aiScanService } = setup();
+    tx.finding.groupBy.mockResolvedValue([activeCritical()]);
     provider.complete.mockResolvedValue(
       result({
         summary: 'Adds rotation.',
@@ -485,6 +505,39 @@ describe('AiScanProcessor', () => {
   });
 
   // Acceptance 17.
+  // critiq-be PR #6: "RISK · HIGH" next to "0 critical" after the fixtures'
+  // findings were suppressed.
+  it('caps the risk level at what the active findings support', async () => {
+    const { processor, tx, provider } = setup();
+    provider.complete.mockResolvedValue(
+      result({ summary: 's', risk_level: 'high', findings: [] }),
+    );
+
+    await processor.process(job);
+
+    expect(summaryRisk(tx)).toBe('LOW');
+    expect(tx.scan.update).toHaveBeenCalledWith({
+      where: { id: 'scan_1' },
+      data: { aiFlags: ['risk_capped_from_high'] },
+    });
+  });
+
+  it('keeps a high risk level backed by an active critical', async () => {
+    const { processor, tx, provider } = setup();
+    tx.finding.groupBy.mockResolvedValue([activeCritical()]);
+    provider.complete.mockResolvedValue(
+      result({ summary: 's', risk_level: 'high', findings: [aiFinding()] }),
+    );
+
+    await processor.process(job);
+
+    expect(summaryRisk(tx)).toBe('HIGH');
+    const flagWrites = (
+      tx.scan.update.mock.calls as [{ data: Record<string, unknown> }][]
+    ).filter(([args]) => 'aiFlags' in args.data);
+    expect(flagWrites).toHaveLength(0);
+  });
+
   it('flags a low-risk empty review of a scan with static criticals', async () => {
     const { processor, tx, provider } = setup({ findingsCount: 1 });
     provider.complete.mockResolvedValue(
@@ -517,4 +570,24 @@ describe('AiScanProcessor', () => {
     await processor.process(job);
     expect(pullsService.getHeadFileContents).not.toHaveBeenCalled();
   });
+});
+
+describe('capRiskLevel', () => {
+  it.each([
+    ['HIGH', 0, 0, 'LOW'],
+    ['HIGH', 0, 2, 'MEDIUM'],
+    ['HIGH', 1, 0, 'HIGH'],
+    ['MEDIUM', 0, 0, 'LOW'],
+    ['MEDIUM', 0, 1, 'MEDIUM'],
+    // A lower rating than the findings support is the model's to give.
+    ['LOW', 3, 0, 'LOW'],
+    ['MEDIUM', 1, 0, 'MEDIUM'],
+  ] as const)(
+    '%s with %i critical / %i major → %s',
+    (model, criticalCount, majorCount, expected) => {
+      expect(
+        capRiskLevel(AiRiskLevel[model], { criticalCount, majorCount }),
+      ).toBe(expected);
+    },
+  );
 });

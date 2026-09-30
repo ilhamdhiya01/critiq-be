@@ -17,6 +17,7 @@ import {
   FindingStatus,
   ReviewPolicy,
   ScanStatus,
+  SuppressionReason,
 } from '../../../generated/prisma/enums';
 import {
   AI_JOB_ATTEMPTS,
@@ -58,10 +59,17 @@ export interface AiCacheKeyParts {
   prevHeadSha: string | null;
 }
 
+// Bump when what happens to a model's answer after the call changes —
+// validation above all: a cache hit copies the stored findings without
+// validating them again, so answers kept under older rules must not be
+// reused. (2: echoes_code, AI findings follow static suppression.)
+export const AI_POSTPROCESS_VERSION = 'post-2';
+
 export function aiCacheKey(parts: AiCacheKeyParts): string {
   const digest = createHash('sha256')
     .update(
       [
+        AI_POSTPROCESS_VERSION,
         parts.repositoryId,
         parts.headSha,
         parts.rulesetVersion,
@@ -409,11 +417,16 @@ export class AiScanService {
       where: { id: sourceScanId },
       include: {
         aiSummary: true,
+        // Suppression is decided again below against this scan's static
+        // findings; only the DEDUPE_STATIC copies are left out.
         findings: {
           where: {
             source: FindingSource.AI,
-            suppressedReason: null,
             status: { not: FindingStatus.RESOLVED },
+            OR: [
+              { suppressedReason: null },
+              { suppressedReason: { not: SuppressionReason.DEDUPE_STATIC } },
+            ],
           },
         },
       },
@@ -427,11 +440,10 @@ export class AiScanService {
       return false;
     }
 
-    const staticActive = await this.prisma.finding.findMany({
+    const staticFindings = await this.prisma.finding.findMany({
       where: {
         scanId: scan.id,
         source: FindingSource.STATIC,
-        suppressedReason: null,
         status: { not: FindingStatus.RESOLVED },
       },
       select: {
@@ -440,6 +452,7 @@ export class AiScanService {
         lineStart: true,
         lineEnd: true,
         category: true,
+        suppressedReason: true,
       },
     });
     const drafts = source.findings.map((finding) => ({
@@ -452,7 +465,7 @@ export class AiScanService {
       message: finding.message,
       confidence: Number(finding.confidence ?? 0),
     }));
-    const { kept, duplicates } = dedupeAiFindings(drafts, staticActive);
+    const { kept, duplicates } = dedupeAiFindings(drafts, staticFindings);
     const context = await loadAiLifecycleContext(this.prisma, scan);
     const { rows } = buildAiRows(
       scan,
