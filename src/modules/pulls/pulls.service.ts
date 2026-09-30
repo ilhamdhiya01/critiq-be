@@ -342,6 +342,7 @@ export class PullsService {
                   suppressedReason: finding.suppressedReason,
                   category: finding.category,
                   confidence: finding.confidence,
+                  reportedSeverity: finding.reportedSeverity,
                   status: finding.status,
                   firstSeenScanId: finding.firstSeenScanId,
                   originFindingId: finding.originFindingId,

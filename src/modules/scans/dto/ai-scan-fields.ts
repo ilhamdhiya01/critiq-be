@@ -1,4 +1,8 @@
-import { AiScanStatus, FindingCategory } from '../../../generated/prisma/enums';
+import {
+  AiRiskLevel,
+  AiScanStatus,
+  FindingCategory,
+} from '../../../generated/prisma/enums';
 
 // AI review fields shared by every scan shape in the API (latestScan in PR
 // lists/detail, scan history, scan status). Statuses and categories go out
@@ -25,6 +29,8 @@ export const AI_SCAN_FIELDS_SELECT = {
   aiCached: true,
   majorCount: true,
   minorCount: true,
+  aiFindingsDropped: true,
+  aiReportedRiskLevel: true,
 } as const;
 
 export interface AiScanFieldsRow {
@@ -35,6 +41,8 @@ export interface AiScanFieldsRow {
   aiCached: boolean;
   majorCount: number;
   minorCount: number;
+  aiFindingsDropped: number;
+  aiReportedRiskLevel: AiRiskLevel | null;
 }
 
 export interface ApiAiScanFields {
@@ -48,6 +56,11 @@ export interface ApiAiScanFields {
   // AI-only; criticalCount already includes AI criticals.
   majorCount: number;
   minorCount: number;
+  // AI findings below the confidence gate — counted, not stored.
+  aiFindingsDropped: number;
+  // The model's own risk_level; the PR's risk (summary) is computed from
+  // the active findings.
+  aiReportedRiskLevel: Lowercase<AiRiskLevel> | null;
 }
 
 export function toApiAiScanFields(row: AiScanFieldsRow): ApiAiScanFields {
@@ -59,5 +72,9 @@ export function toApiAiScanFields(row: AiScanFieldsRow): ApiAiScanFields {
     aiCached: row.aiCached,
     majorCount: row.majorCount,
     minorCount: row.minorCount,
+    aiFindingsDropped: row.aiFindingsDropped,
+    aiReportedRiskLevel: row.aiReportedRiskLevel
+      ? (row.aiReportedRiskLevel.toLowerCase() as Lowercase<AiRiskLevel>)
+      : null,
   };
 }
