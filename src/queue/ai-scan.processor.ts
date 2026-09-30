@@ -292,12 +292,9 @@ export class AiScanProcessor
     for (const rejected of validation.rejected) {
       this.logger.info('ai.reject', { ...log, reason: rejected.reason });
     }
-    const staticActive = staticFindings.filter(
-      (finding) => finding.suppressedReason === null,
-    );
     const { kept, duplicates } = dedupeAiFindings(
       validation.accepted,
-      staticActive,
+      staticFindings,
     );
 
     // Lifecycle: matched to the base AI findings (FULL), minus what the

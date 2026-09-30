@@ -11,6 +11,10 @@ import { ReportReviewInput } from './ai-prompt.constants';
 
 const MAX_RANGE = 40;
 const MIN_MESSAGE_CHARS = 20;
+// A title this long found verbatim in the code around the finding is the
+// model reading the code's own words back (see echoesCode).
+const ECHO_MIN_TITLE_CHARS = 12;
+const ECHO_WINDOW_LINES = 5;
 const CRITICAL_MIN_CONFIDENCE = 0.7;
 const MAJOR_MIN_CONFIDENCE = 0.5;
 
@@ -31,7 +35,8 @@ export type RejectReason =
   | 'range_too_long'
   | 'outside_added_lines'
   | 'empty_title'
-  | 'message_too_short';
+  | 'message_too_short'
+  | 'echoes_code';
 
 export interface ValidationResult {
   accepted: AiFindingDraft[];
@@ -50,6 +55,42 @@ function normalizePath(path: string): string {
 // closing brace or the line just before the change.
 function isReviewable(line: number, added: Set<number>): boolean {
   return added.has(line) || added.has(line - 1) || added.has(line + 1);
+}
+
+function normalizeText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// The finding's title appears word for word in the code it points at (±5
+// lines): the model copied what the code says instead of finding a problem.
+// gpt-4o-mini, reviewing Critiq's own rule definitions, reported
+// `title: 'Hardcoded credential'` as a hardcoded credential, confidence 1.
+// A real problem's title is not usually written out next to it.
+function echoesCode(
+  title: string,
+  lines: Map<number, string>,
+  lineStart: number,
+  lineEnd: number,
+): boolean {
+  const needle = normalizeText(title);
+  if (needle.length < ECHO_MIN_TITLE_CHARS) {
+    return false;
+  }
+  const window: string[] = [];
+  for (
+    let line = lineStart - ECHO_WINDOW_LINES;
+    line <= lineEnd + ECHO_WINDOW_LINES;
+    line += 1
+  ) {
+    const text = lines.get(line);
+    if (text !== undefined) {
+      window.push(text);
+    }
+  }
+  return ` ${normalizeText(window.join(' '))} `.includes(` ${needle} `);
 }
 
 // Below the confidence bar a finding drops one level rather than
@@ -113,6 +154,10 @@ export function validateAiFindings(
     const message = finding.message.trim();
     if (message.length < MIN_MESSAGE_CHARS) {
       reject('message_too_short');
+      continue;
+    }
+    if (echoesCode(title, sent.lines, finding.line_start, finding.line_end)) {
+      reject('echoes_code');
       continue;
     }
     result.accepted.push({

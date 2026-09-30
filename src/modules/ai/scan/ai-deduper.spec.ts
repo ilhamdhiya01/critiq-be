@@ -1,6 +1,7 @@
 import {
   FindingCategory,
   FindingSeverity,
+  SuppressionReason,
 } from '../../../generated/prisma/enums';
 import { aiFingerprint, dedupeAiFindings } from './ai-deduper';
 import { AiFindingDraft } from './ai-result-validator';
@@ -25,6 +26,7 @@ const STATIC_SECRET = {
   lineStart: 3,
   lineEnd: 3,
   category: FindingCategory.SECRET,
+  suppressedReason: null,
 };
 
 describe('dedupeAiFindings', () => {
@@ -82,5 +84,50 @@ describe('dedupeAiFindings', () => {
     expect(kept).toHaveLength(1);
     expect(kept[0].confidence).toBe(0.8);
     expect(kept[0].fingerprint).toBe(aiFingerprint(kept[0]));
+  });
+  // critiq-be PR #7: the rules had set these lines aside; the AI must not
+  // bring them back as active criticals.
+  it('inherits the reason of a suppressed static finding it overlaps', () => {
+    const { kept, duplicates } = dedupeAiFindings(
+      [ai({ lineStart: 5, lineEnd: 5 })],
+      [{ ...STATIC_SECRET, suppressedReason: SuppressionReason.COMMENT }],
+    );
+    expect(duplicates).toHaveLength(0);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].suppressedReason).toBe(SuppressionReason.COMMENT);
+  });
+
+  it('suppresses by path where a static finding of that family would be', () => {
+    const [secretInSpec] = dedupeAiFindings(
+      [ai({ filePath: 'src/aws.spec.ts' })],
+      [],
+    ).kept;
+    expect(secretInSpec.suppressedReason).toBe(SuppressionReason.TEST_FILE);
+
+    // eval/SQL/shell in a test file stay active, as the rules' do …
+    const [injectionInSpec] = dedupeAiFindings(
+      [ai({ filePath: 'src/db.spec.ts', category: FindingCategory.INJECTION })],
+      [],
+    ).kept;
+    expect(injectionInSpec.suppressedReason).toBeNull();
+
+    // … but fixtures are data for every family.
+    const [injectionInFixture] = dedupeAiFindings(
+      [
+        ai({
+          filePath: 'test/fixtures/query.ts',
+          category: FindingCategory.INJECTION,
+        }),
+      ],
+      [],
+    ).kept;
+    expect(injectionInFixture.suppressedReason).toBe(
+      SuppressionReason.TEST_FILE,
+    );
+  });
+
+  it('leaves an AI finding in ordinary code active', () => {
+    const [finding] = dedupeAiFindings([ai()], []).kept;
+    expect(finding.suppressedReason).toBeNull();
   });
 });

@@ -27,6 +27,35 @@ import {
 import { KeptAiFinding } from './ai-deduper';
 
 export const SUSPICIOUS_LOW_RISK = 'suspicious_low_risk';
+// `risk_capped_from_high` etc.: the model's own level, before capRiskLevel.
+export const RISK_CAPPED_PREFIX = 'risk_capped_from_';
+
+const RISK_ORDER: AiRiskLevel[] = [
+  AiRiskLevel.LOW,
+  AiRiskLevel.MEDIUM,
+  AiRiskLevel.HIGH,
+];
+
+// The model rates the risk from everything it reported — before Critiq
+// rejects echoes and suppresses fixtures/test files. Left as is, a PR with
+// no active finding showed "RISK · HIGH" next to "0 critical" (critiq-be
+// PR #6: gpt-4o-mini rated fixtures). The level may not exceed what the
+// active findings, static and AI, support: HIGH needs a critical, MEDIUM a
+// major or critical, otherwise LOW. A lower rating is kept as given.
+export function capRiskLevel(
+  modelLevel: AiRiskLevel,
+  counts: Pick<ScanCounts, 'criticalCount' | 'majorCount'>,
+): AiRiskLevel {
+  const supported =
+    counts.criticalCount > 0
+      ? AiRiskLevel.HIGH
+      : counts.majorCount > 0
+        ? AiRiskLevel.MEDIUM
+        : AiRiskLevel.LOW;
+  return RISK_ORDER.indexOf(modelLevel) > RISK_ORDER.indexOf(supported)
+    ? supported
+    : modelLevel;
+}
 
 type Reader = Pick<Prisma.TransactionClient, 'finding' | 'scan'>;
 
@@ -102,7 +131,7 @@ function candidateOf(finding: KeptAiFinding): CandidateFinding {
     lineEnd: finding.lineEnd,
     snippet: null,
     fingerprint: finding.fingerprint,
-    suppressedReason: null,
+    suppressedReason: finding.suppressedReason,
     category: finding.category,
     confidence: finding.confidence,
   };
@@ -165,8 +194,9 @@ export interface AiResultToPersist {
 }
 
 // Writes one AI result for a scan, replacing an earlier AI run's output
-// (regenerate): summary, the AI rows that run produced, the scan's AI
-// columns, then counts rebuilt from the rows. AI rows the static step
+// (regenerate): the scan's AI columns, the AI rows that run produced,
+// counts rebuilt from the rows, then the summary with its risk level capped
+// by those counts. AI rows the static step
 // carried forward (INCREMENTAL: PERSISTED/RESOLVED) are not the AI run's to
 // replace. The scan update is conditional on `aiStatusCondition`, so a
 // result nobody is waiting for any more writes nothing. Returns the counts,
@@ -220,17 +250,6 @@ export async function persistAiResult(
           }
         : { scanId: scan.id, source: FindingSource.AI },
   });
-  await tx.aiSummary.deleteMany({ where: { scanId: scan.id } });
-  await tx.aiSummary.create({
-    data: {
-      organizationId: scan.organizationId,
-      scanId: scan.id,
-      pullId: scan.pullId,
-      summaryMd: result.summaryMd,
-      riskLevel: result.riskLevel,
-      filesOmitted: result.filesOmitted,
-    },
-  });
   if (result.rows.length > 0) {
     await tx.finding.createMany({
       data: result.rows.map((row) => ({
@@ -241,7 +260,33 @@ export async function persistAiResult(
       })),
     });
   }
-  return recomputeScanCounts(tx, scan.id);
+  const counts = await recomputeScanCounts(tx, scan.id);
+
+  // Rated against the findings as stored, not as the model reported them.
+  const riskLevel = capRiskLevel(result.riskLevel, counts);
+  if (riskLevel !== result.riskLevel) {
+    await tx.scan.update({
+      where: { id: scan.id },
+      data: {
+        aiFlags: [
+          ...flags,
+          `${RISK_CAPPED_PREFIX}${result.riskLevel.toLowerCase()}`,
+        ],
+      },
+    });
+  }
+  await tx.aiSummary.deleteMany({ where: { scanId: scan.id } });
+  await tx.aiSummary.create({
+    data: {
+      organizationId: scan.organizationId,
+      scanId: scan.id,
+      pullId: scan.pullId,
+      summaryMd: result.summaryMd,
+      riskLevel,
+      filesOmitted: result.filesOmitted,
+    },
+  });
+  return counts;
 }
 
 // AI criticals this run brought (NEW) or brought back (REOPENED).
