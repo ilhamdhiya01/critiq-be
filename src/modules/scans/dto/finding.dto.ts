@@ -51,6 +51,9 @@ export class FindingDto {
   category!: ApiFindingCategory | null;
   // AI findings only.
   confidence!: number | null;
+  // AI findings only, and only when Critiq's calibration changed what the
+  // model reported (confidence downgrade, hedged title): its own severity.
+  meta!: { reportedSeverity: FindingSeverity } | null;
   // Lifecycle across the PR's pushes (v1.5.1 langkah 3).
   status!: ApiFindingStatus;
   firstSeenScanId!: string | null;
@@ -72,12 +75,13 @@ export class FindingDto {
     category?: FindingCategory | null;
     // Prisma Decimal, or a plain number.
     confidence?: { toNumber(): number } | number | null;
+    reportedSeverity?: FindingSeverity | null;
     status?: FindingStatus;
     firstSeenScanId?: string | null;
     originFindingId?: string | null;
     resolvedInScanId?: string | null;
   }) {
-    const { confidence, category, status, ...rest } = partial;
+    const { confidence, category, status, reportedSeverity, ...rest } = partial;
     Object.assign(this, {
       firstSeenScanId: null,
       originFindingId: null,
@@ -86,6 +90,10 @@ export class FindingDto {
       status: toApiFindingStatus(status ?? FindingStatus.NEW),
       suppressedReason: toApiSuppressionReason(partial.suppressedReason),
       category: toApiCategory(category ?? null),
+      meta:
+        reportedSeverity && reportedSeverity !== partial.severity
+          ? { reportedSeverity }
+          : null,
       confidence:
         confidence == null
           ? null

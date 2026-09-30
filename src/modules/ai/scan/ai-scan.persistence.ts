@@ -27,34 +27,20 @@ import {
 import { KeptAiFinding } from './ai-deduper';
 
 export const SUSPICIOUS_LOW_RISK = 'suspicious_low_risk';
-// `risk_capped_from_high` etc.: the model's own level, before capRiskLevel.
-export const RISK_CAPPED_PREFIX = 'risk_capped_from_';
 
-const RISK_ORDER: AiRiskLevel[] = [
-  AiRiskLevel.LOW,
-  AiRiskLevel.MEDIUM,
-  AiRiskLevel.HIGH,
-];
-
-// The model rates the risk from everything it reported — before Critiq
-// rejects echoes and suppresses fixtures/test files. Left as is, a PR with
-// no active finding showed "RISK · HIGH" next to "0 critical" (critiq-be
-// PR #6: gpt-4o-mini rated fixtures). The level may not exceed what the
-// active findings, static and AI, support: HIGH needs a critical, MEDIUM a
-// major or critical, otherwise LOW. A lower rating is kept as given.
-export function capRiskLevel(
-  modelLevel: AiRiskLevel,
+// The risk level shown for a PR, from its active findings (static and AI,
+// not suppressed, not resolved): a critical → HIGH, a major → MEDIUM,
+// otherwise LOW. The model's own risk_level is rated before Critiq drops,
+// downgrades, merges and suppresses its findings — left as is, PR #6
+// critiq-be showed "RISK · HIGH" next to "0 critical". It is kept on the
+// scan (aiReportedRiskLevel), not shown as the PR's risk.
+export function riskLevelFromCounts(
   counts: Pick<ScanCounts, 'criticalCount' | 'majorCount'>,
 ): AiRiskLevel {
-  const supported =
-    counts.criticalCount > 0
-      ? AiRiskLevel.HIGH
-      : counts.majorCount > 0
-        ? AiRiskLevel.MEDIUM
-        : AiRiskLevel.LOW;
-  return RISK_ORDER.indexOf(modelLevel) > RISK_ORDER.indexOf(supported)
-    ? supported
-    : modelLevel;
+  if (counts.criticalCount > 0) {
+    return AiRiskLevel.HIGH;
+  }
+  return counts.majorCount > 0 ? AiRiskLevel.MEDIUM : AiRiskLevel.LOW;
 }
 
 type Reader = Pick<Prisma.TransactionClient, 'finding' | 'scan'>;
@@ -134,6 +120,7 @@ function candidateOf(finding: KeptAiFinding): CandidateFinding {
     suppressedReason: finding.suppressedReason,
     category: finding.category,
     confidence: finding.confidence,
+    reportedSeverity: finding.reportedSeverity,
   };
 }
 
@@ -180,11 +167,14 @@ export function buildAiRows(
 export interface AiResultToPersist {
   status: typeof AiScanStatus.DONE | typeof AiScanStatus.CACHED;
   summaryMd: string;
-  riskLevel: AiRiskLevel;
+  // The model's own risk_level; the summary's is recomputed from counts.
+  reportedRiskLevel: AiRiskLevel;
   filesOmitted: string[];
   rows: FindingRow[];
   total: number;
   rejected: number;
+  // Below the confidence gate: counted, not stored.
+  dropped: number;
   deduped: number;
   provider: string;
   model: string;
@@ -195,8 +185,8 @@ export interface AiResultToPersist {
 
 // Writes one AI result for a scan, replacing an earlier AI run's output
 // (regenerate): the scan's AI columns, the AI rows that run produced,
-// counts rebuilt from the rows, then the summary with its risk level capped
-// by those counts. AI rows the static step
+// counts rebuilt from the rows, then the summary with its risk level
+// computed from those counts. AI rows the static step
 // carried forward (INCREMENTAL: PERSISTED/RESOLVED) are not the AI run's to
 // replace. The scan update is conditional on `aiStatusCondition`, so a
 // result nobody is waiting for any more writes nothing. Returns the counts,
@@ -208,7 +198,7 @@ export async function persistAiResult(
   aiStatusCondition: Prisma.ScanWhereInput,
 ): Promise<ScanCounts | null> {
   const flags =
-    result.riskLevel === AiRiskLevel.LOW &&
+    result.reportedRiskLevel === AiRiskLevel.LOW &&
     result.total === 0 &&
     scan.findingsCount > 0
       ? [SUSPICIOUS_LOW_RISK]
@@ -229,7 +219,9 @@ export async function persistAiResult(
       aiCached: result.status === AiScanStatus.CACHED,
       aiFindingsTotal: result.total,
       aiFindingsRejected: result.rejected,
+      aiFindingsDropped: result.dropped,
       aiFindingsDeduped: result.deduped,
+      aiReportedRiskLevel: result.reportedRiskLevel,
       aiFlags: flags,
     },
   });
@@ -262,19 +254,6 @@ export async function persistAiResult(
   }
   const counts = await recomputeScanCounts(tx, scan.id);
 
-  // Rated against the findings as stored, not as the model reported them.
-  const riskLevel = capRiskLevel(result.riskLevel, counts);
-  if (riskLevel !== result.riskLevel) {
-    await tx.scan.update({
-      where: { id: scan.id },
-      data: {
-        aiFlags: [
-          ...flags,
-          `${RISK_CAPPED_PREFIX}${result.riskLevel.toLowerCase()}`,
-        ],
-      },
-    });
-  }
   await tx.aiSummary.deleteMany({ where: { scanId: scan.id } });
   await tx.aiSummary.create({
     data: {
@@ -282,7 +261,8 @@ export async function persistAiResult(
       scanId: scan.id,
       pullId: scan.pullId,
       summaryMd: result.summaryMd,
-      riskLevel,
+      // Rated against the findings as stored, not as the model reported them.
+      riskLevel: riskLevelFromCounts(counts),
       filesOmitted: result.filesOmitted,
     },
   });

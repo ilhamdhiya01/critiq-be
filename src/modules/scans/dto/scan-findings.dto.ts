@@ -21,6 +21,9 @@ export class ScanFindingsDto {
     reopened: number;
     resolved: number;
   };
+  // AI findings not stored because the model was not confident enough
+  // (below 0.5) — "N skipped (low confidence)", next to the suppressed ones.
+  aiDroppedLowConfidence!: number;
   // Scan totals, before the storage caps — not the length of `items`.
   criticalCount!: number;
   suppressedCount!: number;
