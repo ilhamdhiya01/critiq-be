@@ -14,6 +14,17 @@ const SENT = new Map<string, SentFile>([
         ...Array.from({ length: 11 }, (_, i) => 10 + i),
         ...Array.from({ length: 21 }, (_, i) => 100 + i),
       ]),
+      lines: new Map([
+        [110, '  await refreshSession(token);'],
+        // A rule definition: describes a problem, is not one.
+        [114, 'export const secretAssignmentLiteralRule: Rule = {'],
+        [115, "  title: 'Hardcoded credential',"],
+        [116, '  message:'],
+        [
+          117,
+          "    'This assigns what looks like a real credential as a literal value.',",
+        ],
+      ]),
     },
   ],
 ]);
@@ -96,5 +107,47 @@ describe('validateAiFindings', () => {
       SENT,
     );
     expect(accepted[0].severity).toBe(expected);
+  });
+  // gpt-4o-mini on critiq-be PR #7: rule definitions reported as secrets.
+  it('rejects a finding whose title is copied from the code it points at', () => {
+    const { accepted, rejected } = validateAiFindings(
+      [
+        finding({
+          line_start: 117,
+          line_end: 117,
+          category: 'secret',
+          title: 'Hardcoded credential',
+          message:
+            'A credential that looks real is assigned as a literal value.',
+        }),
+      ],
+      SENT,
+    );
+    expect(accepted).toHaveLength(0);
+    expect(rejected).toEqual([
+      { file: 'src/session.ts', reason: 'echoes_code' },
+    ]);
+  });
+
+  it('keeps a finding whose title only shares words with the code', () => {
+    const { accepted } = validateAiFindings(
+      [
+        finding({
+          line_start: 110,
+          line_end: 110,
+          title: 'Session refresh rejection is never handled',
+        }),
+      ],
+      SENT,
+    );
+    expect(accepted).toHaveLength(1);
+  });
+
+  it('does not treat a short title as an echo', () => {
+    const { accepted } = validateAiFindings(
+      [finding({ line_start: 115, line_end: 115, title: 'Hardcoded' })],
+      SENT,
+    );
+    expect(accepted).toHaveLength(1);
   });
 });
