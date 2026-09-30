@@ -58,8 +58,6 @@ export interface GitlabMergeRequestDiff {
 
 const MAINTAINER_ACCESS_LEVEL = 40;
 const REQUEST_TIMEOUT_MS = 8000;
-const BRANCH_PAGE_SIZE = 100;
-const BRANCH_HARD_CAP = 500;
 const MR_DIFFS_PAGE_SIZE = 100;
 const MR_DIFFS_HARD_CAP = 500;
 
@@ -145,53 +143,69 @@ export class GitlabApiService {
     }
   }
 
-  // Paginates per_page=100 until a short page is returned, same shape as
-  // GithubAppService.listInstallationRepositories — hard-capped at 500
-  // total branches (PRD v1.4.2 §12.4) rather than fetching indefinitely.
+  // One page of branches, most recently updated first — a repo with
+  // hundreds of issue branches listed by name showed the user 500 stale
+  // ones and none of the active. `search` is GitLab's own filter across
+  // every branch of the project (substring; `^term` / `term$` anchor).
+  // Asks for one more than `limit` to know whether there are more without
+  // relying on pagination headers.
   async fetchBranches(
     instanceUrl: string,
     token: string,
     projectId: string,
+    options: { limit: number; search?: string },
   ): Promise<{ branches: GitlabBranch[]; truncated: boolean }> {
-    const branches: GitlabBranch[] = [];
-    let page = 1;
-    let truncated = false;
-
-    while (true) {
-      let response: { data: GitlabBranch[] };
-      try {
-        response = await firstValueFrom(
-          this.http.get<GitlabBranch[]>(
-            `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/repository/branches`,
-            {
-              headers: { 'Private-Token': token },
-              timeout: REQUEST_TIMEOUT_MS,
-              params: { per_page: BRANCH_PAGE_SIZE, page },
+    try {
+      const response = await firstValueFrom(
+        this.http.get<GitlabBranch[]>(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/repository/branches`,
+          {
+            headers: { 'Private-Token': token },
+            timeout: REQUEST_TIMEOUT_MS,
+            params: {
+              per_page: options.limit + 1,
+              sort: 'updated_desc',
+              ...(options.search && { search: options.search }),
             },
-          ),
-        );
-      } catch (error) {
-        throw this.mapGitlabRequestError(error);
-      }
-
-      branches.push(...response.data);
-
-      if (branches.length >= BRANCH_HARD_CAP) {
-        truncated = true;
-        break;
-      }
-      if (response.data.length < BRANCH_PAGE_SIZE) {
-        break;
-      }
-      page += 1;
+          },
+        ),
+      );
+      return {
+        branches: response.data.slice(0, options.limit),
+        truncated: response.data.length > options.limit,
+      };
+    } catch (error) {
+      throw this.mapGitlabRequestError(error);
     }
+  }
 
-    return { branches: branches.slice(0, BRANCH_HARD_CAP), truncated };
+  // Whether one branch exists — for validating a user's choice without
+  // listing branches (a picked branch may be far outside any listed page).
+  async branchExists(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    branch: string,
+  ): Promise<boolean> {
+    try {
+      await firstValueFrom(
+        this.http.get(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/repository/branches/${encodeURIComponent(branch)}`,
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+      return true;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return false;
+      }
+      throw this.mapGitlabRequestError(error);
+    }
   }
 
   // Uses the current `/diffs` endpoint (paginated), not the deprecated
-  // `/changes` endpoint (unpaginated, flagged for removal by GitLab) — same
-  // pagination/hard-cap shape as fetchBranches. `diff` comes back as an
+  // `/changes` endpoint (unpaginated, flagged for removal by GitLab) —
+  // paginated per_page=100 until a short page, hard-capped. `diff` comes back as an
   // empty string for binary files or when `too_large` is set; PullsService
   // is responsible for turning that into an explicit truncated flag.
   async fetchMergeRequestDiffs(

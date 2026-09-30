@@ -1,4 +1,11 @@
-import { BadRequestException, Controller, Get, Param } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  Param,
+  Query,
+} from '@nestjs/common';
+import { BranchListQueryDto } from './dto/branch-list-query.dto';
 import { ReposService } from './repos.service';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
@@ -22,12 +29,14 @@ export class IntegrationRepoBranchesController {
     @Param('orgId') orgId: string,
     @Param('source') source: string,
     @Param('providerRepoId') providerRepoId: string,
+    @Query() query: BranchListQueryDto,
   ) {
     const provider = this.parseSource(source);
     return this.reposService.getBranchesForCandidate(
       orgId,
       provider,
       providerRepoId,
+      query.search,
     );
   }
 

@@ -12,6 +12,7 @@ import {
 import type { Request, Response } from 'express';
 import { ReposService } from './repos.service';
 import { UpdateScanConfigDto } from './dto/update-scan-config.dto';
+import { BranchListQueryDto } from './dto/branch-list-query.dto';
 import { CreateReposDto } from './dto/create-repos.dto';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
@@ -44,11 +45,17 @@ export class ReposController {
     return this.reposService.getDetail(orgId, id);
   }
 
+  // Most recently updated first (GitLab), 50 at most — `?search=` reaches
+  // the rest.
   @Get(':id/branches')
   @OrgAuth([])
   @ResponseMessage('Repository branches retrieved successfully')
-  getBranches(@Param('orgId') orgId: string, @Param('id') id: string) {
-    return this.reposService.getBranchesForRepo(orgId, id);
+  getBranches(
+    @Param('orgId') orgId: string,
+    @Param('id') id: string,
+    @Query() query: BranchListQueryDto,
+  ) {
+    return this.reposService.getBranchesForRepo(orgId, id, query.search);
   }
 
   @Get(':id/scan-config')
