@@ -16,7 +16,12 @@ export class ScanFailure extends UnrecoverableError {
   }
 }
 
-export type ProviderErrorKind = 'credential' | 'retryable' | 'unknown';
+// credential: the org's token/installation was refused — fixed by an Admin.
+// retryable: the provider may answer next time (5xx, timeout, network).
+// rejected: the provider refused this request as malformed — retrying
+// sends the same request, so it fails at once.
+export type ProviderErrorKind =
+  'credential' | 'retryable' | 'rejected' | 'unknown';
 
 // GithubAppService/GitlabApiService/PullsService.getDiff never surface raw
 // HTTP statuses — they map everything to Nest HttpExceptions whose
@@ -43,9 +48,25 @@ export function classifyProviderError(error: unknown): ProviderErrorKind {
     case 'github_unreachable':
     case 'instance_unreachable':
       return 'retryable';
+    case 'provider_bad_request':
+      return 'rejected';
     default:
       return 'unknown';
   }
+}
+
+// The provider's reason carried on a `rejected` error, if any.
+export function providerErrorDetail(error: unknown): string | null {
+  if (!(error instanceof HttpException)) {
+    return null;
+  }
+  const response = error.getResponse();
+  return typeof response === 'object' &&
+    response !== null &&
+    'detail' in response &&
+    typeof response.detail === 'string'
+    ? response.detail
+    : null;
 }
 
 const TOKEN_SHAPED_PATTERN =

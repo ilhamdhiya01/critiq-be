@@ -1,3 +1,4 @@
+import { UnprocessableEntityException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import Redis from 'ioredis';
@@ -11,10 +12,12 @@ import {
   FindingSource,
   FindingStatus,
   FullReason,
+  ScanErrorCode,
 } from '../generated/prisma/enums';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { StoredFinding } from './lifecycle/plan-findings';
+import { ScanFailure } from './scan-errors';
 import { ScanJobPayload } from './scan-payload.dto';
 import { ScanProcessor } from './scan.processor';
 
@@ -399,5 +402,43 @@ describe('ScanProcessor — lifecycle (v1.5.1 langkah 3)', () => {
     expect(written.length).toBeGreaterThan(0);
     expect(written.every((r) => r.status === FindingStatus.NEW)).toBe(true);
     expect(written.every((r) => r.firstSeenScanId === 'scan_2')).toBe(true);
+  });
+});
+
+describe('ScanProcessor — provider errors', () => {
+  // MR !1780: GitLab answered merge_base with 400 "Provide at least 2 refs";
+  // it was retried and recorded as PROVIDER_UNREACHABLE.
+  it('fails a request the provider rejected at once, with its reason', async () => {
+    const { processor, pullsService } = setup({
+      compare: { files: [], ancestor: true },
+    });
+    pullsService.getCompareDiff.mockRejectedValue(
+      new UnprocessableEntityException({
+        field: 'request',
+        message: 'provider_bad_request',
+        detail: '"Provide at least 2 refs"',
+      }),
+    );
+
+    const error = await processor.process(job).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ScanFailure);
+    expect(error).toMatchObject({
+      code: ScanErrorCode.PROVIDER_REJECTED,
+      message: 'The code host rejected the request: "Provide at least 2 refs".',
+    });
+  });
+
+  it('hands an unreachable provider back to BullMQ for a retry', async () => {
+    const { processor, pullsService } = setup({
+      compare: { files: [], ancestor: true },
+    });
+    const unreachable = new UnprocessableEntityException({
+      field: 'instance_url',
+      message: 'instance_unreachable',
+    });
+    pullsService.getCompareDiff.mockRejectedValue(unreachable);
+
+    await expect(processor.process(job)).rejects.toBe(unreachable);
   });
 });
