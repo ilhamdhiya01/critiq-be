@@ -319,6 +319,8 @@ enum ScanTrigger {
 
 enum ScanErrorCode {
   PROVIDER_UNREACHABLE
+  // The provider refused the request as malformed (HTTP 400) — not retried.
+  PROVIDER_REJECTED
   DIFF_TOO_LARGE
   TIMEOUT
   RULE_CRASH

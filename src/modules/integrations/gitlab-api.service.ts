@@ -277,8 +277,12 @@ export class GitlabApiService {
           this.http.get<{ id: string }>(`${base}/merge_base`, {
             headers: { 'Private-Token': token },
             timeout: REQUEST_TIMEOUT_MS,
-            params: { 'refs[]': [from, to] },
-            paramsSerializer: { indexes: null },
+            // GitLab wants `refs[]=A&refs[]=B`. axios drops a `[]` suffix
+            // from the key itself, so `{ 'refs[]': … }` went out as
+            // `refs=A&refs=B` — a 400 "Provide at least 2 refs" that failed
+            // every incremental GitLab scan. `indexes: false` adds the `[]`.
+            params: { refs: [from, to] },
+            paramsSerializer: { indexes: false },
           }),
         ),
       ]);
@@ -396,6 +400,24 @@ export class GitlabApiService {
         throw new UnprocessableEntityException({
           field: 'token',
           message: 'token_invalid',
+        });
+      }
+      // GitLab understood the request and refused it — retrying cannot
+      // help, and "unreachable" would send whoever reads the error looking
+      // at the network. (404 stays instance_unreachable below: a wrong
+      // instance URL at connect time answers 404.)
+      if (error.response?.status === 400) {
+        const data = error.response.data as
+          { message?: unknown; error?: unknown } | undefined;
+        throw new UnprocessableEntityException({
+          field: 'request',
+          message: 'provider_bad_request',
+          // GitLab's own reason ("Provide at least 2 refs") — what makes
+          // the failure diagnosable. Short, never echoes the token.
+          detail: JSON.stringify(data?.message ?? data?.error ?? '').slice(
+            0,
+            200,
+          ),
         });
       }
       throw new UnprocessableEntityException({
