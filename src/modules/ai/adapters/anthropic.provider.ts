@@ -64,6 +64,7 @@ export class AnthropicProvider implements AiProvider {
         },
         model: response.model,
         structuredOutput: 'native',
+        raw: response.content,
       };
     } catch (error) {
       throw toAiError(error);

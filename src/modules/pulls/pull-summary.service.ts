@@ -1,3 +1,4 @@
+import { PARTIAL_RESPONSE } from '../ai/scan/ai-scan.persistence';
 import {
   ConflictException,
   HttpException,
@@ -53,6 +54,7 @@ export class PullSummaryService {
         summaryMd: null,
         riskLevel: null,
         reportedRiskLevel: null,
+        partial: false,
         provider: null,
         model: null,
         generatedAt: null,
@@ -78,6 +80,7 @@ export class PullSummaryService {
           ? (scan.aiReportedRiskLevel.toLowerCase() as
               'low' | 'medium' | 'high')
           : null,
+      partial: scan.aiFlags.includes(PARTIAL_RESPONSE),
       provider: scan.aiProvider,
       model: scan.aiModel,
       generatedAt: summary?.createdAt ?? null,

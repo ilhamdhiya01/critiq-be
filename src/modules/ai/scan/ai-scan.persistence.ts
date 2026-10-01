@@ -27,6 +27,9 @@ import {
 import { KeptAiFinding } from './ai-deduper';
 
 export const SUSPICIOUS_LOW_RISK = 'suspicious_low_risk';
+// The model left summary or findings out even after the retry: the review
+// was kept with that field empty (report-review-repair.ts).
+export const PARTIAL_RESPONSE = 'partial_response';
 
 // The risk level shown for a PR, from its active findings (static and AI,
 // not suppressed, not resolved): a critical → HIGH, a major → MEDIUM,
@@ -167,8 +170,9 @@ export function buildAiRows(
 export interface AiResultToPersist {
   status: typeof AiScanStatus.DONE | typeof AiScanStatus.CACHED;
   summaryMd: string;
-  // The model's own risk_level; the summary's is recomputed from counts.
-  reportedRiskLevel: AiRiskLevel;
+  // The model's own risk_level (null when it left it out); the summary's
+  // is recomputed from counts.
+  reportedRiskLevel: AiRiskLevel | null;
   filesOmitted: string[];
   rows: FindingRow[];
   total: number;
@@ -181,6 +185,8 @@ export interface AiResultToPersist {
   promptVersion: string;
   tokensIn: number | null;
   tokensOut: number | null;
+  // Extra aiFlags for this result (e.g. PARTIAL_RESPONSE).
+  flags?: string[];
 }
 
 // Writes one AI result for a scan, replacing an earlier AI run's output
@@ -197,12 +203,14 @@ export async function persistAiResult(
   result: AiResultToPersist,
   aiStatusCondition: Prisma.ScanWhereInput,
 ): Promise<ScanCounts | null> {
-  const flags =
-    result.reportedRiskLevel === AiRiskLevel.LOW &&
+  const flags = [
+    ...(result.reportedRiskLevel === AiRiskLevel.LOW &&
     result.total === 0 &&
     scan.findingsCount > 0
       ? [SUSPICIOUS_LOW_RISK]
-      : [];
+      : []),
+    ...(result.flags ?? []),
+  ];
 
   const claimed = await tx.scan.updateMany({
     where: { id: scan.id, ...aiStatusCondition },

@@ -67,7 +67,9 @@ export const REPORT_REVIEW_SCHEMA: JsonSchema = {
 
 export interface ReportReviewInput {
   summary: string;
-  risk_level: 'low' | 'medium' | 'high';
+  // Required of the model, but not of an answer Critiq accepts: the PR's
+  // risk is computed from its findings (see report-review-repair.ts).
+  risk_level?: 'low' | 'medium' | 'high';
   findings: {
     file: string;
     line_start: number;
