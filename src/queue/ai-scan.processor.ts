@@ -28,14 +28,20 @@ import {
 import {
   AI_PROMPT_VERSION,
   ReportReviewInput,
-  RETRY_SYSTEM_SUFFIX,
 } from '../modules/ai/scan/ai-prompt.constants';
 import { validateAiFindings } from '../modules/ai/scan/ai-result-validator';
 import { clampReportReview } from '../modules/ai/scan/report-review-clamp';
 import {
+  missingReviewFields,
+  REPORT_REVIEW_VALIDATION_SCHEMA,
+  retrySuffixFor,
+  salvageReview,
+} from '../modules/ai/scan/report-review-repair';
+import {
   buildAiRows,
   freshCriticalCount,
   loadAiLifecycleContext,
+  PARTIAL_RESPONSE,
   persistAiResult,
 } from '../modules/ai/scan/ai-scan.persistence';
 import { logWindowMisses } from './lifecycle/lifecycle-context';
@@ -253,18 +259,34 @@ export class AiScanProcessor
     // with an extra instruction; transport errors go back to BullMQ.
     // Overlong text is trimmed before the schema check rather than failing
     // the whole review.
+    // A field the model left out: risk_level is accepted as absent; for
+    // summary/findings the retry names them; if the retry still omits one,
+    // the review is kept with it empty and flagged partial_response.
     let completion: AiResult;
     let clamped: string[] = [];
+    let defaulted: string[] = [];
     try {
       completion = await completeValidated(provider, prompt.request, {
-        retryRequest: (request) => ({
+        validationSchema: REPORT_REVIEW_VALIDATION_SCHEMA,
+        retryRequest: (request, failed) => ({
           ...request,
-          system: request.system + RETRY_SYSTEM_SUFFIX,
+          system:
+            request.system +
+            retrySuffixFor(
+              missingReviewFields(
+                (failed.raw as { toolInput?: unknown } | null)?.toolInput,
+              ),
+            ),
         }),
         normalize: (toolInput) => {
           const result = clampReportReview(toolInput);
           clamped = result.clamped;
           return result.value;
+        },
+        salvage: (attempts) => {
+          const salvaged = salvageReview(attempts);
+          defaulted = salvaged?.defaulted ?? [];
+          return salvaged?.value ?? null;
         },
       });
     } catch (error) {
@@ -284,6 +306,10 @@ export class AiScanProcessor
 
     if (clamped.length > 0) {
       this.logger.info('ai.output_clamped', { ...log, fields: clamped });
+    }
+    const partial = defaulted.length > 0;
+    if (partial) {
+      this.logger.warn('ai.partial_response', { ...log, fields: defaulted });
     }
 
     // 5. Validate against what was sent, dedupe against static, persist.
@@ -317,7 +343,9 @@ export class AiScanProcessor
         {
           status: AiScanStatus.DONE,
           summaryMd: review.summary,
-          reportedRiskLevel: review.risk_level.toUpperCase() as AiRiskLevel,
+          reportedRiskLevel: review.risk_level
+            ? (review.risk_level.toUpperCase() as AiRiskLevel)
+            : null,
           filesOmitted: prompt.filesOmitted,
           rows,
           total: review.findings.length,
@@ -329,6 +357,7 @@ export class AiScanProcessor
           promptVersion: AI_PROMPT_VERSION,
           tokensIn: completion.usage.inputTokens,
           tokensOut: completion.usage.outputTokens,
+          flags: partial ? [PARTIAL_RESPONSE] : [],
         },
         { aiStatus: AiScanStatus.RUNNING },
       ),
@@ -340,23 +369,26 @@ export class AiScanProcessor
       return;
     }
 
-    // 6. Cache, notification, audit.
-    try {
-      await this.aiScanService.rememberInCache(
-        {
-          repositoryId: scan.repositoryId,
-          headSha: scan.headSha,
-          rulesetVersion: scan.rulesetVersion,
-          promptVersion: AI_PROMPT_VERSION,
-          provider: aiProvider,
-          model: scan.aiModel ?? aiModel,
-          diffMode: scan.diffMode,
-          prevHeadSha: scan.prevHeadSha,
-        },
-        scanId,
-      );
-    } catch {
-      this.logger.warn('ai.cache_write_failed', log);
+    // 6. Cache, notification, audit. A partial review is not cached: the
+    // next scan of the same diff asks the model again.
+    if (!partial) {
+      try {
+        await this.aiScanService.rememberInCache(
+          {
+            repositoryId: scan.repositoryId,
+            headSha: scan.headSha,
+            rulesetVersion: scan.rulesetVersion,
+            promptVersion: AI_PROMPT_VERSION,
+            provider: aiProvider,
+            model: scan.aiModel ?? aiModel,
+            diffMode: scan.diffMode,
+            prevHeadSha: scan.prevHeadSha,
+          },
+          scanId,
+        );
+      } catch {
+        this.logger.warn('ai.cache_write_failed', log);
+      }
     }
 
     await logWindowMisses(

@@ -61,6 +61,10 @@ describe('AnthropicProvider', () => {
       usage: { inputTokens: 410, outputTokens: 62 },
       model: 'claude-sonnet-5',
       structuredOutput: 'native',
+      // Every content block, for the encrypted raw response on failure.
+      raw: [
+        { type: 'tool_use', name: 'report_review_test', input: TOOL_INPUT },
+      ],
     });
     const [params] = mockAnthropicCreate.mock.calls[0] as [
       Record<string, unknown>,
@@ -160,6 +164,8 @@ describe('OpenAiProvider', () => {
 
     expect(result.toolInput).toEqual(TOOL_INPUT);
     expect(result.structuredOutput).toBe('native');
+    // The whole message (every tool call, any text) travels as `raw`.
+    expect(result.raw).toMatchObject({ tool_calls: [expect.anything()] });
     const [params] = mockChatCreate.mock.calls[0] as [
       {
         tools: {
