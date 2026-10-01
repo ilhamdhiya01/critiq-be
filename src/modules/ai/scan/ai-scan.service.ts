@@ -62,8 +62,9 @@ export interface AiCacheKeyParts {
 // Bump when what happens to a model's answer after the call changes —
 // validation above all: a cache hit copies the stored findings without
 // validating them again, so answers kept under older rules must not be
-// reused. (2: echoes_code, AI findings follow static suppression.)
-export const AI_POSTPROCESS_VERSION = 'post-2';
+// reused. (2: echoes_code, AI findings follow static suppression.
+// 3: severity calibration, confidence gate, near-duplicate merge.)
+export const AI_POSTPROCESS_VERSION = 'post-3';
 
 export function aiCacheKey(parts: AiCacheKeyParts): string {
   const digest = createHash('sha256')
@@ -464,8 +465,12 @@ export class AiScanService {
       title: finding.title,
       message: finding.message,
       confidence: Number(finding.confidence ?? 0),
+      reportedSeverity: finding.reportedSeverity ?? finding.severity,
     }));
-    const { kept, duplicates } = dedupeAiFindings(drafts, staticFindings);
+    const { kept, merged, duplicates } = dedupeAiFindings(
+      drafts,
+      staticFindings,
+    );
     const context = await loadAiLifecycleContext(this.prisma, scan);
     const { rows } = buildAiRows(
       scan,
@@ -482,12 +487,14 @@ export class AiScanService {
         {
           status: AiScanStatus.CACHED,
           summaryMd: source.aiSummary!.summaryMd,
-          riskLevel: source.aiSummary!.riskLevel,
+          reportedRiskLevel:
+            source.aiReportedRiskLevel ?? source.aiSummary!.riskLevel,
           filesOmitted: source.aiSummary!.filesOmitted,
           rows,
           total: drafts.length,
           rejected: 0,
-          deduped: duplicates.length,
+          dropped: source.aiFindingsDropped,
+          deduped: merged + duplicates.length,
           provider: source.aiProvider ?? '',
           model: source.aiModel ?? '',
           promptVersion: source.aiPromptVersion ?? AI_PROMPT_VERSION,

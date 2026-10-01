@@ -13,7 +13,13 @@ export class PullSummaryDto {
   scanId!: string | null;
   aiStatus!: ApiAiStatus | null;
   summaryMd!: string | null;
+  // Computed from the PR's active findings (static and AI).
   riskLevel!: 'low' | 'medium' | 'high' | null;
+  // The model's own rating, before Critiq filtered its findings.
+  reportedRiskLevel!: 'low' | 'medium' | 'high' | null;
+  // The model left the summary or the findings out even after a retry;
+  // the review was kept with that part empty.
+  partial!: boolean;
   provider!: string | null;
   model!: string | null;
   generatedAt!: Date | null;

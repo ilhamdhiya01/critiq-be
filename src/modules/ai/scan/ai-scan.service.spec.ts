@@ -231,6 +231,8 @@ describe('AiScanService.maybeEnqueue', () => {
                 aiProvider: 'anthropic',
                 aiModel: 'claude-sonnet-5',
                 aiPromptVersion: 'ai-2026.09.2',
+                aiFindingsDropped: 2,
+                aiReportedRiskLevel: AiRiskLevel.HIGH,
                 aiSummary: {
                   summaryMd: 'Adds refresh.',
                   riskLevel: AiRiskLevel.MEDIUM,
@@ -242,7 +244,8 @@ describe('AiScanService.maybeEnqueue', () => {
                     lineStart: 110,
                     lineEnd: 110,
                     category: FindingCategory.ERROR_HANDLING,
-                    severity: FindingSeverity.CRITICAL,
+                    severity: FindingSeverity.MAJOR,
+                    reportedSeverity: FindingSeverity.CRITICAL,
                     title: 'Unhandled rejection',
                     message: 'The promise rejection is never handled here.',
                     confidence: 0.9,
@@ -261,15 +264,23 @@ describe('AiScanService.maybeEnqueue', () => {
     const [update] = tx.scan.updateMany.mock.calls[0] as [
       { data: Record<string, unknown> },
     ];
+    // The model's own values travel with the cached result.
     expect(update.data).toMatchObject({
       aiStatus: AiScanStatus.CACHED,
       aiCached: true,
+      aiFindingsDropped: 2,
+      aiReportedRiskLevel: AiRiskLevel.HIGH,
     });
     const [created] = tx.finding.createMany.mock.calls[0] as [
       { data: Record<string, unknown>[] },
     ];
     expect(created.data).toEqual([
-      expect.objectContaining({ source: 'AI', status: 'NEW' }),
+      expect.objectContaining({
+        source: 'AI',
+        status: 'NEW',
+        severity: FindingSeverity.MAJOR,
+        reportedSeverity: FindingSeverity.CRITICAL,
+      }),
     ]);
     // Counts are rebuilt from the rows.
     expect(tx.finding.groupBy).toHaveBeenCalled();

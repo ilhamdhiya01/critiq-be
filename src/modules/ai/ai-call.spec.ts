@@ -75,4 +75,102 @@ describe('completeValidated', () => {
     ).rejects.toMatchObject({ code: 'auth_failed' });
     expect(complete).toHaveBeenCalledTimes(1);
   });
+  // claude-sonnet-5 via an OpenAI-compatible gateway leaves out a required
+  // field in about one answer in five.
+  describe('with a caller that can repair answers', () => {
+    const LOOSE = {
+      type: 'object',
+      required: ['summary'],
+      properties: {
+        summary: { type: 'string' },
+        findings: { type: 'array' },
+      },
+      additionalProperties: false,
+    };
+
+    it('validates against validationSchema instead of the sent schema', async () => {
+      const complete = jest
+        .fn()
+        .mockResolvedValue({ ...VALID, toolInput: { summary: 'ok' } });
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST, {
+          validationSchema: LOOSE,
+        }),
+      ).resolves.toMatchObject({ toolInput: { summary: 'ok' } });
+      expect(complete).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands the first failure to retryRequest', async () => {
+      const complete = jest
+        .fn()
+        .mockResolvedValueOnce({
+          ...VALID,
+          toolInput: { findings: [] },
+          raw: { m: 1 },
+        })
+        .mockResolvedValueOnce(VALID);
+      const retryRequest = jest.fn((request: typeof TEST_REQUEST) => request);
+
+      await completeValidated(provider(complete), TEST_REQUEST, {
+        retryRequest,
+      });
+
+      const [, failed] = retryRequest.mock.calls[0] as unknown as [
+        unknown,
+        AiError,
+      ];
+      expect(failed.code).toBe('invalid_response');
+      expect(failed.raw).toEqual({
+        toolInput: { findings: [] },
+        message: { m: 1 },
+      });
+    });
+
+    it('salvages from every attempt once the last one is invalid', async () => {
+      const complete = jest
+        .fn()
+        .mockResolvedValueOnce({ ...VALID, toolInput: { summary: 'first' } })
+        .mockResolvedValueOnce({ ...VALID, toolInput: { findings: [] } });
+      const salvage = jest.fn((attempts: unknown[]) => ({
+        summary: (attempts[0] as { summary: string }).summary,
+        findings: [],
+      }));
+
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST, { salvage }),
+      ).resolves.toMatchObject({
+        toolInput: { summary: 'first', findings: [] },
+      });
+      expect(salvage).toHaveBeenCalledWith([
+        { summary: 'first' },
+        { findings: [] },
+      ]);
+    });
+
+    it('stays invalid when the salvage fails the schema or gives up', async () => {
+      const complete = jest
+        .fn()
+        .mockResolvedValue({ ...VALID, toolInput: { nonsense: true } });
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST, {
+          salvage: () => ({ nonsense: true }),
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_response' });
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST, {
+          salvage: () => null,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_response' });
+    });
+
+    it('does not salvage before the retry', async () => {
+      const complete = jest
+        .fn()
+        .mockResolvedValueOnce({ ...VALID, toolInput: { findings: [] } })
+        .mockResolvedValueOnce(VALID);
+      const salvage = jest.fn();
+      await completeValidated(provider(complete), TEST_REQUEST, { salvage });
+      expect(salvage).not.toHaveBeenCalled();
+    });
+  });
 });

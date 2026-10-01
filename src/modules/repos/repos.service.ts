@@ -21,10 +21,7 @@ import {
 } from '../../generated/prisma/enums';
 import { ScanQueueService } from '../../queue/scan-queue.service';
 import { RULESET_VERSION } from '../../queue/rules/rules.constants';
-import {
-  GithubAppService,
-  type GithubBranch,
-} from '../integrations/github-app.service';
+import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { BranchListResponseDto } from './dto/branch-list-response.dto';
 import { RepoScanConfigResponseDto } from './dto/repo-scan-config-response.dto';
@@ -55,6 +52,25 @@ const DEFAULT_POLICY_MAP: Record<DefaultPolicyWireValue, ReviewPolicy> = {
 // outright rather than silently treated as a literal string.
 const INVALID_BRANCH_NAME_PATTERN = /[\s*?[\]]/;
 
+// Branches per list response (picker, wizard step 2). Small on purpose:
+// the unfiltered list is a starting point — the most recently updated on
+// GitLab — and anything else is reached with `?search=`.
+const BRANCH_LIST_LIMIT = 50;
+
+interface ProviderIntegration {
+  source: Provider;
+  installationId: string | null;
+  instanceUrl: string | null;
+  encryptedToken: string | null;
+}
+
+interface CheckedProviderRepo {
+  path: string;
+  defaultBranch: string;
+  // Of the branches asked about, those the provider does not have.
+  missingBranches: string[];
+}
+
 interface ProviderBranches {
   path: string;
   defaultBranch: string;
@@ -79,6 +95,7 @@ export class ReposService {
     organizationId: string,
     source: Provider,
     providerRepoId: string,
+    search?: string,
   ): Promise<BranchListResponseDto> {
     const integration = await this.findIntegrationOrThrow(
       organizationId,
@@ -87,6 +104,7 @@ export class ReposService {
     const result = await this.fetchProviderBranches(
       integration,
       providerRepoId,
+      { search },
     );
     return new BranchListResponseDto({
       defaultBranch: result.defaultBranch,
@@ -100,6 +118,7 @@ export class ReposService {
   async getBranchesForRepo(
     organizationId: string,
     repositoryId: string,
+    search?: string,
   ): Promise<BranchListResponseDto> {
     const repository = await this.prisma.repository.findUnique({
       where: { id: repositoryId },
@@ -116,7 +135,7 @@ export class ReposService {
     const result = await this.fetchProviderBranches(
       repository.integration,
       repository.externalId,
-      repository.path,
+      { knownPath: repository.path, search },
     );
     return new BranchListResponseDto({
       defaultBranch: result.defaultBranch,
@@ -219,11 +238,12 @@ export class ReposService {
 
     for (const project of dto.projects) {
       const providerRepoId = String(project.id);
-      let providerBranches: ProviderBranches;
+      let providerRepo: CheckedProviderRepo;
       try {
-        providerBranches = await this.fetchProviderBranches(
+        providerRepo = await this.checkProviderRepo(
           integration,
           providerRepoId,
+          project.monitoredBranches ?? [],
         );
       } catch {
         items.push({
@@ -235,10 +255,10 @@ export class ReposService {
       }
 
       const requested = project.monitoredBranches ?? [
-        providerBranches.defaultBranch,
+        providerRepo.defaultBranch,
       ];
-      const unknown = requested.find(
-        (branch) => !providerBranches.branches.includes(branch),
+      const unknown = requested.find((branch) =>
+        providerRepo.missingBranches.includes(branch),
       );
       if (unknown) {
         items.push({
@@ -250,13 +270,11 @@ export class ReposService {
         continue;
       }
 
-      const monitoredBranches = requested.includes(
-        providerBranches.defaultBranch,
-      )
+      const monitoredBranches = requested.includes(providerRepo.defaultBranch)
         ? requested
-        : [providerBranches.defaultBranch, ...requested];
+        : [providerRepo.defaultBranch, ...requested];
 
-      const path = providerBranches.path;
+      const path = providerRepo.path;
 
       try {
         const created = await this.prisma.$transaction(async (tx) => {
@@ -267,7 +285,7 @@ export class ReposService {
               provider: integration.source,
               externalId: providerRepoId,
               path,
-              defaultBranch: providerBranches.defaultBranch,
+              defaultBranch: providerRepo.defaultBranch,
             },
           });
           await tx.organization.update({
@@ -278,7 +296,7 @@ export class ReposService {
             data: {
               organizationId,
               repositoryId: repository.id,
-              defaultBranch: providerBranches.defaultBranch,
+              defaultBranch: providerRepo.defaultBranch,
               branches: monitoredBranches,
             },
           });
@@ -300,7 +318,7 @@ export class ReposService {
           status: 'ok',
           repoId: created.id,
           path,
-          defaultBranch: providerBranches.defaultBranch,
+          defaultBranch: providerRepo.defaultBranch,
           monitoredBranches,
           webhook,
         });
@@ -567,84 +585,154 @@ export class ReposService {
   }
 
   private async fetchProviderBranches(
-    integration: {
-      source: Provider;
-      installationId: string | null;
-      instanceUrl: string | null;
-      encryptedToken: string | null;
-    },
+    integration: ProviderIntegration,
     providerRepoId: string,
-    knownPath?: string,
+    options: { knownPath?: string; search?: string } = {},
   ): Promise<ProviderBranches> {
+    const listOptions = { limit: BRANCH_LIST_LIMIT, search: options.search };
     if (integration.source === Provider.GITHUB) {
-      if (!integration.installationId) {
-        throw new Error(
-          'Integration row with source GITHUB is missing installationId — data invariant violated.',
-        );
-      }
+      const installationId = this.githubInstallationId(integration);
       const [owner, repo] = await this.splitGithubPath(
-        knownPath,
-        integration.installationId,
+        options.knownPath,
+        installationId,
         providerRepoId,
       );
       const [detail, branchResult] = await Promise.all([
-        this.githubAppService.fetchRepository(
-          integration.installationId,
-          owner,
-          repo,
-        ),
+        this.githubAppService.fetchRepository(installationId, owner, repo),
         this.githubAppService.listBranches(
-          integration.installationId,
+          installationId,
           owner,
           repo,
+          listOptions,
         ),
       ]);
       return this.toProviderBranches(
         `${owner}/${repo}`,
         detail.default_branch,
         branchResult,
+        options.search,
       );
     }
 
-    if (!integration.instanceUrl || !integration.encryptedToken) {
-      throw new Error(
-        'Integration row with source GITLAB is missing its GitLab credential fields — data invariant violated.',
-      );
-    }
-    const token = this.encryptionService.decrypt(integration.encryptedToken);
+    const { instanceUrl, token } = this.gitlabCredential(integration);
     const [detail, branchResult] = await Promise.all([
-      this.gitlabApiService.fetchProject(
-        integration.instanceUrl,
-        token,
-        providerRepoId,
-      ),
+      this.gitlabApiService.fetchProject(instanceUrl, token, providerRepoId),
       this.gitlabApiService.fetchBranches(
-        integration.instanceUrl,
+        instanceUrl,
         token,
         providerRepoId,
+        listOptions,
       ),
     ]);
     return this.toProviderBranches(
       detail.path_with_namespace,
       detail.default_branch,
       branchResult,
+      options.search,
     );
   }
 
+  // Resolves a repository and checks the branches a user picked, one
+  // request per branch, all in parallel with the repository lookup. Not
+  // through the branch list: that is one page, and a branch found with
+  // `?search=` is usually outside it.
+  private async checkProviderRepo(
+    integration: ProviderIntegration,
+    providerRepoId: string,
+    branches: string[],
+  ): Promise<CheckedProviderRepo> {
+    if (integration.source === Provider.GITHUB) {
+      const installationId = this.githubInstallationId(integration);
+      const [owner, repo] = await this.splitGithubPath(
+        undefined,
+        installationId,
+        providerRepoId,
+      );
+      const [detail, exists] = await Promise.all([
+        this.githubAppService.fetchRepository(installationId, owner, repo),
+        Promise.all(
+          branches.map((branch) =>
+            this.githubAppService.branchExists(
+              installationId,
+              owner,
+              repo,
+              branch,
+            ),
+          ),
+        ),
+      ]);
+      return {
+        path: `${owner}/${repo}`,
+        defaultBranch: detail.default_branch,
+        missingBranches: branches.filter((_, index) => !exists[index]),
+      };
+    }
+
+    const { instanceUrl, token } = this.gitlabCredential(integration);
+    const [detail, exists] = await Promise.all([
+      this.gitlabApiService.fetchProject(instanceUrl, token, providerRepoId),
+      Promise.all(
+        branches.map((branch) =>
+          this.gitlabApiService.branchExists(
+            instanceUrl,
+            token,
+            providerRepoId,
+            branch,
+          ),
+        ),
+      ),
+    ]);
+    return {
+      path: detail.path_with_namespace,
+      defaultBranch: detail.default_branch,
+      missingBranches: branches.filter((_, index) => !exists[index]),
+    };
+  }
+
+  private githubInstallationId(integration: ProviderIntegration): string {
+    if (!integration.installationId) {
+      throw new Error(
+        'Integration row with source GITHUB is missing installationId — data invariant violated.',
+      );
+    }
+    return integration.installationId;
+  }
+
+  private gitlabCredential(integration: ProviderIntegration): {
+    instanceUrl: string;
+    token: string;
+  } {
+    if (!integration.instanceUrl || !integration.encryptedToken) {
+      throw new Error(
+        'Integration row with source GITLAB is missing its GitLab credential fields — data invariant violated.',
+      );
+    }
+    return {
+      instanceUrl: integration.instanceUrl,
+      token: this.encryptionService.decrypt(integration.encryptedToken),
+    };
+  }
+
+  // The provider's order is kept — most recently updated first on GitLab —
+  // with the default branch on top. Unfiltered, the default branch is always
+  // there (even when older than the page); searched, only if it matches.
   private toProviderBranches(
     path: string,
     defaultBranch: string,
-    branchResult: { branches: GithubBranch[]; truncated: boolean },
+    branchResult: { branches: { name: string }[]; truncated: boolean },
+    search?: string,
   ): ProviderBranches {
     const names = branchResult.branches.map((branch) => branch.name);
-    const rest = names
-      .filter((name) => name !== defaultBranch)
-      .sort((a, b) => a.localeCompare(b));
+    const rest = names.filter((name) => name !== defaultBranch);
+    const branches =
+      search && !names.includes(defaultBranch)
+        ? rest
+        : [defaultBranch, ...rest];
     return {
       path,
       defaultBranch,
-      branches: [defaultBranch, ...rest],
-      total: names.length,
+      branches,
+      total: branches.length,
       truncated: branchResult.truncated,
     };
   }

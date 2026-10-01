@@ -16,6 +16,7 @@ function ai(overrides: Partial<AiFindingDraft> = {}): AiFindingDraft {
     title: 'Hardcoded AWS key',
     message: 'An AWS access key is committed in source code.',
     confidence: 0.95,
+    reportedSeverity: FindingSeverity.CRITICAL,
     ...overrides,
   };
 }
@@ -129,5 +130,106 @@ describe('dedupeAiFindings', () => {
   it('leaves an AI finding in ordinary code active', () => {
     const [finding] = dedupeAiFindings([ai()], []).kept;
     expect(finding.suppressedReason).toBeNull();
+  });
+});
+
+describe('dedupeAiFindings — one finding per root cause', () => {
+  const logic = (overrides: Partial<AiFindingDraft>) =>
+    ai({
+      filePath: 'src/form.js',
+      category: FindingCategory.ERROR_HANDLING,
+      severity: FindingSeverity.MINOR,
+      ...overrides,
+    });
+
+  it('merges a hedged title into the plain one and spans both ranges', () => {
+    const { kept, merged } = dedupeAiFindings(
+      [
+        logic({
+          title: 'Potential missing error feedback',
+          lineStart: 31,
+          lineEnd: 31,
+          confidence: 0.7,
+        }),
+        logic({
+          title: 'Missing error feedback',
+          lineStart: 24,
+          lineEnd: 24,
+          confidence: 0.8,
+        }),
+      ],
+      [],
+    );
+    expect(merged).toBe(1);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({
+      title: 'Missing error feedback', // most confident wins
+      lineStart: 24,
+      lineEnd: 31,
+    });
+  });
+
+  it('merges near-identical titles in the same file and category', () => {
+    const { kept } = dedupeAiFindings(
+      [
+        logic({
+          title: 'No feedback when validation fails',
+          lineStart: 24,
+          lineEnd: 24,
+        }),
+        logic({
+          title: 'No feedback when the validation fails',
+          lineStart: 31,
+          lineEnd: 31,
+          confidence: 0.8,
+        }),
+      ],
+      [],
+    );
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ lineStart: 24, lineEnd: 31 });
+  });
+
+  it.each([
+    ['a different problem', { title: 'Timer is never cleared' }],
+    [
+      'another category',
+      {
+        category: FindingCategory.LOGIC,
+        title: 'No feedback when validation fails',
+      },
+    ],
+    [
+      'another file',
+      { filePath: 'src/table.js', title: 'No feedback when validation fails' },
+    ],
+    [
+      'too far apart',
+      {
+        title: 'No feedback when the validation fails',
+        lineStart: 80,
+        lineEnd: 80,
+      },
+    ],
+  ])('keeps two findings for %s', (_, overrides) => {
+    const { kept, merged } = dedupeAiFindings(
+      [
+        logic({
+          title: 'No feedback when validation fails',
+          lineStart: 24,
+          lineEnd: 24,
+        }),
+        logic({ confidence: 0.8, ...overrides }),
+      ],
+      [],
+    );
+    expect(merged).toBe(0);
+    expect(kept).toHaveLength(2);
+  });
+
+  it('fingerprints a hedged title like the plain one', () => {
+    expect(aiFingerprint(ai({ title: 'Potential SQL injection' }))).toBe(
+      aiFingerprint(ai({ title: 'SQL injection' })),
+    );
   });
 });

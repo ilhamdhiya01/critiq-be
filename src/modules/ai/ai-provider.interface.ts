@@ -27,6 +27,10 @@ export interface AiResult {
   // 'native' = the vendor's tool/function calling; 'json_mode' = an
   // OpenAI-compatible server that rejected tools and answered in JSON mode.
   structuredOutput: 'native' | 'json_mode';
+  // The provider's whole message (every tool call, any text beside it) —
+  // only for the encrypted raw response kept when the answer is invalid.
+  // Never logged.
+  raw?: unknown;
 }
 
 export interface AiProvider {
