@@ -130,6 +130,7 @@ export class OpenAiProvider implements AiProvider {
       usage: usageOf(response),
       model: response.model,
       structuredOutput: 'native',
+      raw: response.choices[0]?.message ?? null,
     };
   }
 }

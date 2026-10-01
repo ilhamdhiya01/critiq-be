@@ -28,6 +28,7 @@ function latestScan(overrides: Record<string, unknown> = {}) {
     status: ScanStatus.DONE,
     aiStatus: AiScanStatus.DONE,
     aiErrorCode: null,
+    aiFlags: [],
     aiProvider: 'anthropic',
     aiModel: 'claude-sonnet-5',
     aiCached: false,
@@ -89,7 +90,14 @@ describe('PullSummaryService.getSummary', () => {
       riskLevel: 'high',
       tokens: { in: 42_100, out: 1800 },
       error: null,
+      partial: false,
     });
+  });
+
+  it('marks a review the model left incomplete', async () => {
+    const { service } = setup(latestScan({ aiFlags: ['partial_response'] }));
+    const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+    expect(summary.partial).toBe(true);
   });
 
   // Acceptance 3 and 12.
