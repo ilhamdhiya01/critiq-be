@@ -384,7 +384,8 @@ describe('AiScanProcessor', () => {
     });
     expect(provider.complete.mock.calls).toHaveLength(2);
     const [, retryRequest] = provider.complete.mock.calls.map(([r]) => r);
-    expect(retryRequest.system).toContain('previous response was not a valid');
+    // The retry names what was missing, not just "invalid".
+    expect(retryRequest.system).toContain('omitted: summary, findings');
     expect(redis.set).toHaveBeenCalledWith(
       'ai:raw:scan_1',
       expect.stringMatching(/^enc\(/),
@@ -440,6 +441,90 @@ describe('AiScanProcessor', () => {
       'EX',
       30 * 86_400,
     );
+  });
+
+  // claude-sonnet-5 via SumoPod leaves out a required field in about one
+  // answer in five; one missing field used to cost the whole review.
+  describe('an answer missing a field', () => {
+    it('accepts a missing risk_level without a retry', async () => {
+      const { processor, tx, provider } = setup();
+      provider.complete.mockResolvedValue(
+        result({ summary: 's', findings: [aiFinding()] } as unknown as Review),
+      );
+
+      await processor.process(job);
+
+      expect(provider.complete.mock.calls).toHaveLength(1);
+      expect(scanUpdate(tx)).toMatchObject({
+        aiStatus: AiScanStatus.DONE,
+        aiReportedRiskLevel: null,
+      });
+    });
+
+    it('asks again for the missing findings by name', async () => {
+      const { processor, tx, provider } = setup();
+      provider.complete
+        .mockResolvedValueOnce(
+          result({ summary: 's', risk_level: 'high' } as unknown as Review),
+        )
+        .mockResolvedValueOnce(
+          result({ summary: 's', risk_level: 'high', findings: [aiFinding()] }),
+        );
+
+      await processor.process(job);
+
+      expect(provider.complete.mock.calls).toHaveLength(2);
+      const [, retry] = provider.complete.mock.calls.map(([r]) => r);
+      expect(retry.system).toContain('omitted: findings');
+      expect(scanUpdate(tx)).toMatchObject({ aiStatus: AiScanStatus.DONE });
+      expect(createdFindings(tx)).toHaveLength(1);
+    });
+
+    it('keeps a review still missing findings, flagged and not cached', async () => {
+      const { processor, tx, provider, aiScanService, logger } = setup();
+      provider.complete.mockResolvedValue(
+        result({
+          summary: 'Refactors the store.',
+          risk_level: 'medium',
+        } as unknown as Review),
+      );
+
+      await processor.process(job);
+
+      expect(provider.complete.mock.calls).toHaveLength(2);
+      expect(scanUpdate(tx)).toMatchObject({
+        aiStatus: AiScanStatus.DONE,
+        aiFlags: ['partial_response'],
+      });
+      expect(summaryRisk(tx)).toBe('LOW');
+      expect(aiScanService.rememberInCache).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'ai.partial_response',
+        expect.objectContaining({ fields: ['findings'] }),
+      );
+    });
+
+    it("uses the first answer's findings when the retry drops them", async () => {
+      const { processor, tx, provider } = setup();
+      provider.complete
+        .mockResolvedValueOnce(
+          result({ findings: [aiFinding()] } as unknown as Review),
+        )
+        .mockResolvedValueOnce(
+          result({
+            summary: 'Adds rotation.',
+            risk_level: 'high',
+          } as unknown as Review),
+        );
+
+      await processor.process(job);
+
+      expect(scanUpdate(tx)).toMatchObject({
+        aiStatus: AiScanStatus.DONE,
+        aiFlags: [],
+      });
+      expect(createdFindings(tx)).toHaveLength(1);
+    });
   });
 
   // Acceptance 10.
