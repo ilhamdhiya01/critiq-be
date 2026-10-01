@@ -109,6 +109,7 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
       usage: usageOf(response),
       model: response.model,
       structuredOutput: 'json_mode',
+      raw: response.choices[0]?.message ?? null,
     };
   }
 }

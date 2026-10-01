@@ -94,13 +94,13 @@ describe('validateAiFindings', () => {
     expect(accepted[0].filePath).toBe('src/session.ts');
   });
 
-  // Acceptance 7: below the bar, one level down — not dropped.
+  // Severity calibration: below 0.7 one level down; below 0.5 not stored.
   it.each([
     ['critical', 0.55, FindingSeverity.MAJOR],
     ['critical', 0.7, FindingSeverity.CRITICAL],
-    ['major', 0.4, FindingSeverity.MINOR],
-    ['major', 0.5, FindingSeverity.MAJOR],
-    ['minor', 0.1, FindingSeverity.MINOR],
+    ['major', 0.69, FindingSeverity.MINOR],
+    ['major', 0.7, FindingSeverity.MAJOR],
+    ['minor', 0.5, FindingSeverity.MINOR],
   ] as const)('%s at confidence %f → %s', (severity, confidence, expected) => {
     const { accepted } = validateAiFindings(
       [finding({ severity, confidence })],
@@ -108,6 +108,43 @@ describe('validateAiFindings', () => {
     );
     expect(accepted[0].severity).toBe(expected);
   });
+
+  it('drops a finding below 0.5 confidence, counting it apart from rejects', () => {
+    const result = validateAiFindings(
+      [finding({ confidence: 0.49 }), finding({ confidence: 0.1 })],
+      SENT,
+    );
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected).toHaveLength(0);
+    expect(result.droppedLowConfidence).toBe(2);
+  });
+
+  // "Potential …" is the model guessing: one level down, not dropped — and
+  // on top of a confidence downgrade.
+  it.each([
+    ['Potential race on the session cache', 'critical', 0.9, 'MAJOR'],
+    ['May leak the refresh token', 'critical', 0.6, 'MINOR'],
+    ['possible null dereference', 'major', 0.8, 'MINOR'],
+    ['Maybe-typed response is never checked', 'major', 0.8, 'MAJOR'],
+  ] as const)('"%s" (%s, %f) → %s', (title, severity, confidence, expected) => {
+    const { accepted } = validateAiFindings(
+      [finding({ title, severity, confidence })],
+      SENT,
+    );
+    expect(accepted[0].severity).toBe(FindingSeverity[expected]);
+  });
+
+  it('keeps the severity the model reported', () => {
+    const { accepted } = validateAiFindings(
+      [finding({ severity: 'critical', confidence: 0.6 })],
+      SENT,
+    );
+    expect(accepted[0]).toMatchObject({
+      severity: FindingSeverity.MAJOR,
+      reportedSeverity: FindingSeverity.CRITICAL,
+    });
+  });
+
   // gpt-4o-mini on critiq-be PR #7: rule definitions reported as secrets.
   it('rejects a finding whose title is copied from the code it points at', () => {
     const { accepted, rejected } = validateAiFindings(

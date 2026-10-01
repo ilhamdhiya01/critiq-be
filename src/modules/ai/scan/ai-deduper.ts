@@ -3,16 +3,25 @@ import {
   FindingCategory,
   SuppressionReason,
 } from '../../../generated/prisma/enums';
+import { jaroWinkler } from '../../../common/text/jaro-winkler';
 import { classifySuppression } from '../../../queue/suppression';
 import { AiFindingDraft } from './ai-result-validator';
 
-// AI findings against the static ones of the same scan, then against each
-// other. The AI never overrides or removes a static finding; it only adds
+// AI findings against each other, then against the static ones of the same
+// scan. The AI never overrides or removes a static finding; it only adds
 // what the rules could not see — and it does not get around what the rules
 // deliberately set aside: an AI finding is suppressed where a static one
 // would be.
 
 const LINE_SLACK = 2;
+// Two AI findings in the same file and category whose titles are this
+// similar describe one problem (same bar as reopening a resolved finding).
+const SIMILAR_TITLE = 0.85;
+// A merge never widens a finding past the validator's own range limit.
+const MAX_MERGED_RANGE = 40;
+// Stripped before fingerprinting: "Potential missing X" and "Missing X"
+// are the same finding.
+const HEDGE_PREFIX = /^(potential|possible|may|might)\s+/i;
 
 export interface StaticForDedupe {
   id: string;
@@ -31,6 +40,9 @@ export interface KeptAiFinding extends AiFindingDraft {
 
 export interface DedupeResult {
   kept: KeptAiFinding[];
+  // AI findings folded into another AI finding (same fingerprint, or a
+  // near-identical title in the same file and category).
+  merged: number;
   // Same file, overlapping lines (±2) and same category as an active static
   // finding.
   duplicates: { finding: KeptAiFinding; dedupeOfId: string }[];
@@ -48,6 +60,8 @@ const FAMILY_RULE_ID: Partial<Record<FindingCategory, string>> = {
 
 function normalizeTitle(title: string): string {
   return title
+    .trim()
+    .replace(HEDGE_PREFIX, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
@@ -59,6 +73,48 @@ export function aiFingerprint(finding: AiFindingDraft): string {
       `ai|${finding.filePath}|${finding.category}|${normalizeTitle(finding.title)}`,
     )
     .digest('hex');
+}
+
+// One finding per root cause (severity calibration): the model often
+// reports the same problem on nearby lines with different wording. Most
+// confident first; each later finding folds into the first it matches —
+// same fingerprint always, a similar title when the merged range stays
+// within MAX_MERGED_RANGE. The kept finding's text, severity and
+// fingerprint win; its range grows to cover both.
+function mergeAiFindings(findings: AiFindingDraft[]): {
+  merged: KeptAiFinding[];
+  folded: number;
+} {
+  const merged: KeptAiFinding[] = [];
+  let folded = 0;
+  const byConfidence = [...findings].sort(
+    (a, b) => b.confidence - a.confidence,
+  );
+  for (const finding of byConfidence) {
+    const fingerprint = aiFingerprint(finding);
+    const title = normalizeTitle(finding.title);
+    const range = (kept: KeptAiFinding) =>
+      Math.max(kept.lineEnd, finding.lineEnd) -
+      Math.min(kept.lineStart, finding.lineStart);
+    const into = merged.find(
+      (kept) =>
+        kept.fingerprint === fingerprint ||
+        (kept.filePath === finding.filePath &&
+          kept.category === finding.category &&
+          range(kept) <= MAX_MERGED_RANGE &&
+          jaroWinkler(normalizeTitle(kept.title), title) >= SIMILAR_TITLE),
+    );
+    if (!into) {
+      merged.push({ ...finding, fingerprint, suppressedReason: null });
+      continue;
+    }
+    folded += 1;
+    if (range(into) <= MAX_MERGED_RANGE) {
+      into.lineStart = Math.min(into.lineStart, finding.lineStart);
+      into.lineEnd = Math.max(into.lineEnd, finding.lineEnd);
+    }
+  }
+  return { merged, folded };
 }
 
 function overlaps(finding: KeptAiFinding, other: StaticForDedupe): boolean {
@@ -94,7 +150,8 @@ export function dedupeAiFindings(
   findings: AiFindingDraft[],
   staticFindings: StaticForDedupe[],
 ): DedupeResult {
-  const result: DedupeResult = { kept: [], duplicates: [] };
+  const { merged, folded } = mergeAiFindings(findings);
+  const result: DedupeResult = { kept: [], merged: folded, duplicates: [] };
   const staticActive = staticFindings.filter(
     (s) => s.suppressedReason === null,
   );
@@ -102,21 +159,7 @@ export function dedupeAiFindings(
     (s) => s.suppressedReason !== null,
   );
 
-  // Among AI findings: one per fingerprint, the most confident.
-  const byFingerprint = new Map<string, KeptAiFinding>();
-  for (const finding of findings) {
-    const fingerprint = aiFingerprint(finding);
-    const existing = byFingerprint.get(fingerprint);
-    if (!existing || finding.confidence > existing.confidence) {
-      byFingerprint.set(fingerprint, {
-        ...finding,
-        fingerprint,
-        suppressedReason: null,
-      });
-    }
-  }
-
-  for (const finding of byFingerprint.values()) {
+  for (const finding of merged) {
     const duplicateOf = staticActive.find((s) => overlaps(finding, s));
     if (duplicateOf) {
       result.duplicates.push({ finding, dedupeOfId: duplicateOf.id });

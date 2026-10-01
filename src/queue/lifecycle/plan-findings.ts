@@ -31,6 +31,7 @@ export interface StoredFinding {
   suppressedReason: SuppressionReason | null;
   category: FindingCategory | null;
   confidence: { toNumber(): number } | number | null;
+  reportedSeverity?: FindingSeverity | null;
   firstSeenScanId: string;
   dedupeOfId?: string | null;
 }
@@ -50,6 +51,8 @@ export interface CandidateFinding {
   suppressedReason: SuppressionReason | null;
   category: FindingCategory | null;
   confidence: number | null;
+  // AI only: the model's severity before calibration.
+  reportedSeverity?: FindingSeverity | null;
   dedupeOfId?: string | null;
 }
 
@@ -89,6 +92,7 @@ function fromStored(
     suppressedReason: base.suppressedReason,
     category: base.category,
     confidence: confidenceOf(base.confidence),
+    reportedSeverity: base.reportedSeverity ?? null,
     dedupeOfId: base.dedupeOfId ?? null,
     status,
     firstSeenScanId: base.firstSeenScanId,
@@ -118,6 +122,7 @@ function fromCandidate(
     suppressedReason: candidate.suppressedReason,
     category: candidate.category,
     confidence: candidate.confidence,
+    reportedSeverity: candidate.reportedSeverity ?? null,
     dedupeOfId: candidate.dedupeOfId ?? null,
     status,
     firstSeenScanId: origin?.firstSeenScanId ?? scanId,

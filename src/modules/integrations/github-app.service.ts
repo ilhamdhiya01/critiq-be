@@ -160,49 +160,95 @@ export class GithubAppService {
     }
   }
 
-  // Paginates per_page=100 until a short page is returned, same shape as
-  // listInstallationRepositories — hard-capped at 500 total branches (PRD
-  // v1.4.2 §12.4) rather than fetching indefinitely.
+  // One page of branches (GitHub lists them by name; its API cannot sort
+  // by activity). Asks for one more than `limit` to know whether there are
+  // more. GitHub's branch API has no search either, so `search` scans up to
+  // BRANCH_HARD_CAP names and filters them here (case-insensitive
+  // substring) — a repo with more branches than that can miss a match.
+  // TODO: GraphQL `refs(query:)` searches every branch server-side.
   async listBranches(
     installationId: string,
     owner: string,
     repo: string,
+    options: { limit: number; search?: string },
   ): Promise<{ branches: GithubBranch[]; truncated: boolean }> {
     const token = await this.getInstallationToken(installationId);
+    const page = async (perPage: number, pageNumber: number) => {
+      const response = await request('GET /repos/{owner}/{repo}/branches', {
+        owner,
+        repo,
+        headers: { authorization: `bearer ${token}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        per_page: perPage,
+        page: pageNumber,
+      });
+      return response.data as GithubBranch[];
+    };
     try {
-      const branches: GithubBranch[] = [];
-      let page = 1;
-      let truncated = false;
-
-      while (true) {
-        const response = await request('GET /repos/{owner}/{repo}/branches', {
-          owner,
-          repo,
-          headers: { authorization: `bearer ${token}` },
-          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
-          per_page: BRANCH_PAGE_SIZE,
-          page,
-        });
-        const data = response.data as GithubBranch[];
-        branches.push(...data);
-
-        if (branches.length >= BRANCH_HARD_CAP) {
-          truncated = true;
-          break;
-        }
-        if (data.length < BRANCH_PAGE_SIZE) {
-          break;
-        }
-        page += 1;
+      if (!options.search) {
+        const data = await page(options.limit + 1, 1);
+        return {
+          branches: data.slice(0, options.limit),
+          truncated: data.length > options.limit,
+        };
       }
 
-      return { branches: branches.slice(0, BRANCH_HARD_CAP), truncated };
+      const needle = options.search.toLowerCase();
+      const matches: GithubBranch[] = [];
+      let scanned = 0;
+      for (let pageNumber = 1; ; pageNumber += 1) {
+        const data = await page(BRANCH_PAGE_SIZE, pageNumber);
+        scanned += data.length;
+        matches.push(
+          ...data.filter((branch) =>
+            branch.name.toLowerCase().includes(needle),
+          ),
+        );
+        const exhausted = data.length < BRANCH_PAGE_SIZE;
+        if (
+          matches.length > options.limit ||
+          exhausted ||
+          scanned >= BRANCH_HARD_CAP
+        ) {
+          return {
+            branches: matches.slice(0, options.limit),
+            truncated: matches.length > options.limit || !exhausted,
+          };
+        }
+      }
     } catch (error) {
       throw this.mapGithubRequestError(error);
     }
   }
 
-  // Same pagination/hard-cap shape as listBranches. Files without a `patch`
+  // Whether one branch exists — for validating a user's choice without
+  // listing branches. 404 is "no such branch" here, not a bad installation
+  // (the repository itself was already resolved by the caller).
+  async branchExists(
+    installationId: string,
+    owner: string,
+    repo: string,
+    branch: string,
+  ): Promise<boolean> {
+    const token = await this.getInstallationToken(installationId);
+    try {
+      await request('GET /repos/{owner}/{repo}/branches/{branch}', {
+        owner,
+        repo,
+        branch,
+        headers: { authorization: `bearer ${token}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof RequestError && error.status === 404) {
+        return false;
+      }
+      throw this.mapGithubRequestError(error);
+    }
+  }
+
+  // Paginated per_page=100 until a short page, hard-capped. Files without a `patch`
   // (binary, or too large — GitHub just omits the field, no error) are
   // passed through as-is; PullsService is responsible for turning that
   // absence into an explicit truncated flag for the FE.

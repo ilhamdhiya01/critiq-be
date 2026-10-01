@@ -15,8 +15,19 @@ const MIN_MESSAGE_CHARS = 20;
 // model reading the code's own words back (see echoesCode).
 const ECHO_MIN_TITLE_CHARS = 12;
 const ECHO_WINDOW_LINES = 5;
-const CRITICAL_MIN_CONFIDENCE = 0.7;
-const MAJOR_MIN_CONFIDENCE = 0.5;
+// Severity calibration (v1.5.1): below DROP_BELOW a finding is not stored
+// — the model would not raise it in a human review — only counted; below
+// DOWNGRADE_BELOW it drops one level.
+const DROP_BELOW = 0.5;
+const DOWNGRADE_BELOW = 0.7;
+// A hedged title ("Potential …", "May …") is the model guessing: one level
+// down, not dropped — it may still be right.
+const HEDGED_TITLE = /^(potential|possible|may|might)\b/i;
+const SEVERITY_ORDER: FindingSeverity[] = [
+  FindingSeverity.MINOR,
+  FindingSeverity.MAJOR,
+  FindingSeverity.CRITICAL,
+];
 
 export interface AiFindingDraft {
   filePath: string;
@@ -27,6 +38,8 @@ export interface AiFindingDraft {
   title: string;
   message: string;
   confidence: number;
+  // The model's own severity, before calibration.
+  reportedSeverity: FindingSeverity;
 }
 
 export type RejectReason =
@@ -41,6 +54,10 @@ export type RejectReason =
 export interface ValidationResult {
   accepted: AiFindingDraft[];
   rejected: { file: string; reason: RejectReason }[];
+  // Well-formed findings below DROP_BELOW confidence — not stored, only
+  // counted ("N skipped (low confidence)"). Not `rejected`: nothing was
+  // wrong with where they pointed.
+  droppedLowConfidence: number;
 }
 
 function normalizePath(path: string): string {
@@ -93,30 +110,36 @@ function echoesCode(
   return ` ${normalizeText(window.join(' '))} `.includes(` ${needle} `);
 }
 
-// Below the confidence bar a finding drops one level rather than
-// disappearing: an unsure critical is still worth a reviewer's look.
-function severityFor(
-  severity: 'critical' | 'major' | 'minor',
+function downgrade(severity: FindingSeverity): FindingSeverity {
+  return SEVERITY_ORDER[Math.max(0, SEVERITY_ORDER.indexOf(severity) - 1)];
+}
+
+// Below DOWNGRADE_BELOW one level down; a hedged title one more (both can
+// apply). Minor is the floor: an unsure finding is still worth a look.
+export function calibrateSeverity(
+  reported: FindingSeverity,
   confidence: number,
+  title: string,
 ): FindingSeverity {
-  if (severity === 'critical') {
-    return confidence >= CRITICAL_MIN_CONFIDENCE
-      ? FindingSeverity.CRITICAL
-      : FindingSeverity.MAJOR;
+  let severity = reported;
+  if (confidence < DOWNGRADE_BELOW) {
+    severity = downgrade(severity);
   }
-  if (severity === 'major') {
-    return confidence >= MAJOR_MIN_CONFIDENCE
-      ? FindingSeverity.MAJOR
-      : FindingSeverity.MINOR;
+  if (HEDGED_TITLE.test(title)) {
+    severity = downgrade(severity);
   }
-  return FindingSeverity.MINOR;
+  return severity;
 }
 
 export function validateAiFindings(
   findings: ReportReviewInput['findings'],
   sentFiles: Map<string, SentFile>,
 ): ValidationResult {
-  const result: ValidationResult = { accepted: [], rejected: [] };
+  const result: ValidationResult = {
+    accepted: [],
+    rejected: [],
+    droppedLowConfidence: 0,
+  };
   for (const finding of findings) {
     const filePath = normalizePath(finding.file);
     const reject = (reason: RejectReason) =>
@@ -160,15 +183,21 @@ export function validateAiFindings(
       reject('echoes_code');
       continue;
     }
+    if (finding.confidence < DROP_BELOW) {
+      result.droppedLowConfidence += 1;
+      continue;
+    }
+    const reportedSeverity = finding.severity.toUpperCase() as FindingSeverity;
     result.accepted.push({
       filePath,
       lineStart: finding.line_start,
       lineEnd: finding.line_end,
       category: finding.category.toUpperCase() as FindingCategory,
-      severity: severityFor(finding.severity, finding.confidence),
+      severity: calibrateSeverity(reportedSeverity, finding.confidence, title),
       title,
       message,
       confidence: finding.confidence,
+      reportedSeverity,
     });
   }
   return result;

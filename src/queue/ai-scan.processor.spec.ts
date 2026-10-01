@@ -14,7 +14,7 @@ import {
 import { AiError } from '../modules/ai/ai-error';
 import { AiProviderFactory } from '../modules/ai/ai-provider.factory';
 import { AiProvider, AiResult } from '../modules/ai/ai-provider.interface';
-import { capRiskLevel } from '../modules/ai/scan/ai-scan.persistence';
+import { riskLevelFromCounts } from '../modules/ai/scan/ai-scan.persistence';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AiJobPayload } from './ai-queue.constants';
@@ -384,7 +384,8 @@ describe('AiScanProcessor', () => {
     });
     expect(provider.complete.mock.calls).toHaveLength(2);
     const [, retryRequest] = provider.complete.mock.calls.map(([r]) => r);
-    expect(retryRequest.system).toContain('previous response was not a valid');
+    // The retry names what was missing, not just "invalid".
+    expect(retryRequest.system).toContain('omitted: summary, findings');
     expect(redis.set).toHaveBeenCalledWith(
       'ai:raw:scan_1',
       expect.stringMatching(/^enc\(/),
@@ -440,6 +441,90 @@ describe('AiScanProcessor', () => {
       'EX',
       30 * 86_400,
     );
+  });
+
+  // claude-sonnet-5 via SumoPod leaves out a required field in about one
+  // answer in five; one missing field used to cost the whole review.
+  describe('an answer missing a field', () => {
+    it('accepts a missing risk_level without a retry', async () => {
+      const { processor, tx, provider } = setup();
+      provider.complete.mockResolvedValue(
+        result({ summary: 's', findings: [aiFinding()] } as unknown as Review),
+      );
+
+      await processor.process(job);
+
+      expect(provider.complete.mock.calls).toHaveLength(1);
+      expect(scanUpdate(tx)).toMatchObject({
+        aiStatus: AiScanStatus.DONE,
+        aiReportedRiskLevel: null,
+      });
+    });
+
+    it('asks again for the missing findings by name', async () => {
+      const { processor, tx, provider } = setup();
+      provider.complete
+        .mockResolvedValueOnce(
+          result({ summary: 's', risk_level: 'high' } as unknown as Review),
+        )
+        .mockResolvedValueOnce(
+          result({ summary: 's', risk_level: 'high', findings: [aiFinding()] }),
+        );
+
+      await processor.process(job);
+
+      expect(provider.complete.mock.calls).toHaveLength(2);
+      const [, retry] = provider.complete.mock.calls.map(([r]) => r);
+      expect(retry.system).toContain('omitted: findings');
+      expect(scanUpdate(tx)).toMatchObject({ aiStatus: AiScanStatus.DONE });
+      expect(createdFindings(tx)).toHaveLength(1);
+    });
+
+    it('keeps a review still missing findings, flagged and not cached', async () => {
+      const { processor, tx, provider, aiScanService, logger } = setup();
+      provider.complete.mockResolvedValue(
+        result({
+          summary: 'Refactors the store.',
+          risk_level: 'medium',
+        } as unknown as Review),
+      );
+
+      await processor.process(job);
+
+      expect(provider.complete.mock.calls).toHaveLength(2);
+      expect(scanUpdate(tx)).toMatchObject({
+        aiStatus: AiScanStatus.DONE,
+        aiFlags: ['partial_response'],
+      });
+      expect(summaryRisk(tx)).toBe('LOW');
+      expect(aiScanService.rememberInCache).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'ai.partial_response',
+        expect.objectContaining({ fields: ['findings'] }),
+      );
+    });
+
+    it("uses the first answer's findings when the retry drops them", async () => {
+      const { processor, tx, provider } = setup();
+      provider.complete
+        .mockResolvedValueOnce(
+          result({ findings: [aiFinding()] } as unknown as Review),
+        )
+        .mockResolvedValueOnce(
+          result({
+            summary: 'Adds rotation.',
+            risk_level: 'high',
+          } as unknown as Review),
+        );
+
+      await processor.process(job);
+
+      expect(scanUpdate(tx)).toMatchObject({
+        aiStatus: AiScanStatus.DONE,
+        aiFlags: [],
+      });
+      expect(createdFindings(tx)).toHaveLength(1);
+    });
   });
 
   // Acceptance 10.
@@ -507,7 +592,7 @@ describe('AiScanProcessor', () => {
   // Acceptance 17.
   // critiq-be PR #6: "RISK · HIGH" next to "0 critical" after the fixtures'
   // findings were suppressed.
-  it('caps the risk level at what the active findings support', async () => {
+  it('computes the risk level from the active findings, keeping the model one', async () => {
     const { processor, tx, provider } = setup();
     provider.complete.mockResolvedValue(
       result({ summary: 's', risk_level: 'high', findings: [] }),
@@ -516,26 +601,37 @@ describe('AiScanProcessor', () => {
     await processor.process(job);
 
     expect(summaryRisk(tx)).toBe('LOW');
-    expect(tx.scan.update).toHaveBeenCalledWith({
-      where: { id: 'scan_1' },
-      data: { aiFlags: ['risk_capped_from_high'] },
-    });
+    expect(scanUpdate(tx)).toMatchObject({ aiReportedRiskLevel: 'HIGH' });
   });
 
-  it('keeps a high risk level backed by an active critical', async () => {
+  // Recomputed both ways: a critical the model under-rated raises it.
+  it('raises the risk level when an active critical remains', async () => {
     const { processor, tx, provider } = setup();
     tx.finding.groupBy.mockResolvedValue([activeCritical()]);
     provider.complete.mockResolvedValue(
-      result({ summary: 's', risk_level: 'high', findings: [aiFinding()] }),
+      result({ summary: 's', risk_level: 'low', findings: [aiFinding()] }),
     );
 
     await processor.process(job);
 
     expect(summaryRisk(tx)).toBe('HIGH');
-    const flagWrites = (
-      tx.scan.update.mock.calls as [{ data: Record<string, unknown> }][]
-    ).filter(([args]) => 'aiFlags' in args.data);
-    expect(flagWrites).toHaveLength(0);
+    expect(scanUpdate(tx)).toMatchObject({ aiReportedRiskLevel: 'LOW' });
+  });
+
+  it('counts findings dropped below the confidence gate', async () => {
+    const { processor, tx, provider } = setup();
+    provider.complete.mockResolvedValue(
+      result({
+        summary: 's',
+        risk_level: 'medium',
+        findings: [aiFinding({ confidence: 0.3 })],
+      }),
+    );
+
+    await processor.process(job);
+
+    expect(scanUpdate(tx)).toMatchObject({ aiFindingsDropped: 1 });
+    expect(createdFindings(tx)).toEqual([]);
   });
 
   it('flags a low-risk empty review of a scan with static criticals', async () => {
@@ -572,22 +668,18 @@ describe('AiScanProcessor', () => {
   });
 });
 
-describe('capRiskLevel', () => {
+describe('riskLevelFromCounts', () => {
   it.each([
-    ['HIGH', 0, 0, 'LOW'],
-    ['HIGH', 0, 2, 'MEDIUM'],
-    ['HIGH', 1, 0, 'HIGH'],
-    ['MEDIUM', 0, 0, 'LOW'],
-    ['MEDIUM', 0, 1, 'MEDIUM'],
-    // A lower rating than the findings support is the model's to give.
-    ['LOW', 3, 0, 'LOW'],
-    ['MEDIUM', 1, 0, 'MEDIUM'],
+    [0, 0, 'LOW'],
+    [0, 2, 'MEDIUM'],
+    [1, 0, 'HIGH'],
+    [3, 4, 'HIGH'],
   ] as const)(
-    '%s with %i critical / %i major → %s',
-    (model, criticalCount, majorCount, expected) => {
-      expect(
-        capRiskLevel(AiRiskLevel[model], { criticalCount, majorCount }),
-      ).toBe(expected);
+    '%i critical / %i major → %s',
+    (criticalCount, majorCount, expected) => {
+      expect(riskLevelFromCounts({ criticalCount, majorCount })).toBe(
+        AiRiskLevel[expected],
+      );
     },
   );
 });
