@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { AiError, toAiError } from '../ai-error';
 import {
+  AiModelInfo,
   AiProvider,
   AiProviderConfig,
   AiRequest,
@@ -8,6 +9,8 @@ import {
 } from '../ai-provider.interface';
 
 const HEALTHCHECK_TIMEOUT_MS = 15_000;
+// More than any provider offers today; a guard, not a page size.
+const MODEL_LIST_CAP = 200;
 
 type InputSchema = Anthropic.Messages.Tool['input_schema'];
 
@@ -66,6 +69,30 @@ export class AnthropicProvider implements AiProvider {
         structuredOutput: 'native',
         raw: response.content,
       };
+    } catch (error) {
+      throw toAiError(error);
+    }
+  }
+
+  // Every Anthropic model is a chat model; the SDK pages through them.
+  async listModels(): Promise<AiModelInfo[]> {
+    try {
+      const models: AiModelInfo[] = [];
+      for await (const model of this.client.models.list(
+        { limit: 100 },
+        { timeout: HEALTHCHECK_TIMEOUT_MS },
+      )) {
+        models.push({
+          id: model.id,
+          label: model.display_name,
+          contextWindow: model.max_input_tokens ?? null,
+          createdAt: new Date(model.created_at),
+        });
+        if (models.length >= MODEL_LIST_CAP) {
+          break;
+        }
+      }
+      return models;
     } catch (error) {
       throw toAiError(error);
     }

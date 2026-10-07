@@ -11,7 +11,12 @@ const VALID: AiResult = {
 };
 
 function provider(complete: jest.Mock): AiProvider {
-  return { id: 'anthropic', complete, healthcheck: jest.fn() };
+  return {
+    id: 'anthropic',
+    complete,
+    healthcheck: jest.fn(),
+    listModels: jest.fn(),
+  };
 }
 
 describe('completeValidated', () => {

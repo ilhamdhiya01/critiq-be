@@ -33,11 +33,23 @@ export interface AiResult {
   raw?: unknown;
 }
 
+// One model a provider offers to this key — for the Settings model picker.
+export interface AiModelInfo {
+  id: string;
+  label: string;
+  // Input context window, when the provider says (Anthropic does; OpenAI
+  // and gateways do not).
+  contextWindow: number | null;
+  createdAt: Date | null;
+}
+
 export interface AiProvider {
   readonly id: AiProviderName;
   complete(req: AiRequest): Promise<AiResult>;
   // Cheapest call that proves the credentials and model work.
   healthcheck(): Promise<{ model: string }>;
+  // The chat models this key can use. Capped; order is the provider's.
+  listModels(): Promise<AiModelInfo[]>;
 }
 
 // What an adapter needs to be built. `apiKey` is plaintext and lives only as
