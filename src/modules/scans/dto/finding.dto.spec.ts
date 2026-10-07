@@ -40,4 +40,35 @@ describe('FindingDto meta', () => {
       }).meta,
     ).toBeNull();
   });
+
+  // Two AI runs on the same commit disagreed (regenerate merge).
+  it('shows both runs when they rated it differently', () => {
+    const dto = new FindingDto({
+      ...base,
+      severity: FindingSeverity.CRITICAL,
+      reportedSeverity: FindingSeverity.CRITICAL,
+      previousRunSeverity: FindingSeverity.CRITICAL,
+      latestRunSeverity: FindingSeverity.MAJOR,
+    });
+    expect(dto.meta).toEqual({
+      severityChanged: {
+        previous: FindingSeverity.CRITICAL,
+        latest: FindingSeverity.MAJOR,
+      },
+    });
+    expect(dto).not.toHaveProperty('previousRunSeverity');
+  });
+
+  it('flags a finding the latest run did not report', () => {
+    const dto = new FindingDto({
+      ...base,
+      reportedSeverity: FindingSeverity.MAJOR,
+      notReproduced: true,
+    });
+    expect(dto.meta).toEqual({
+      reportedSeverity: FindingSeverity.MAJOR,
+      notReproduced: true,
+    });
+    expect(dto).not.toHaveProperty('notReproduced');
+  });
 });

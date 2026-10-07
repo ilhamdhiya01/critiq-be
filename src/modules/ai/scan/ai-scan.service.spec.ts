@@ -14,6 +14,7 @@ import {
   ScanStatus,
 } from '../../../generated/prisma/enums';
 import { AiJobPayload } from '../../../queue/ai-queue.constants';
+import { AI_PROMPT_VERSION } from './ai-prompt.constants';
 import { aiCacheKey, AiScanService } from './ai-scan.service';
 
 // ESM-only packages this CommonJS Jest setup cannot load.
@@ -211,9 +212,47 @@ describe('AiScanService.maybeEnqueue', () => {
       scanId: 'scan_2',
       organizationId: 'org_1',
       pullId: 'pull_1',
+      // No earlier AI run on this scan.
+      mergePrevious: false,
     });
     expect(options.jobId).toMatch(/^ai-scan_2-\d+$/);
     expect(options.attempts).toBe(4);
+  });
+
+  // Regenerate of this scan: merge with the earlier run only when it is
+  // comparable — decided here, before the AI columns are overwritten.
+  describe('regenerate of a scan already reviewed', () => {
+    const earlier = (model: string, promptVersion = AI_PROMPT_VERSION) =>
+      scanRow({
+        aiStatus: AiScanStatus.DONE,
+        aiProvider: 'anthropic',
+        aiModel: model,
+        aiPromptVersion: promptVersion,
+      });
+    const payloadOf = (queue: ReturnType<typeof setup>['queue']) =>
+      (queue.add.mock.calls[0] as [string, AiJobPayload])[1];
+
+    it('merges when the same model reviewed it', async () => {
+      const { service, queue } = setup(earlier('claude-sonnet-5'));
+      await service.maybeEnqueue('scan_2', { force: true });
+      expect(payloadOf(queue).mergePrevious).toBe(true);
+    });
+
+    // The provider answers with the snapshot it ran.
+    it('treats a dated snapshot as the same model', async () => {
+      const { service, queue } = setup(earlier('claude-sonnet-5-20260801'));
+      await service.maybeEnqueue('scan_2', { force: true });
+      expect(payloadOf(queue).mergePrevious).toBe(true);
+    });
+
+    it.each([
+      ['another model', earlier('claude-opus-5-5')],
+      ['another prompt version', earlier('claude-sonnet-5', 'ai-2026.09.4')],
+    ])('starts fresh after %s', async (_label, scan) => {
+      const { service, queue } = setup(scan);
+      await service.maybeEnqueue('scan_2', { force: true });
+      expect(payloadOf(queue).mergePrevious).toBe(false);
+    });
   });
 
   // Acceptance 11.

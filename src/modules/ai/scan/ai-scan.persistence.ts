@@ -25,6 +25,7 @@ import {
   ScanCounts,
 } from '../../../queue/lifecycle/scan-counts';
 import { KeptAiFinding } from './ai-deduper';
+import { MergeStats, mergeWithPreviousRun } from './regenerate-merge';
 
 export const SUSPICIOUS_LOW_RISK = 'suspicious_low_risk';
 // The model left summary or findings out even after the retry: the review
@@ -187,7 +188,13 @@ export interface AiResultToPersist {
   tokensOut: number | null;
   // Extra aiFlags for this result (e.g. PARTIAL_RESPONSE).
   flags?: string[];
+  // A regenerate by a comparable run (same commit, provider, model,
+  // prompt): merged with the AI rows this scan already holds instead of
+  // replacing them — regenerate-merge.ts.
+  mergeWithPrevious?: boolean;
 }
+
+export type PersistedAiResult = ScanCounts & { merge: MergeStats | null };
 
 // Writes one AI result for a scan, replacing an earlier AI run's output
 // (regenerate): the scan's AI columns, the AI rows that run produced,
@@ -195,14 +202,14 @@ export interface AiResultToPersist {
 // computed from those counts. AI rows the static step
 // carried forward (INCREMENTAL: PERSISTED/RESOLVED) are not the AI run's to
 // replace. The scan update is conditional on `aiStatusCondition`, so a
-// result nobody is waiting for any more writes nothing. Returns the counts,
-// or null when the condition failed.
+// result nobody is waiting for any more writes nothing. Returns the counts
+// (and what a merge did), or null when the condition failed.
 export async function persistAiResult(
   tx: Prisma.TransactionClient,
   scan: ScanForAi,
   result: AiResultToPersist,
   aiStatusCondition: Prisma.ScanWhereInput,
-): Promise<ScanCounts | null> {
+): Promise<PersistedAiResult | null> {
   const flags = [
     ...(result.reportedRiskLevel === AiRiskLevel.LOW &&
     result.total === 0 &&
@@ -237,22 +244,42 @@ export async function persistAiResult(
     return null;
   }
 
-  await tx.finding.deleteMany({
-    where:
-      scan.diffMode === DiffMode.INCREMENTAL
-        ? {
-            scanId: scan.id,
-            source: FindingSource.AI,
-            OR: [
-              { status: { in: [FindingStatus.NEW, FindingStatus.REOPENED] } },
-              { suppressedReason: SuppressionReason.DEDUPE_STATIC },
-            ],
-          }
-        : { scanId: scan.id, source: FindingSource.AI },
-  });
-  if (result.rows.length > 0) {
+  const earlierRun: Prisma.FindingWhereInput =
+    scan.diffMode === DiffMode.INCREMENTAL
+      ? {
+          scanId: scan.id,
+          source: FindingSource.AI,
+          OR: [
+            { status: { in: [FindingStatus.NEW, FindingStatus.REOPENED] } },
+            { suppressedReason: SuppressionReason.DEDUPE_STATIC },
+          ],
+        }
+      : { scanId: scan.id, source: FindingSource.AI };
+  let rows = result.rows;
+  let merge: MergeStats | null = null;
+  if (result.mergeWithPrevious) {
+    // Read in the same transaction, just before they are replaced.
+    const previous = await tx.finding.findMany({
+      where: {
+        AND: [
+          earlierRun,
+          { status: { not: FindingStatus.RESOLVED } },
+          { suppressedReason: null },
+        ],
+      },
+      select: { ...STORED_FINDING_SELECT, status: true, originFindingId: true },
+    });
+    ({ rows, stats: merge } = mergeWithPreviousRun(
+      result.rows,
+      previous,
+      'same_scan',
+    ));
+  }
+
+  await tx.finding.deleteMany({ where: earlierRun });
+  if (rows.length > 0) {
     await tx.finding.createMany({
-      data: result.rows.map((row) => ({
+      data: rows.map((row) => ({
         ...row,
         organizationId: scan.organizationId,
         scanId: scan.id,
@@ -274,7 +301,7 @@ export async function persistAiResult(
       filesOmitted: result.filesOmitted,
     },
   });
-  return counts;
+  return { ...counts, merge };
 }
 
 // AI criticals this run brought (NEW) or brought back (REOPENED).
