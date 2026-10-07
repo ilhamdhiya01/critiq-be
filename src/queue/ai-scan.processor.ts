@@ -2,7 +2,6 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, UnrecoverableError } from 'bullmq';
-import { createHash } from 'crypto';
 import type Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -53,9 +52,9 @@ import { notifyIfAllCriticalResolved } from './lifecycle/scan-counts';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AI_QUEUE_NAME, aiBackoff, AiJobPayload } from './ai-queue.constants';
+import { cachedHeadFileContents } from './head-file-cache';
 import { isIgnoredPath, isMustScanPath } from './rules/path-filter';
 
-const HEAD_FILE_CACHE_SECONDS = 60;
 const MAX_CONTEXT_FILES = 50;
 const RAW_RETENTION_SECONDS = 30 * 86_400;
 const MAX_RAW_CHARS = 100_000;
@@ -210,11 +209,15 @@ export class AiScanProcessor
       )
       .slice(0, MAX_CONTEXT_FILES)
       .map((file) => file.path);
-    const contents = await this.headFileContents(
-      organizationId,
-      scan.repositoryId,
-      pullId,
-      scan.headSha,
+    const contents = await cachedHeadFileContents(
+      this.redis,
+      this.pullsService,
+      {
+        organizationId,
+        repositoryId: scan.repositoryId,
+        pullId,
+        sha: scan.headSha,
+      },
       contextPaths,
     );
     const files: PromptFileInput[] = diff.files.map((file) => ({
@@ -528,60 +531,6 @@ export class AiScanProcessor
         log,
       );
     }
-  }
-
-  // Head-file text per path, cached 60 s per (repo, sha, path) so a retry or
-  // a regenerate right after does not refetch.
-  private async headFileContents(
-    organizationId: string,
-    repositoryId: string,
-    pullId: string,
-    sha: string,
-    paths: string[],
-  ): Promise<Map<string, string | null>> {
-    const keyOf = (path: string) =>
-      `ai:file:${repositoryId}:${sha}:${createHash('sha1').update(path).digest('hex')}`;
-    const contents = new Map<string, string | null>();
-    const missing: string[] = [];
-    for (const path of paths) {
-      let cached: string | null = null;
-      try {
-        cached = await this.redis.get(keyOf(path));
-      } catch {
-        cached = null;
-      }
-      if (cached !== null) {
-        contents.set(path, cached);
-      } else {
-        missing.push(path);
-      }
-    }
-    if (missing.length === 0) {
-      return contents;
-    }
-    const fetched = await this.pullsService.getHeadFileContents(
-      organizationId,
-      repositoryId,
-      pullId,
-      sha,
-      missing,
-    );
-    for (const [path, content] of fetched) {
-      contents.set(path, content);
-      if (content !== null) {
-        try {
-          await this.redis.set(
-            keyOf(path),
-            content,
-            'EX',
-            HEAD_FILE_CACHE_SECONDS,
-          );
-        } catch {
-          // cache is best effort
-        }
-      }
-    }
-    return contents;
   }
 
   // A failed answer is billed all the same: counted toward the daily budget,

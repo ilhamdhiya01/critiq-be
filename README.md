@@ -30,7 +30,7 @@ Critiq unifies pull requests from **GitHub (org)** and **GitLab (self-hosted)** 
 
 - OAuth login (GitHub / GitLab), session issuance, and self-serve organization provisioning
 - Webhook ingestion (PR/MR push → queued diff scan, organization resolved from the connected repo, per-repo scan scope)
-- Diff-only scanning: 30 static Critical rules (secrets, eval/SQL/shell injection, insecure TLS, leftover debugger, Dockerfile/CORS config) in v1.5.0; AI provider analysis in v1.5.1
+- Diff-only scanning: 30 static Critical rules (secrets, eval/SQL/shell injection, insecure TLS, leftover debugger, Dockerfile/CORS config) in v1.5.0, plus `code.syntax_error` — a change that leaves a JS/TS/JSON file unparseable (the changed file is read whole and parsed; only an error the change introduced is reported); AI provider analysis in v1.5.1
 - Quality gate evaluation, branch policy enforcement, and review decisions
 - Audit logging for every mutation, scoped per organization
 
@@ -146,6 +146,7 @@ pnpm test:cov      # test coverage
 | `SCAN_CONCURRENCY`                             | Scan jobs a worker processes in parallel (default `3`)                                                                                                                                                    |
 | `SCAN_JOB_TIMEOUT_MS`                          | Hard deadline per scan job, enforced inside the processor (default `120000`)                                                                                                                              |
 | `SCAN_MAX_DIFF_BYTES`                          | Scannable diff size limit; larger diffs fail with `diff_too_large`, not retried (default `1048576`)                                                                                                       |
+| `SCAN_SYNTAX_MAX_FILES`                        | Changed JS/TS/JSON files parsed per scan by `code.syntax_error`, one contents-API fetch each (default `50`; `0` turns the check off)                                                                       |
 | `AI_CONCURRENCY`                               | AI review jobs a worker processes in parallel (default `2`)                                                                                                                                               |
 | `AI_MAX_INPUT_TOKENS` / `AI_MAX_OUTPUT_TOKENS` | Per-scan prompt budget (default `60000`, files dropped from the end past it) and response cap (default `32000`, sized for reasoning models; a reply cut off at the cap fails as `output_truncated`, or `reasoning_exhausted` when a reasoning model spent all of it reasoning and wrote no answer. Tokens of a failed reply still count toward the daily budget) |
 | `AI_TIMEOUT_MS`                                | Timeout of one provider call (default `300000` — reasoning models can take minutes on a large diff)                                                                                                       |
