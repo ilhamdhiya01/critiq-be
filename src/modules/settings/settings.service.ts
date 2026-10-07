@@ -13,7 +13,7 @@ import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Prisma } from '../../generated/prisma/client';
 import { AiProviderId, AiUsageKind, Role } from '../../generated/prisma/enums';
 import { completeValidated } from '../ai/ai-call';
-import { AiError, AiErrorCode, toAiError } from '../ai/ai-error';
+import { toAiError } from '../ai/ai-error';
 import {
   AI_PROVIDER_CATALOG,
   AI_PROVIDER_NAMES,
@@ -32,34 +32,12 @@ import {
   AiTestResultDto,
   AiTestSnapshot,
 } from './dto/ai-settings.dto';
+import { aiErrorMessage } from './ai-error-message';
 import { TestAiSettingsDto } from './dto/test-ai-settings.dto';
 import { UpdateAiSettingsDto } from './dto/update-ai-settings.dto';
 
 const TEST_LIMIT_PER_HOUR = 5;
 const HOUR_SECONDS = 3600;
-
-// What an Admin sees for each failure. Built from the code, never from the
-// provider's own text, except for bad_request where the (sanitized) reason
-// is the only useful information.
-function userMessage(error: AiError): string {
-  const status = error.status ? ` (${error.status})` : '';
-  const messages: Record<AiErrorCode, string> = {
-    auth_failed: `Provider rejected the API key${status}.`,
-    rate_limited: `Provider rate limit reached${status}. Try again later.`,
-    timeout: 'Provider did not respond in time.',
-    provider_unreachable: `Provider could not be reached${status}.`,
-    invalid_response:
-      'Provider replied, but not with a valid structured result.',
-    output_truncated:
-      'Provider stopped at the output token limit before finishing the result.',
-    bad_request: `Provider rejected the request${status}: ${error.providerMessage ?? ''}`,
-    insecure_base_url: error.providerMessage ?? 'Base URL is not allowed.',
-    not_configured: error.providerMessage ?? 'No AI provider is configured.',
-    api_key_required: 'An API key is required for this provider.',
-    base_url_required: 'A base URL is required for this provider.',
-  };
-  return messages[error.code];
-}
 
 function unprocessable(message: string, field = 'provider'): never {
   throw new UnprocessableEntityException({ field, message });
@@ -419,7 +397,7 @@ export class SettingsService {
         model: null,
         structuredOutput: 'failed',
         usage: null,
-        error: { code: aiError.code, message: userMessage(aiError) },
+        error: { code: aiError.code, message: aiErrorMessage(aiError) },
       });
     }
 

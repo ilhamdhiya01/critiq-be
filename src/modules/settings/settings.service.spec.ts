@@ -139,6 +139,7 @@ function setup() {
       structuredOutput: 'native',
     }),
     healthcheck: jest.fn().mockResolvedValue({ model: 'claude-sonnet-5' }),
+    listModels: jest.fn(),
   };
   const factory = {
     for: jest.fn().mockResolvedValue(provider),
