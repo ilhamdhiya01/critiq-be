@@ -45,6 +45,25 @@ export const AI_PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   { id: 'google', label: 'Google', available: false },
 ];
 
+// Models tested to review well in Critiq — the picker's "recommended"
+// badge. Anthropic/OpenAI: the catalog's suggestions above (minus the
+// pricier gpt-4.1 for OpenAI). openai_compatible: gpt-4o-mini, proven
+// through SumoPod (claude-sonnet-5 through the same gateway leaves required
+// fields out about one answer in five), plus the self-hosted models tested.
+export const RECOMMENDED_MODELS: Record<AiProviderName, readonly string[]> = {
+  anthropic: [
+    'claude-sonnet-5',
+    'claude-opus-5-5',
+    'claude-haiku-4-5-20251001',
+  ],
+  openai: ['gpt-4o', 'gpt-4o-mini'],
+  openai_compatible: [
+    'gpt-4o-mini',
+    'llama-3.1-70b-instruct',
+    'qwen2.5-coder-32b-instruct',
+  ],
+};
+
 export function defaultModelFor(provider: AiProviderName): string | null {
   return (
     AI_PROVIDER_CATALOG.find((entry) => entry.id === provider)?.defaultModel ??
