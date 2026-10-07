@@ -14,6 +14,8 @@ export function aiErrorMessage(error: AiError): string {
       'Provider replied, but not with a valid structured result.',
     output_truncated:
       'Provider stopped at the output token limit before finishing the result.',
+    reasoning_exhausted:
+      'The model spent its whole output budget on reasoning before answering. Split the pull request or choose another model.',
     bad_request: `Provider rejected the request${status}: ${error.providerMessage ?? ''}`,
     insecure_base_url: error.providerMessage ?? 'Base URL is not allowed.',
     not_configured: error.providerMessage ?? 'No AI provider is configured.',

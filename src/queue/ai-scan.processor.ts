@@ -19,7 +19,11 @@ import {
 import { completeValidated } from '../modules/ai/ai-call';
 import { AiError, AiErrorCode, toAiError } from '../modules/ai/ai-error';
 import { AiProviderFactory } from '../modules/ai/ai-provider.factory';
-import { AiProvider, AiResult } from '../modules/ai/ai-provider.interface';
+import {
+  AiProvider,
+  AiResult,
+  AiUsage,
+} from '../modules/ai/ai-provider.interface';
 import { dedupeAiFindings } from '../modules/ai/scan/ai-deduper';
 import {
   buildReviewPrompt,
@@ -291,9 +295,18 @@ export class AiScanProcessor
       });
     } catch (error) {
       const aiError = toAiError(error);
+      if (aiError.usage) {
+        await this.recordFailedUsage(
+          scanId,
+          organizationId,
+          aiError.usage,
+          log,
+        );
+      }
       if (
         aiError.code === 'invalid_response' ||
-        aiError.code === 'output_truncated'
+        aiError.code === 'output_truncated' ||
+        aiError.code === 'reasoning_exhausted'
       ) {
         await this.keepRawResponse(scanId, aiError, log);
         throw new AiJobFailure(aiError.code);
@@ -569,6 +582,29 @@ export class AiScanProcessor
       }
     }
     return contents;
+  }
+
+  // A failed answer is billed all the same: counted toward the daily budget,
+  // and shown on the scan so the cost of the failure is visible. The scan
+  // row holds this attempt's tokens; a later BullMQ attempt overwrites it.
+  private async recordFailedUsage(
+    scanId: string,
+    organizationId: string,
+    usage: AiUsage,
+    log: LogContext,
+  ): Promise<void> {
+    try {
+      await this.aiScanService.recordUsage(organizationId, usage);
+      await this.prisma.scan.update({
+        where: { id: scanId },
+        data: {
+          aiTokensIn: usage.inputTokens,
+          aiTokensOut: usage.outputTokens,
+        },
+      });
+    } catch {
+      this.logger.warn('ai.usage_record_failed', log);
+    }
   }
 
   // The raw answer of an invalid or truncated response, encrypted, 30 days —

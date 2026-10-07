@@ -3,6 +3,7 @@ import {
   AiProvider,
   AiRequest,
   AiResult,
+  AiUsage,
   JsonSchema,
 } from './ai-provider.interface';
 import { matchesSchema } from './ai-schema-validator';
@@ -25,6 +26,10 @@ const INVALID_RESPONSE_ATTEMPTS = 2;
 // one is invalid, and may assemble a usable answer from them (checked
 // against the same schema) — a model that keeps dropping one field should
 // not cost the whole review.
+//
+// `usage` is the total of every attempt, on the result and on the error
+// finally thrown: a failed attempt is billed too, and the daily budget has
+// to see it.
 export interface CompleteValidatedOptions {
   retryRequest?: (request: AiRequest, failed: AiError) => AiRequest;
   normalize?: (toolInput: unknown) => unknown;
@@ -41,11 +46,19 @@ export async function completeValidated(
   const normalize = options.normalize ?? ((same) => same);
   const schema = options.validationSchema ?? request.tool.schema;
   const attempts: unknown[] = [];
+  const spent: AiUsage = { inputTokens: 0, outputTokens: 0 };
+  const addUsage = (usage: AiUsage | undefined) => {
+    spent.inputTokens += usage?.inputTokens ?? 0;
+    spent.outputTokens += usage?.outputTokens ?? 0;
+  };
+  const withSpent = (error: AiError) =>
+    spent.inputTokens + spent.outputTokens > 0 ? error.withUsage(spent) : error;
   let lastResult: AiResult | null = null;
   let current = request;
   for (let attempt = 1; ; attempt += 1) {
     try {
       const result = await provider.complete(current);
+      addUsage(result.usage);
       lastResult = result;
       const toolInput = normalize(result.toolInput);
       attempts.push(toolInput);
@@ -57,11 +70,14 @@ export async function completeValidated(
           raw: { toolInput: result.toolInput, message: result.raw ?? null },
         });
       }
-      return { ...result, toolInput };
+      return { ...result, toolInput, usage: { ...spent } };
     } catch (error) {
       const aiError = toAiError(error);
+      // Set by the adapter when a response came back but was unusable; a
+      // schema mismatch above was already counted from the result.
+      addUsage(aiError.usage);
       if (aiError.code !== 'invalid_response') {
-        throw aiError;
+        throw withSpent(aiError);
       }
       if (attempt < INVALID_RESPONSE_ATTEMPTS) {
         current = retryRequest(request, aiError);
@@ -69,9 +85,9 @@ export async function completeValidated(
       }
       const salvaged = options.salvage?.(attempts);
       if (lastResult && salvaged != null && matchesSchema(schema, salvaged)) {
-        return { ...lastResult, toolInput: salvaged };
+        return { ...lastResult, toolInput: salvaged, usage: { ...spent } };
       }
-      throw aiError;
+      throw withSpent(aiError);
     }
   }
 }

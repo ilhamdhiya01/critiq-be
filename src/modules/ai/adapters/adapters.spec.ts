@@ -132,6 +132,19 @@ describe('AnthropicProvider', () => {
     await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
       code: 'output_truncated',
       retryable: false,
+      // Billed although unusable.
+      usage: { inputTokens: 900, outputTokens: 1000 },
+    });
+  });
+
+  it('carries the billed tokens on invalid_response', async () => {
+    mockAnthropicCreate.mockResolvedValue({
+      model: 'claude-sonnet-5',
+      content: [{ type: 'text', text: 'Looks fine to me.' }],
+      usage: { input_tokens: 700, output_tokens: 20 },
+    });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      usage: { inputTokens: 700, outputTokens: 20 },
     });
   });
 
@@ -208,7 +221,40 @@ describe('OpenAiProvider', () => {
     });
     await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
       code: 'output_truncated',
+      usage: { inputTokens: 300, outputTokens: 40 },
     });
+  });
+
+  it('carries the billed tokens when no tool call comes back', async () => {
+    mockChatCreate.mockResolvedValue({
+      model: 'gpt-4o',
+      choices: [{ message: { content: 'Looks fine.' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 300, completion_tokens: 5 },
+    });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'invalid_response',
+      usage: { inputTokens: 300, outputTokens: 5 },
+    });
+  });
+
+  it('is not marked reasoning without reasoning tokens or text', async () => {
+    mockChatCreate.mockResolvedValue(toolCallResponse(TOOL_INPUT));
+    const result = await provider.complete(TEST_REQUEST);
+    expect(result.reasoning).toBe(false);
+  });
+
+  // OpenAI's own reasoning models report a count, not text.
+  it('is marked reasoning from reasoning_tokens', async () => {
+    const response = toolCallResponse(TOOL_INPUT);
+    mockChatCreate.mockResolvedValue({
+      ...response,
+      usage: {
+        ...response.usage,
+        completion_tokens_details: { reasoning_tokens: 512 },
+      },
+    });
+    const result = await provider.complete(TEST_REQUEST);
+    expect(result.reasoning).toBe(true);
   });
 
   it('healthchecks by retrieving the model', async () => {
@@ -297,6 +343,66 @@ describe('OpenAiCompatibleProvider', () => {
     await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
       code: 'output_truncated',
     });
+  });
+
+  // deepseek-v4-flash on a 48 KB diff (MR !1792): the whole budget went to
+  // reasoning_content, no tool call, no content.
+  it('reports reasoning_exhausted when only reasoning was written', async () => {
+    mockChatCreate.mockResolvedValue({
+      model: 'deepseek-v4-flash',
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: '',
+            reasoning_content: 'Let me look at each file in turn…',
+          },
+          finish_reason: 'length',
+        },
+      ],
+      usage: { prompt_tokens: 40000, completion_tokens: 1000 },
+    });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'reasoning_exhausted',
+      retryable: false,
+      usage: { inputTokens: 40000, outputTokens: 1000 },
+      raw: { reasoning_content: expect.any(String) as unknown },
+    });
+  });
+
+  // A tool call was started: the answer itself ran long.
+  it('keeps output_truncated when reasoning came with a cut-off tool call', async () => {
+    const response = toolCallResponse(TOOL_INPUT);
+    mockChatCreate.mockResolvedValue({
+      ...response,
+      choices: [
+        {
+          message: { ...response.choices[0].message, reasoning: 'Thinking…' },
+          finish_reason: 'length',
+        },
+      ],
+    });
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'output_truncated',
+    });
+  });
+
+  it('is marked reasoning from reasoning text beside the answer', async () => {
+    const response = toolCallResponse(TOOL_INPUT);
+    mockChatCreate.mockResolvedValue({
+      ...response,
+      choices: [
+        {
+          message: {
+            ...response.choices[0].message,
+            reasoning_content: 'The diff adds…',
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+    });
+    const result = await provider.complete(TEST_REQUEST);
+    expect(result.reasoning).toBe(true);
   });
 
   it('healthchecks via /models, falling back to a completion on 404', async () => {

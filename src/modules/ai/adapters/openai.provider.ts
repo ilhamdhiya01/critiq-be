@@ -7,6 +7,7 @@ import {
   AiProviderName,
   AiRequest,
   AiResult,
+  AiUsage,
 } from '../ai-provider.interface';
 import { toStrictSchema } from '../json-schema';
 
@@ -53,7 +54,10 @@ export async function listChatModels(
   return models;
 }
 
-export function parseJsonOrThrow(text: string | null | undefined): unknown {
+export function parseJsonOrThrow(
+  text: string | null | undefined,
+  usage?: AiUsage,
+): unknown {
   const raw = text ?? '';
   // Some servers wrap JSON-mode output in a markdown fence despite being
   // told not to; unwrap it before parsing.
@@ -67,31 +71,71 @@ export function parseJsonOrThrow(text: string | null | undefined): unknown {
     throw new AiError('invalid_response', {
       providerMessage: 'Response was not valid JSON.',
       raw,
+      usage,
     });
   }
 }
 
-export function usageOf(response: OpenAI.Chat.ChatCompletion) {
+export function usageOf(response: OpenAI.Chat.ChatCompletion): AiUsage {
   return {
     inputTokens: response.usage?.prompt_tokens ?? 0,
     outputTokens: response.usage?.completion_tokens ?? 0,
   };
 }
 
+// Reasoning models behind OpenAI-shaped servers return their thinking
+// beside the answer — DeepSeek and most gateways as `reasoning_content`,
+// OpenRouter and others as `reasoning`. Neither is in the SDK's types.
+function reasoningText(message: unknown): string {
+  const m = message as
+    { reasoning_content?: unknown; reasoning?: unknown } | null | undefined;
+  for (const value of [m?.reasoning_content, m?.reasoning]) {
+    if (typeof value === 'string' && value.trim() !== '') {
+      return value;
+    }
+  }
+  return '';
+}
+
+// OpenAI's own reasoning models (o-series, gpt-5) return no reasoning text,
+// only a count of reasoning tokens.
+export function usedReasoning(response: OpenAI.Chat.ChatCompletion): boolean {
+  const reasoningTokens =
+    response.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+  return (
+    reasoningTokens > 0 || reasoningText(response.choices[0]?.message) !== ''
+  );
+}
+
 // finish_reason "length": the answer stopped at max_tokens, so the tool
 // arguments (or JSON) are cut off — a clearer failure than the parse error
-// it would otherwise become.
+// it would otherwise become. When nothing at all was written but reasoning
+// was, the model thought until the budget ran out: reasoning_exhausted,
+// whose fix (another model) differs from a long answer's.
 export function throwIfTruncated(
   response: OpenAI.Chat.ChatCompletion,
   maxTokens: number,
 ): void {
   const choice = response.choices[0];
-  if (choice?.finish_reason === 'length') {
-    throw new AiError('output_truncated', {
-      providerMessage: `Response hit max_tokens (${maxTokens}).`,
-      raw: choice.message ?? null,
+  if (choice?.finish_reason !== 'length') {
+    return;
+  }
+  const message = choice.message ?? null;
+  const answered =
+    (message?.tool_calls?.length ?? 0) > 0 ||
+    (message?.content ?? '').trim() !== '';
+  if (!answered && reasoningText(message) !== '') {
+    throw new AiError('reasoning_exhausted', {
+      providerMessage: `Model used all ${maxTokens} output tokens on reasoning before answering.`,
+      raw: message,
+      usage: usageOf(response),
     });
   }
+  throw new AiError('output_truncated', {
+    providerMessage: `Response hit max_tokens (${maxTokens}).`,
+    raw: message,
+    usage: usageOf(response),
+  });
 }
 
 export class OpenAiProvider implements AiProvider {
@@ -169,17 +213,20 @@ export class OpenAiProvider implements AiProvider {
     );
     throwIfTruncated(response, req.maxTokens);
     const call = response.choices[0]?.message?.tool_calls?.[0];
+    const usage = usageOf(response);
     if (!call || call.type !== 'function') {
       throw new AiError('invalid_response', {
         providerMessage: 'Response contained no function tool call.',
         raw: response.choices[0]?.message ?? null,
+        usage,
       });
     }
     return {
-      toolInput: parseJsonOrThrow(call.function.arguments),
-      usage: usageOf(response),
+      toolInput: parseJsonOrThrow(call.function.arguments, usage),
+      usage,
       model: response.model,
       structuredOutput: 'native',
+      reasoning: usedReasoning(response),
       raw: response.choices[0]?.message ?? null,
     };
   }

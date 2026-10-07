@@ -444,6 +444,66 @@ describe('AiScanProcessor', () => {
     );
   });
 
+  // deepseek-v4-flash, MR !1792: reasoning used the whole output budget.
+  it('fails reasoning_exhausted at once, keeps the raw answer and bills it', async () => {
+    const { processor, provider, prisma, redis, aiScanService } = setup();
+    provider.complete.mockRejectedValue(
+      new AiError('reasoning_exhausted', {
+        raw: { reasoning_content: '…' },
+        usage: { inputTokens: 40_000, outputTokens: 8_000 },
+      }),
+    );
+
+    const error = await processor.process(job).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AiJobFailure);
+    expect(error).toMatchObject({ code: 'reasoning_exhausted' });
+    expect(provider.complete.mock.calls).toHaveLength(1);
+    expect(redis.set).toHaveBeenCalledWith(
+      'ai:raw:scan_1',
+      expect.stringMatching(/^enc\(/),
+      'EX',
+      30 * 86_400,
+    );
+    // Counted toward the daily budget, and visible on the scan.
+    expect(aiScanService.recordUsage).toHaveBeenCalledWith('org_1', {
+      inputTokens: 40_000,
+      outputTokens: 8_000,
+    });
+    expect(prisma.scan.update).toHaveBeenCalledWith({
+      where: { id: 'scan_1' },
+      data: { aiTokensIn: 40_000, aiTokensOut: 8_000 },
+    });
+  });
+
+  it('bills the tokens of a failure BullMQ will retry', async () => {
+    const { processor, provider, aiScanService } = setup();
+    // The first answer is invalid, then the retry times out.
+    provider.complete
+      .mockRejectedValueOnce(
+        new AiError('invalid_response', {
+          usage: { inputTokens: 900, outputTokens: 30 },
+        }),
+      )
+      .mockRejectedValueOnce(new AiError('timeout'));
+
+    const error = await processor.process(job).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ code: 'timeout' });
+    expect(error).not.toBeInstanceOf(AiJobFailure);
+    expect(aiScanService.recordUsage).toHaveBeenCalledWith('org_1', {
+      inputTokens: 900,
+      outputTokens: 30,
+    });
+  });
+
+  it('records nothing when no answer came back', async () => {
+    const { processor, provider, aiScanService } = setup();
+    provider.complete.mockRejectedValue(new AiError('rate_limited'));
+    await processor.process(job).catch(() => undefined);
+    expect(aiScanService.recordUsage).not.toHaveBeenCalled();
+  });
+
   // claude-sonnet-5 via SumoPod leaves out a required field in about one
   // answer in five; one missing field used to cost the whole review.
   describe('an answer missing a field', () => {
