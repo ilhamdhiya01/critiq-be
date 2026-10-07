@@ -177,6 +177,7 @@ function setup(
     id: 'anthropic',
     complete: jest.fn(),
     healthcheck: jest.fn(),
+    listModels: jest.fn(),
   };
   const factory = { for: jest.fn().mockResolvedValue(provider) };
   const pullsService = {

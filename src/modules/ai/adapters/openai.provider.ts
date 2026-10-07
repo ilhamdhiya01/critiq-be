@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { AiError, toAiError } from '../ai-error';
 import {
+  AiModelInfo,
   AiProvider,
   AiProviderConfig,
   AiProviderName,
@@ -10,6 +11,47 @@ import {
 import { toStrictSchema } from '../json-schema';
 
 export const HEALTHCHECK_TIMEOUT_MS = 15_000;
+// More than any provider offers today; a guard, not a page size.
+const MODEL_LIST_CAP = 200;
+
+// OpenAI's /models lists every kind of model — embeddings, speech, images,
+// moderation — with no capability field. Only chat models can review a diff.
+const NON_CHAT_MODEL =
+  /embedding|tts|whisper|dall-e|image|audio|realtime|transcribe|moderation|search|davinci|babbage/i;
+const OPENAI_CHAT_MODEL = /^(gpt-|o\d|chatgpt-)/i;
+
+export function isChatModelId(id: string): boolean {
+  return !NON_CHAT_MODEL.test(id);
+}
+
+// Models from an OpenAI-style /models list, chat models only. `onlyKnown`
+// keeps OpenAI's own chat families; a gateway's names are its own.
+export async function listChatModels(
+  client: OpenAI,
+  onlyKnown: boolean,
+): Promise<AiModelInfo[]> {
+  const models: AiModelInfo[] = [];
+  for await (const model of client.models.list({
+    timeout: HEALTHCHECK_TIMEOUT_MS,
+  })) {
+    if (
+      !isChatModelId(model.id) ||
+      (onlyKnown && !OPENAI_CHAT_MODEL.test(model.id))
+    ) {
+      continue;
+    }
+    models.push({
+      id: model.id,
+      label: model.id,
+      contextWindow: null,
+      createdAt: model.created ? new Date(model.created * 1000) : null,
+    });
+    if (models.length >= MODEL_LIST_CAP) {
+      break;
+    }
+  }
+  return models;
+}
 
 export function parseJsonOrThrow(text: string | null | undefined): unknown {
   const raw = text ?? '';
@@ -78,6 +120,14 @@ export class OpenAiProvider implements AiProvider {
         timeout: HEALTHCHECK_TIMEOUT_MS,
       });
       return { model: model.id };
+    } catch (error) {
+      throw toAiError(error);
+    }
+  }
+
+  async listModels(): Promise<AiModelInfo[]> {
+    try {
+      return await listChatModels(this.client, true);
     } catch (error) {
       throw toAiError(error);
     }

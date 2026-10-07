@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   Req,
 } from '@nestjs/common';
 import type { Request } from 'express';
@@ -14,6 +15,8 @@ import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { Role } from '../../generated/prisma/enums';
 import type { JwtPayload } from '../auth/auth.service';
+import { AiModelsService } from './ai-models.service';
+import { ListAiModelsQueryDto, PreviewAiModelsDto } from './dto/ai-models.dto';
 import { TestAiSettingsDto } from './dto/test-ai-settings.dto';
 import { UpdateAiSettingsDto } from './dto/update-ai-settings.dto';
 import { SettingsService } from './settings.service';
@@ -28,7 +31,10 @@ interface RequestWithSession extends Request {
 // — enough for the PR page to explain why there is no AI summary.
 @Controller('orgs/:orgId/settings/ai')
 export class SettingsController {
-  constructor(private readonly settingsService: SettingsService) {}
+  constructor(
+    private readonly settingsService: SettingsService,
+    private readonly aiModelsService: AiModelsService,
+  ) {}
 
   @Get()
   @OrgAuth([])
@@ -56,5 +62,29 @@ export class SettingsController {
   @ResponseMessage('AI connection tested')
   testAi(@Param('orgId') orgId: string, @Body() dto: TestAiSettingsDto) {
     return this.settingsService.testAi(orgId, dto);
+  }
+
+  // The models the stored key can use, for the model picker. 200 even when
+  // the provider cannot be asked — then `source: "catalog"` + `warning`.
+  @Get('models')
+  @OrgAuth([Role.ADMIN])
+  @ResponseMessage('AI models retrieved successfully')
+  listModels(
+    @Param('orgId') orgId: string,
+    @Query() query: ListAiModelsQueryDto,
+  ) {
+    return this.aiModelsService.listForOrg(orgId, query.provider);
+  }
+
+  // Same, with a key/base URL typed in the form before saving them.
+  @Post('models')
+  @HttpCode(HttpStatus.OK)
+  @OrgAuth([Role.ADMIN])
+  @ResponseMessage('AI models retrieved successfully')
+  previewModels(
+    @Param('orgId') orgId: string,
+    @Body() dto: PreviewAiModelsDto,
+  ) {
+    return this.aiModelsService.preview(orgId, dto);
   }
 }
