@@ -18,15 +18,24 @@ export interface AiRequest {
   timeoutMs: number;
 }
 
+export interface AiUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface AiResult {
   // The tool call's arguments (or the JSON-mode object). Not yet validated —
   // the caller checks it against the schema it asked for.
   toolInput: unknown;
-  usage: { inputTokens: number; outputTokens: number };
+  usage: AiUsage;
   model: string;
   // 'native' = the vendor's tool/function calling; 'json_mode' = an
   // OpenAI-compatible server that rejected tools and answered in JSON mode.
   structuredOutput: 'native' | 'json_mode';
+  // The model reasoned before answering (reasoning text or reasoning
+  // tokens in the response). Such a model can spend the whole output
+  // budget on reasoning when the diff is large — see reasoning_exhausted.
+  reasoning?: boolean;
   // The provider's whole message (every tool call, any text beside it) —
   // only for the encrypted raw response kept when the answer is invalid.
   // Never logged.

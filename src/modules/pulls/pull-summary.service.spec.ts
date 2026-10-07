@@ -121,6 +121,37 @@ describe('PullSummaryService.getSummary', () => {
     expect(summary.error?.hint).toMatch(hint);
   });
 
+  // The same request stops at the same limit again: regenerating is not the
+  // fix, another model is.
+  it.each([
+    ['reasoning_exhausted', /spent its whole output budget on reasoning/],
+    ['output_truncated', /cut off/],
+  ])('does not suggest regenerating after %s', async (aiErrorCode, hint) => {
+    const { service } = setup(
+      latestScan({
+        aiStatus: AiScanStatus.FAILED,
+        aiErrorCode,
+        aiSummary: null,
+      }),
+    );
+    const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+    expect(summary.error?.code).toBe(aiErrorCode);
+    expect(summary.error?.hint).toMatch(hint);
+    expect(summary.error?.hint).toMatch(/Regenerating will fail/);
+  });
+
+  it('suggests regenerating after other failures', async () => {
+    const { service } = setup(
+      latestScan({
+        aiStatus: AiScanStatus.FAILED,
+        aiErrorCode: 'invalid_response',
+        aiSummary: null,
+      }),
+    );
+    const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+    expect(summary.error?.hint).toMatch(/can regenerate it/);
+  });
+
   it('404s a PR from another organization', async () => {
     const { service } = setup();
     await expect(

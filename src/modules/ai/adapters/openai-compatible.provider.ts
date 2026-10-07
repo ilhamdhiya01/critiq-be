@@ -13,6 +13,7 @@ import {
   parseJsonOrThrow,
   throwIfTruncated,
   usageOf,
+  usedReasoning,
 } from './openai.provider';
 
 // A 400/404 whose message names tools or function calling: the server (an
@@ -116,11 +117,13 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
       { timeout: req.timeoutMs },
     );
     throwIfTruncated(response, req.maxTokens);
+    const usage = usageOf(response);
     return {
-      toolInput: parseJsonOrThrow(response.choices[0]?.message?.content),
-      usage: usageOf(response),
+      toolInput: parseJsonOrThrow(response.choices[0]?.message?.content, usage),
+      usage,
       model: response.model,
       structuredOutput: 'json_mode',
+      reasoning: usedReasoning(response),
       raw: response.choices[0]?.message ?? null,
     };
   }

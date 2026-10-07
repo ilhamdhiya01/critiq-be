@@ -394,6 +394,64 @@ describe('SettingsService — test connection', () => {
     expect(provider.complete.mock.calls).toHaveLength(1); // no retry
   });
 
+  // The fixture is small, so a reasoning model passes it and may then fail
+  // every large diff with reasoning_exhausted.
+  it('passes a reasoning model with a warning that survives a reload', async () => {
+    const { service, provider, org } = setup();
+    provider.complete.mockResolvedValue({
+      toolInput: { summary: 'Disables TLS verification.', findings: [] },
+      usage: { inputTokens: 410, outputTokens: 900 },
+      model: 'deepseek-v4-flash',
+      structuredOutput: 'native',
+      reasoning: true,
+    });
+
+    const result = await service.testAi(ORG, {});
+
+    expect(result).toMatchObject({
+      ok: true,
+      error: null,
+      warning: {
+        code: 'reasoning_model',
+        message: expect.any(String) as unknown,
+      },
+    });
+    expect(org.aiLastTest).toMatchObject({ warning: 'reasoning_model' });
+  });
+
+  it('has no warning for a model that answers directly', async () => {
+    const { service, org } = setup();
+    const result = await service.testAi(ORG, {});
+    expect(result.warning).toBeNull();
+    expect(org.aiLastTest).toMatchObject({ warning: null });
+  });
+
+  it('records TEST usage for a billed failure', async () => {
+    const { service, provider, prisma } = setup();
+    provider.complete.mockRejectedValue(
+      new AiError('reasoning_exhausted', {
+        usage: { inputTokens: 410, outputTokens: 1000 },
+      }),
+    );
+
+    const result = await service.testAi(ORG, {});
+
+    expect(result).toMatchObject({
+      ok: false,
+      usage: { inputTokens: 410, outputTokens: 1000 },
+      error: { code: 'reasoning_exhausted' },
+      warning: null,
+    });
+    expect(prisma.aiUsageDaily.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          kind: AiUsageKind.TEST,
+          outputTokens: 1000,
+        }) as unknown,
+      }),
+    );
+  });
+
   // Acceptance 10.
   it('allows five tests per hour', async () => {
     const { service } = setup();
