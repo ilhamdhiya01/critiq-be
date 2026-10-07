@@ -34,13 +34,16 @@ export const validationSchema = Joi.object({
   SCAN_CONCURRENCY: Joi.number().default(3),
   SCAN_JOB_TIMEOUT_MS: Joi.number().default(120000),
   SCAN_MAX_DIFF_BYTES: Joi.number().default(1048576),
+  // Changed files parsed by code.syntax_error per scan (one contents-API
+  // fetch each); 0 turns the check off.
+  SCAN_SYNTAX_MAX_FILES: Joi.number().integer().min(0).default(50),
   // Comma-separated hostnames, e.g. `vllm.internal,localhost`. Optional:
   // empty means every openai_compatible base URL must be public https.
   AI_COMPAT_HTTP_ALLOWLIST: Joi.string().allow('').optional(),
   AI_CONCURRENCY: Joi.number().integer().min(1).default(2),
   AI_MAX_INPUT_TOKENS: Joi.number().integer().min(1000).default(60000),
-  AI_MAX_OUTPUT_TOKENS: Joi.number().integer().min(256).default(8000),
-  AI_TIMEOUT_MS: Joi.number().integer().min(1000).default(90000),
+  AI_MAX_OUTPUT_TOKENS: Joi.number().integer().min(256).default(32000),
+  AI_TIMEOUT_MS: Joi.number().integer().min(1000).default(300000),
   AI_CONTEXT_LINES: Joi.number().integer().min(0).default(30),
   AI_MAX_DIFF_BYTES: Joi.number().integer().min(1024).default(204800),
   AI_KEEP_DEDUPED: Joi.boolean().default(false),

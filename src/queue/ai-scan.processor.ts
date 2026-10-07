@@ -2,7 +2,6 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, UnrecoverableError } from 'bullmq';
-import { createHash } from 'crypto';
 import type Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -19,7 +18,11 @@ import {
 import { completeValidated } from '../modules/ai/ai-call';
 import { AiError, AiErrorCode, toAiError } from '../modules/ai/ai-error';
 import { AiProviderFactory } from '../modules/ai/ai-provider.factory';
-import { AiProvider, AiResult } from '../modules/ai/ai-provider.interface';
+import {
+  AiProvider,
+  AiResult,
+  AiUsage,
+} from '../modules/ai/ai-provider.interface';
 import { dedupeAiFindings } from '../modules/ai/scan/ai-deduper';
 import {
   buildReviewPrompt,
@@ -49,9 +52,14 @@ import { notifyIfAllCriticalResolved } from './lifecycle/scan-counts';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AI_QUEUE_NAME, aiBackoff, AiJobPayload } from './ai-queue.constants';
+import { cachedHeadFileContents } from './head-file-cache';
+import { StoredFinding } from './lifecycle/plan-findings';
+import {
+  isComparableRun,
+  mergeWithPreviousRun,
+} from '../modules/ai/scan/regenerate-merge';
 import { isIgnoredPath, isMustScanPath } from './rules/path-filter';
 
-const HEAD_FILE_CACHE_SECONDS = 60;
 const MAX_CONTEXT_FILES = 50;
 const RAW_RETENTION_SECONDS = 30 * 86_400;
 const MAX_RAW_CHARS = 100_000;
@@ -206,11 +214,15 @@ export class AiScanProcessor
       )
       .slice(0, MAX_CONTEXT_FILES)
       .map((file) => file.path);
-    const contents = await this.headFileContents(
-      organizationId,
-      scan.repositoryId,
-      pullId,
-      scan.headSha,
+    const contents = await cachedHeadFileContents(
+      this.redis,
+      this.pullsService,
+      {
+        organizationId,
+        repositoryId: scan.repositoryId,
+        pullId,
+        sha: scan.headSha,
+      },
       contextPaths,
     );
     const files: PromptFileInput[] = diff.files.map((file) => ({
@@ -291,9 +303,18 @@ export class AiScanProcessor
       });
     } catch (error) {
       const aiError = toAiError(error);
+      if (aiError.usage) {
+        await this.recordFailedUsage(
+          scanId,
+          organizationId,
+          aiError.usage,
+          log,
+        );
+      }
       if (
         aiError.code === 'invalid_response' ||
-        aiError.code === 'output_truncated'
+        aiError.code === 'output_truncated' ||
+        aiError.code === 'reasoning_exhausted'
       ) {
         await this.keepRawResponse(scanId, aiError, log);
         throw new AiJobFailure(aiError.code);
@@ -333,6 +354,18 @@ export class AiScanProcessor
       lifecycleContext,
       this.configService.get<boolean>('ai.keepDeduped') ?? false,
     );
+    // A new scan of the same commit (a rescan, a forced regenerate) by a
+    // comparable run: the base scan's AI findings are merged in rather than
+    // RESOLVED — nothing changed in the code. A regenerate of this same
+    // scan is merged when persisting (job.data.mergePrevious).
+    const earlierRun = await this.comparableBaseRun(
+      scan,
+      provider.id,
+      lifecycleContext.baseAi,
+    );
+    const baseMerge = earlierRun
+      ? mergeWithPreviousRun(rows, earlierRun, 'base_scan')
+      : null;
 
     const aiProvider = provider.id;
     const aiModel = completion.model;
@@ -347,7 +380,7 @@ export class AiScanProcessor
             ? (review.risk_level.toUpperCase() as AiRiskLevel)
             : null,
           filesOmitted: prompt.filesOmitted,
-          rows,
+          rows: baseMerge?.rows ?? rows,
           total: review.findings.length,
           rejected: validation.rejected.length,
           dropped: validation.droppedLowConfidence,
@@ -358,6 +391,7 @@ export class AiScanProcessor
           tokensIn: completion.usage.inputTokens,
           tokensOut: completion.usage.outputTokens,
           flags: partial ? [PARTIAL_RESPONSE] : [],
+          mergeWithPrevious: job.data.mergePrevious ?? false,
         },
         { aiStatus: AiScanStatus.RUNNING },
       ),
@@ -367,6 +401,14 @@ export class AiScanProcessor
     if (!persisted) {
       this.logger.info('ai.superseded_during_run', log);
       return;
+    }
+    for (const [kind, stats] of [
+      ['base_scan', baseMerge?.stats],
+      ['same_scan', persisted.merge],
+    ] as const) {
+      if (stats) {
+        this.logger.info('ai.regenerate_merged', { ...log, kind, ...stats });
+      }
     }
 
     // 6. Cache, notification, audit. A partial review is not cached: the
@@ -517,58 +559,73 @@ export class AiScanProcessor
     }
   }
 
-  // Head-file text per path, cached 60 s per (repo, sha, path) so a retry or
-  // a regenerate right after does not refetch.
-  private async headFileContents(
+  // The base scan's live AI findings when the base is the same commit
+  // reviewed by a comparable run (same provider, model family, prompt);
+  // null otherwise — a new commit, or another model, is a fresh review.
+  private async comparableBaseRun(
+    scan: {
+      diffMode: DiffMode;
+      baseScanId: string | null;
+      headSha: string;
+      aiModel: string | null;
+    },
+    providerId: string,
+    baseAi: StoredFinding[],
+  ): Promise<StoredFinding[] | null> {
+    if (scan.diffMode !== DiffMode.FULL || !scan.baseScanId) {
+      return null;
+    }
+    const base = await this.prisma.scan.findUnique({
+      where: { id: scan.baseScanId },
+      select: {
+        headSha: true,
+        aiProvider: true,
+        aiModel: true,
+        aiPromptVersion: true,
+      },
+    });
+    if (
+      !base ||
+      base.headSha !== scan.headSha ||
+      !isComparableRun(
+        {
+          provider: base.aiProvider,
+          model: base.aiModel,
+          promptVersion: base.aiPromptVersion,
+        },
+        {
+          provider: providerId,
+          model: scan.aiModel,
+          promptVersion: AI_PROMPT_VERSION,
+        },
+      )
+    ) {
+      return null;
+    }
+    return baseAi.filter((finding) => finding.suppressedReason === null);
+  }
+
+  // A failed answer is billed all the same: counted toward the daily budget,
+  // and shown on the scan so the cost of the failure is visible. The scan
+  // row holds this attempt's tokens; a later BullMQ attempt overwrites it.
+  private async recordFailedUsage(
+    scanId: string,
     organizationId: string,
-    repositoryId: string,
-    pullId: string,
-    sha: string,
-    paths: string[],
-  ): Promise<Map<string, string | null>> {
-    const keyOf = (path: string) =>
-      `ai:file:${repositoryId}:${sha}:${createHash('sha1').update(path).digest('hex')}`;
-    const contents = new Map<string, string | null>();
-    const missing: string[] = [];
-    for (const path of paths) {
-      let cached: string | null = null;
-      try {
-        cached = await this.redis.get(keyOf(path));
-      } catch {
-        cached = null;
-      }
-      if (cached !== null) {
-        contents.set(path, cached);
-      } else {
-        missing.push(path);
-      }
+    usage: AiUsage,
+    log: LogContext,
+  ): Promise<void> {
+    try {
+      await this.aiScanService.recordUsage(organizationId, usage);
+      await this.prisma.scan.update({
+        where: { id: scanId },
+        data: {
+          aiTokensIn: usage.inputTokens,
+          aiTokensOut: usage.outputTokens,
+        },
+      });
+    } catch {
+      this.logger.warn('ai.usage_record_failed', log);
     }
-    if (missing.length === 0) {
-      return contents;
-    }
-    const fetched = await this.pullsService.getHeadFileContents(
-      organizationId,
-      repositoryId,
-      pullId,
-      sha,
-      missing,
-    );
-    for (const [path, content] of fetched) {
-      contents.set(path, content);
-      if (content !== null) {
-        try {
-          await this.redis.set(
-            keyOf(path),
-            content,
-            'EX',
-            HEAD_FILE_CACHE_SECONDS,
-          );
-        } catch {
-          // cache is best effort
-        }
-      }
-    }
-    return contents;
   }
 
   // The raw answer of an invalid or truncated response, encrypted, 30 days —

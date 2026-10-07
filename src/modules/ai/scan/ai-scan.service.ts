@@ -36,6 +36,7 @@ import {
   persistAiResult,
   ScanForAi,
 } from './ai-scan.persistence';
+import { isComparableRun } from './regenerate-merge';
 
 const CACHE_TTL_SECONDS = 30 * 86_400;
 const BUDGET_NOTIFY_TTL_SECONDS = 26 * 3600;
@@ -203,8 +204,19 @@ export class AiScanService {
       diffMode: scan.diffMode,
       prevHeadSha: scan.prevHeadSha,
     });
+    // A regenerate of this scan by a comparable run keeps the earlier
+    // run's findings (regenerate-merge.ts). Read before step 8 overwrites
+    // the scan's AI columns.
+    const mergePrevious = isComparableRun(
+      {
+        provider: scan.aiProvider,
+        model: scan.aiModel,
+        promptVersion: scan.aiPromptVersion,
+      },
+      { provider, model, promptVersion: AI_PROMPT_VERSION },
+    );
     if (!options.force) {
-      const cached = await this.copyFromCache(scan, cacheKey);
+      const cached = await this.copyFromCache(scan, cacheKey, mergePrevious);
       if (cached) {
         this.logger.info('audit.ai.completed', {
           ...log,
@@ -234,7 +246,12 @@ export class AiScanService {
     try {
       await this.aiQueue.add(
         'ai',
-        { scanId, organizationId: scan.organizationId, pullId: scan.pullId },
+        {
+          scanId,
+          organizationId: scan.organizationId,
+          pullId: scan.pullId,
+          mergePrevious,
+        },
         {
           jobId: buildAiJobId(scanId, Date.now()),
           attempts: AI_JOB_ATTEMPTS,
@@ -404,6 +421,7 @@ export class AiScanService {
   private async copyFromCache(
     scan: ScanForAi,
     cacheKey: string,
+    mergePrevious: boolean,
   ): Promise<boolean> {
     let sourceScanId: string | null;
     try {
@@ -500,6 +518,7 @@ export class AiScanService {
           promptVersion: source.aiPromptVersion ?? AI_PROMPT_VERSION,
           tokensIn: null,
           tokensOut: null,
+          mergeWithPrevious: mergePrevious,
         },
         // Any settled state (or none yet) may take a cached copy; a run in
         // flight may not be overwritten.

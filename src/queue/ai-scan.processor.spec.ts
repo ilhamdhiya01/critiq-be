@@ -18,6 +18,7 @@ import { riskLevelFromCounts } from '../modules/ai/scan/ai-scan.persistence';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AiJobPayload } from './ai-queue.constants';
+import { AI_PROMPT_VERSION } from '../modules/ai/scan/ai-prompt.constants';
 import { AiJobFailure, AiScanProcessor } from './ai-scan.processor';
 
 // ESM-only packages and heavy collaborators — all replaced by stubs.
@@ -109,7 +110,12 @@ function result(review: Review, overrides: Partial<AiResult> = {}): AiResult {
 }
 
 function setup(
-  options: { findingsCount?: number; staticFindings?: unknown[] } = {},
+  options: {
+    findingsCount?: number;
+    staticFindings?: unknown[];
+    // This scan's AI rows from an earlier run (regenerate merge).
+    earlierRun?: unknown[];
+  } = {},
 ) {
   const tx = {
     scan: {
@@ -117,6 +123,7 @@ function setup(
       update: jest.fn(),
     },
     finding: {
+      findMany: jest.fn().mockResolvedValue(options.earlierRun ?? []),
       deleteMany: jest.fn(),
       createMany: jest.fn(),
       // recomputeScanCounts
@@ -444,6 +451,66 @@ describe('AiScanProcessor', () => {
     );
   });
 
+  // deepseek-v4-flash, MR !1792: reasoning used the whole output budget.
+  it('fails reasoning_exhausted at once, keeps the raw answer and bills it', async () => {
+    const { processor, provider, prisma, redis, aiScanService } = setup();
+    provider.complete.mockRejectedValue(
+      new AiError('reasoning_exhausted', {
+        raw: { reasoning_content: '…' },
+        usage: { inputTokens: 40_000, outputTokens: 8_000 },
+      }),
+    );
+
+    const error = await processor.process(job).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AiJobFailure);
+    expect(error).toMatchObject({ code: 'reasoning_exhausted' });
+    expect(provider.complete.mock.calls).toHaveLength(1);
+    expect(redis.set).toHaveBeenCalledWith(
+      'ai:raw:scan_1',
+      expect.stringMatching(/^enc\(/),
+      'EX',
+      30 * 86_400,
+    );
+    // Counted toward the daily budget, and visible on the scan.
+    expect(aiScanService.recordUsage).toHaveBeenCalledWith('org_1', {
+      inputTokens: 40_000,
+      outputTokens: 8_000,
+    });
+    expect(prisma.scan.update).toHaveBeenCalledWith({
+      where: { id: 'scan_1' },
+      data: { aiTokensIn: 40_000, aiTokensOut: 8_000 },
+    });
+  });
+
+  it('bills the tokens of a failure BullMQ will retry', async () => {
+    const { processor, provider, aiScanService } = setup();
+    // The first answer is invalid, then the retry times out.
+    provider.complete
+      .mockRejectedValueOnce(
+        new AiError('invalid_response', {
+          usage: { inputTokens: 900, outputTokens: 30 },
+        }),
+      )
+      .mockRejectedValueOnce(new AiError('timeout'));
+
+    const error = await processor.process(job).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ code: 'timeout' });
+    expect(error).not.toBeInstanceOf(AiJobFailure);
+    expect(aiScanService.recordUsage).toHaveBeenCalledWith('org_1', {
+      inputTokens: 900,
+      outputTokens: 30,
+    });
+  });
+
+  it('records nothing when no answer came back', async () => {
+    const { processor, provider, aiScanService } = setup();
+    provider.complete.mockRejectedValue(new AiError('rate_limited'));
+    await processor.process(job).catch(() => undefined);
+    expect(aiScanService.recordUsage).not.toHaveBeenCalled();
+  });
+
   // claude-sonnet-5 via SumoPod leaves out a required field in about one
   // answer in five; one missing field used to cost the whole review.
   describe('an answer missing a field', () => {
@@ -642,6 +709,144 @@ describe('AiScanProcessor', () => {
     );
     await processor.process(job);
     expect(scanUpdate(tx)).toMatchObject({ aiFlags: ['suspicious_low_risk'] });
+  });
+
+  // Regenerating the same commit with the same model: the earlier run's
+  // findings are merged in, not replaced (MR !1792 lost a critical).
+  describe('a re-run on the same commit', () => {
+    const earlierRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'old_1',
+      source: FindingSource.AI,
+      ruleId: 'ai.error_handling',
+      severity: 'CRITICAL',
+      title: 'Unhandled promise rejection',
+      message: 'refresh() can reject.',
+      filePath: 'src/session.ts',
+      lineStart: 4,
+      lineEnd: 4,
+      snippet: null,
+      fingerprint: 'fp-old-wording',
+      suppressedReason: null,
+      category: FindingCategory.ERROR_HANDLING,
+      confidence: 0.9,
+      reportedSeverity: 'CRITICAL',
+      firstSeenScanId: 'scan_1',
+      status: 'NEW',
+      originFindingId: null,
+      ...overrides,
+    });
+    const leakedTimer = earlierRow({
+      id: 'old_2',
+      title: 'Timer never cleared',
+      lineStart: 5,
+      lineEnd: 5,
+      fingerprint: 'fp-timer',
+      category: FindingCategory.PERFORMANCE,
+      severity: 'MAJOR',
+    });
+    const majorThisTime = result({
+      summary: 'Rotates sessions.',
+      risk_level: 'medium',
+      findings: [aiFinding({ severity: 'major' })],
+    });
+
+    it('keeps the higher severity and what the latest run dropped', async () => {
+      const { processor, provider, tx, logger } = setup({
+        earlierRun: [earlierRow(), leakedTimer],
+      });
+      provider.complete.mockResolvedValue(majorThisTime);
+
+      await processor.process({
+        ...job,
+        data: { ...job.data, mergePrevious: true },
+      } as Job<AiJobPayload>);
+
+      expect(createdFindings(tx)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: 'Unhandled promise rejection',
+            severity: 'CRITICAL',
+            previousRunSeverity: 'CRITICAL',
+            latestRunSeverity: 'MAJOR',
+          }),
+          expect.objectContaining({
+            title: 'Timer never cleared',
+            notReproduced: true,
+            status: 'NEW',
+          }),
+        ]),
+      );
+      expect(logger.info).toHaveBeenCalledWith(
+        'ai.regenerate_merged',
+        expect.objectContaining({
+          kind: 'same_scan',
+          matched: 1,
+          escalated: 1,
+          notReproduced: 1,
+        }),
+      );
+    });
+
+    it('replaces the earlier run when it is not comparable', async () => {
+      const { processor, provider, tx } = setup({ earlierRun: [leakedTimer] });
+      provider.complete.mockResolvedValue(majorThisTime);
+
+      await processor.process(job);
+
+      expect(tx.finding.findMany).not.toHaveBeenCalled();
+      expect(createdFindings(tx)).toEqual([
+        expect.objectContaining({ severity: 'MAJOR' }),
+      ]);
+    });
+
+    // A rescan / forced regenerate makes a new scan whose base is the same
+    // commit: the lifecycle would mark what the model dropped RESOLVED.
+    it('carries a base finding of the same commit instead of resolving it', async () => {
+      const { processor, provider, prisma, tx } = setup();
+      const scanFields = (await prisma.scan.findUniqueOrThrow()) as Record<
+        string,
+        unknown
+      >;
+      prisma.scan.findUniqueOrThrow.mockResolvedValue({
+        ...scanFields,
+        baseScanId: 'scan_1',
+      });
+      prisma.scan.findUnique.mockImplementation(
+        (args: { where: { id: string } }) =>
+          Promise.resolve(
+            args.where.id === 'scan_1'
+              ? {
+                  headSha: 'abc123',
+                  aiProvider: 'anthropic',
+                  aiModel: 'claude-sonnet-5',
+                  aiPromptVersion: AI_PROMPT_VERSION,
+                }
+              : { headSha: 'abc123', criticalCount: 0 },
+          ),
+      );
+      const original = prisma.finding.findMany.getMockImplementation()!;
+      prisma.finding.findMany.mockImplementation(
+        (args: { where?: Record<string, unknown>; distinct?: unknown }) =>
+          args.where?.scanId === 'scan_1' &&
+          args.where?.source === FindingSource.AI
+            ? Promise.resolve([leakedTimer])
+            : original(args),
+      );
+      provider.complete.mockResolvedValue(
+        result({ summary: 'Fine.', risk_level: 'low', findings: [] }),
+      );
+
+      await processor.process(job);
+
+      expect(createdFindings(tx)).toEqual([
+        expect.objectContaining({
+          title: 'Timer never cleared',
+          notReproduced: true,
+          status: 'PERSISTED',
+          originFindingId: 'old_2',
+        }),
+      ]);
+    });
   });
 
   it('settles as not_configured when settings changed after queueing', async () => {

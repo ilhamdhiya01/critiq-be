@@ -34,7 +34,11 @@ describe('completeValidated', () => {
       .mockResolvedValueOnce(VALID);
     await expect(
       completeValidated(provider(complete), TEST_REQUEST),
-    ).resolves.toEqual(VALID);
+    ).resolves.toEqual({
+      ...VALID,
+      // Both attempts were billed.
+      usage: { inputTokens: 20, outputTokens: 10 },
+    });
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
@@ -176,6 +180,69 @@ describe('completeValidated', () => {
       const salvage = jest.fn();
       await completeValidated(provider(complete), TEST_REQUEST, { salvage });
       expect(salvage).not.toHaveBeenCalled();
+    });
+  });
+
+  // Every attempt the provider answered is billed, usable or not.
+  describe('usage', () => {
+    const billed = (code: 'invalid_response' | 'reasoning_exhausted') =>
+      new AiError(code, { usage: { inputTokens: 100, outputTokens: 50 } });
+
+    it('puts the total of both attempts on the error finally thrown', async () => {
+      const complete = jest.fn().mockRejectedValue(billed('invalid_response'));
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST),
+      ).rejects.toMatchObject({
+        code: 'invalid_response',
+        usage: { inputTokens: 200, outputTokens: 100 },
+      });
+    });
+
+    it('counts a schema mismatch from its result', async () => {
+      const complete = jest
+        .fn()
+        .mockResolvedValue({ ...VALID, toolInput: { summary: 1 } });
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST),
+      ).rejects.toMatchObject({ usage: { inputTokens: 20, outputTokens: 10 } });
+    });
+
+    it('carries usage on a non-retried failure', async () => {
+      const complete = jest
+        .fn()
+        .mockRejectedValue(billed('reasoning_exhausted'));
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST),
+      ).rejects.toMatchObject({
+        code: 'reasoning_exhausted',
+        usage: { inputTokens: 100, outputTokens: 50 },
+      });
+      expect(complete).toHaveBeenCalledTimes(1);
+    });
+
+    // An invalid first answer, then the transport fails: the first answer
+    // was still billed.
+    it('keeps the tokens of an earlier attempt on a transport error', async () => {
+      const complete = jest
+        .fn()
+        .mockRejectedValueOnce(billed('invalid_response'))
+        .mockRejectedValueOnce(new AiError('timeout'));
+      await expect(
+        completeValidated(provider(complete), TEST_REQUEST),
+      ).rejects.toMatchObject({
+        code: 'timeout',
+        retryable: true,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      });
+    });
+
+    it('leaves usage absent when nothing was billed', async () => {
+      const complete = jest.fn().mockRejectedValue(new AiError('auth_failed'));
+      const error = await completeValidated(
+        provider(complete),
+        TEST_REQUEST,
+      ).catch((e: AiError) => e);
+      expect(error.usage).toBeUndefined();
     });
   });
 });

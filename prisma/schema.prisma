@@ -551,15 +551,26 @@ model Finding {
 
   // Shared vocabulary for static and AI findings, used to dedupe one against
   // the other. Nullable only for rows the migration backfill could not map.
-  category         FindingCategory?
+  category            FindingCategory?
   // AI only, 0.00–1.00 as the model reported it.
-  confidence       Decimal?         @db.Decimal(3, 2)
+  confidence          Decimal?         @db.Decimal(3, 2)
   // AI only: the severity the model reported, before Critiq's calibration
   // (confidence downgrade, hedged-title guard) — kept to evaluate it.
-  reportedSeverity FindingSeverity?
+  reportedSeverity    FindingSeverity?
+  // AI only — a re-run on the same commit (regenerate, or a rescan with no
+  // new commits) by the same provider, model and prompt is merged with the
+  // earlier run instead of replacing it: a model is not deterministic, and a
+  // critical that vanishes on regenerate is the dangerous kind of noise.
+  // When the two runs rated a finding differently, `severity` is the higher
+  // and these hold each run's own; null when they agreed.
+  previousRunSeverity FindingSeverity?
+  latestRunSeverity   FindingSeverity?
+  // Reported by an earlier run on the same commit but not by the latest —
+  // kept and counted until a reviewer decides (dismiss: v1.5.2).
+  notReproduced       Boolean          @default(false)
   // AI finding kept although it duplicates this static finding
   // (AI_KEEP_DEDUPED=true, suppressedReason DEDUPE_STATIC).
-  dedupeOfId       String?
+  dedupeOfId          String?
 
   // Lifecycle (v1.5.1 langkah 3). pullId is denormalized from the scan so
   // lifecycle queries across a PR's scans stay cheap. A RESOLVED row lives

@@ -30,6 +30,25 @@ export function dropPersistedDuplicates<T extends { fingerprint: string }>(
   return candidates.filter((candidate) => !known.has(candidate.fingerprint));
 }
 
+// The same finding reported again, by fingerprint or — fingerprints differ
+// when the wording does — the same kind of problem at about the same place
+// with a very similar title. Exact matches are to be preferred over similar
+// ones by the caller.
+export function isSameFinding(
+  a: MatchableFinding,
+  b: MatchableFinding,
+): boolean {
+  return (
+    a.fingerprint === b.fingerprint ||
+    (a.source === b.source &&
+      a.filePath === b.filePath &&
+      a.category === b.category &&
+      Math.abs(a.lineStart - b.lineStart) <= REOPEN_LINE_DISTANCE &&
+      jaroWinkler(normalizeTitle(a.title), normalizeTitle(b.title)) >=
+        REOPEN_TITLE_SIMILARITY)
+  );
+}
+
 // The resolved finding a candidate re-opens, or null when it is new. Exact
 // fingerprint first; otherwise the same kind of problem at about the same
 // place with a very similar title — how an AI re-reports a partial fix.
@@ -37,20 +56,10 @@ export function findReopened(
   candidate: MatchableFinding,
   resolved: ResolvedFinding[],
 ): ResolvedFinding | null {
-  const exact = resolved.find((r) => r.fingerprint === candidate.fingerprint);
-  if (exact) {
-    return exact;
-  }
-  const title = normalizeTitle(candidate.title);
   return (
-    resolved.find(
-      (r) =>
-        r.source === candidate.source &&
-        r.filePath === candidate.filePath &&
-        r.category === candidate.category &&
-        Math.abs(r.lineStart - candidate.lineStart) <= REOPEN_LINE_DISTANCE &&
-        jaroWinkler(title, normalizeTitle(r.title)) >= REOPEN_TITLE_SIMILARITY,
-    ) ?? null
+    resolved.find((r) => r.fingerprint === candidate.fingerprint) ??
+    resolved.find((r) => isSameFinding(candidate, r)) ??
+    null
   );
 }
 
