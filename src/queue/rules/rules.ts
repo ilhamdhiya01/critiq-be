@@ -1,4 +1,5 @@
 import { Rule } from './rule.interface';
+import { SYNTAX_RULE_ID } from './syntax/syntax-check';
 import { secretAwsAccessKeyRule } from './definitions/secret.aws-access-key.rule';
 import { secretAssignmentLiteralRule } from './definitions/secret.assignment-literal.rule';
 import { secretPrivateKeyBlockRule } from './definitions/secret.private-key-block.rule';
@@ -46,3 +47,8 @@ export const RULES: Rule[] = [
   configDockerfileRootSecretRule,
   configCorsWildcardCredentialsRule,
 ];
+
+// Whole-file checks: not line rules (they read the changed file itself, see
+// syntax/syntax-check.ts), registered here so the rule list the PM checks
+// covers them too.
+export const FILE_RULE_IDS: string[] = [SYNTAX_RULE_ID];

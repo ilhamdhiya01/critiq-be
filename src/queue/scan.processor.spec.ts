@@ -1,4 +1,5 @@
 import { UnprocessableEntityException } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import Redis from 'ioredis';
@@ -49,6 +50,7 @@ const CONFIG: Record<string, unknown> = {
   'scan.concurrency': 3,
   'scan.jobTimeoutMs': 120_000,
   'scan.maxDiffBytes': 1_048_576,
+  'scan.syntaxMaxFiles': 50,
 };
 
 function stored(
@@ -127,6 +129,9 @@ function setup(options: {
   compare?: { files: typeof PUSH_2; ancestor: boolean };
   aiStatus?: AiScanStatus;
   resolvedCritical?: number;
+  // Head file contents for the syntax check; files not listed are
+  // unavailable (null), so it decides nothing about them.
+  heads?: Record<string, string>;
 }) {
   const written: Row[] = [];
   const tx = {
@@ -224,13 +229,28 @@ function setup(options: {
       ...(options.compare ?? { files: [], ancestor: true }),
       truncated: false,
     }),
+    getHeadFileContents: jest.fn(
+      (
+        _org: string,
+        _repo: string,
+        _pull: string,
+        _sha: string,
+        paths: string[],
+      ) =>
+        Promise.resolve(
+          new Map(paths.map((path) => [path, options.heads?.[path] ?? null])),
+        ),
+    ),
   };
   const aiScanService = {
     maybeEnqueue: jest
       .fn()
       .mockResolvedValue(options.aiStatus ?? AiScanStatus.SKIPPED_MANUAL_MODE),
   };
-  const redis = { set: jest.fn().mockResolvedValue('OK') };
+  const redis = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue('OK'),
+  };
   const logger = {
     info: jest.fn(),
     warn: jest.fn(),
@@ -440,5 +460,213 @@ describe('ScanProcessor — provider errors', () => {
     pullsService.getCompareDiff.mockRejectedValue(unreachable);
 
     await expect(processor.process(job)).rejects.toBe(unreachable);
+  });
+});
+
+// code.syntax_error: the changed file is read whole and parsed.
+describe('ScanProcessor — syntax check', () => {
+  const PATH = 'src/total.js';
+  const FIXED = [
+    'function total(items) {',
+    '  if (items.length === 0) {',
+    '    return 0;',
+    '  }',
+    '  return items.length;',
+    '}',
+    '',
+  ].join('\n');
+  const BROKEN = FIXED.replace('\n  }\n', '\n  // }\n');
+  const SYNTAX_FINGERPRINT = createHash('sha1')
+    .update(`code.syntax_error\0${PATH}`)
+    .digest('hex');
+  const brokenInBase = stored('s_syntax', PATH, 4, {
+    ruleId: 'code.syntax_error',
+    title: 'Syntax error',
+    category: FindingCategory.LOGIC,
+    fingerprint: SYNTAX_FINGERPRINT,
+  });
+
+  it('flags a commented-out brace as a new critical and notifies', async () => {
+    const { processor, pullsService, written, logger } = setup({
+      heads: { [PATH]: BROKEN },
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [
+        {
+          path: PATH,
+          previousPath: null,
+          status: 'modified',
+          patch: [
+            '@@ -1,6 +1,6 @@',
+            ' function total(items) {',
+            '   if (items.length === 0) {',
+            '     return 0;',
+            '-  }',
+            '+  // }',
+            '   return items.length;',
+            ' }',
+          ].join('\n'),
+        },
+      ],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        source: FindingSource.STATIC,
+        severity: FindingSeverity.CRITICAL,
+        category: FindingCategory.LOGIC,
+        status: FindingStatus.NEW,
+        filePath: PATH,
+        lineStart: 4,
+        suppressedReason: null,
+        fingerprint: SYNTAX_FINGERPRINT,
+      }),
+    ]);
+    expect(pullsService.getHeadFileContents).toHaveBeenCalledWith(
+      'org_1',
+      'repo_1',
+      'pull_1',
+      'bbb222',
+      [PATH],
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      'notification.pull_critical_found',
+      expect.objectContaining({ criticalCount: 1 }),
+    );
+  });
+
+  it('suppresses it in a data fixture', async () => {
+    const fixture = 'fixtures/broken.json';
+    const { processor, pullsService, written } = setup({
+      heads: { [fixture]: '{"a": \n' },
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [
+        {
+          path: fixture,
+          previousPath: null,
+          status: 'added',
+          patch: '@@ -0,0 +1 @@\n+{"a": ',
+        },
+      ],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        suppressedReason: 'TEST_FILE',
+      }),
+    ]);
+  });
+
+  // The fix adds `}` below the finding's line, which the push did not
+  // touch — carried by line, the finding would wrongly stay open.
+  it('resolves it when a later push makes the file parse again', async () => {
+    const fixedLater = BROKEN.replace('  // }\n', '  // }\n  }\n');
+    const { processor, written } = setup({
+      base: [brokenInBase],
+      compare: {
+        files: [
+          {
+            path: PATH,
+            previousPath: null,
+            status: 'modified',
+            patch: [
+              '@@ -3,3 +3,4 @@',
+              '     return 0;',
+              '   // }',
+              '+  }',
+              '   return items.length;',
+            ].join('\n'),
+          },
+        ],
+        ancestor: true,
+      },
+      heads: { [PATH]: fixedLater },
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        status: FindingStatus.RESOLVED,
+        originFindingId: 's_syntax',
+      }),
+    ]);
+  });
+
+  it('persists it while a later push leaves the file broken', async () => {
+    const { processor, written } = setup({
+      base: [brokenInBase],
+      compare: {
+        files: [
+          {
+            path: PATH,
+            previousPath: null,
+            status: 'modified',
+            patch: [
+              '@@ -2,3 +2,3 @@',
+              '   if (items.length === 0) {',
+              '-    return 0;',
+              '+    return -1;',
+              '   // }',
+            ].join('\n'),
+          },
+        ],
+        ancestor: true,
+      },
+      heads: { [PATH]: BROKEN.replace('return 0;', 'return -1;') },
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        status: FindingStatus.PERSISTED,
+        originFindingId: 's_syntax',
+        firstSeenScanId: 'scan_1',
+      }),
+    ]);
+  });
+
+  // Undecided: the finding carries by line as before, the scan still ends.
+  it('keeps the scan going when the file cannot be fetched', async () => {
+    const { processor, pullsService, written, logger } = setup({
+      base: [brokenInBase],
+      compare: {
+        files: [
+          {
+            path: PATH,
+            previousPath: null,
+            status: 'modified',
+            patch: '@@ -3,1 +3,1 @@\n-    return 0;\n+    return -1;',
+          },
+        ],
+        ancestor: true,
+      },
+    });
+    pullsService.getHeadFileContents.mockRejectedValue(new Error('boom'));
+
+    await processor.process(job);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'syntax.check_failed',
+      expect.objectContaining({ error: 'Error' }),
+    );
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        status: FindingStatus.PERSISTED,
+      }),
+    ]);
   });
 });

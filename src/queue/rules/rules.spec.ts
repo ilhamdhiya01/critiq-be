@@ -1,5 +1,5 @@
 import safeRegex from 'safe-regex2';
-import { RULES } from './rules';
+import { FILE_RULE_IDS, RULES } from './rules';
 
 describe('RULES', () => {
   it('has no duplicate rule ids', () => {
@@ -53,6 +53,12 @@ describe('RULES', () => {
         'secret.twilio_key',
       ].sort(),
     );
+  });
+
+  // Same contract as the list above: change only together with the spec.
+  it('registers exactly the expected whole-file checks', () => {
+    expect(FILE_RULE_IDS).toEqual(['code.syntax_error']);
+    expect(RULES.map((rule) => rule.id)).not.toContain('code.syntax_error');
   });
 
   // Acceptance 26. MAX_LINE_LENGTH caps the input a regex ever sees, but a

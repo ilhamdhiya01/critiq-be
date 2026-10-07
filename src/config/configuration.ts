@@ -57,6 +57,7 @@ export default () => ({
     concurrency: Number(process.env.SCAN_CONCURRENCY ?? 3),
     jobTimeoutMs: Number(process.env.SCAN_JOB_TIMEOUT_MS ?? 120000),
     maxDiffBytes: Number(process.env.SCAN_MAX_DIFF_BYTES ?? 1048576),
+    syntaxMaxFiles: Number(process.env.SCAN_SYNTAX_MAX_FILES ?? 50),
   },
   ai: {
     concurrency: Number(process.env.AI_CONCURRENCY ?? 2),
