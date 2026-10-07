@@ -1,5 +1,6 @@
 import { toAiError } from '../ai-error';
 import {
+  AiModelInfo,
   AiProviderConfig,
   AiProviderName,
   AiRequest,
@@ -7,6 +8,7 @@ import {
 } from '../ai-provider.interface';
 import {
   HEALTHCHECK_TIMEOUT_MS,
+  listChatModels,
   OpenAiProvider,
   parseJsonOrThrow,
   throwIfTruncated,
@@ -72,6 +74,16 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
         { timeout: HEALTHCHECK_TIMEOUT_MS },
       );
       return { model: response.model };
+    } catch (error) {
+      throw toAiError(error);
+    }
+  }
+
+  // GET {baseURL}/models — a gateway lists what it serves (SumoPod: OpenAI
+  // and Claude models alike), so its names are kept, non-chat ones dropped.
+  override async listModels(): Promise<AiModelInfo[]> {
+    try {
+      return await listChatModels(this.client, false);
     } catch (error) {
       throw toAiError(error);
     }
