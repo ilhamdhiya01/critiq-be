@@ -44,10 +44,17 @@ export class AnthropicProvider implements AiProvider {
         },
         { timeout: req.timeoutMs },
       );
+      // Billed even when the answer is unusable — carried on the error.
+      // No reasoning_exhausted here: thinking is never enabled.
+      const usage = {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+      };
       if (response.stop_reason === 'max_tokens') {
         throw new AiError('output_truncated', {
           providerMessage: `Response hit max_tokens (${req.maxTokens}).`,
           raw: response.content,
+          usage,
         });
       }
       const toolUse = response.content.find(
@@ -57,14 +64,12 @@ export class AnthropicProvider implements AiProvider {
         throw new AiError('invalid_response', {
           providerMessage: 'Response contained no tool_use block.',
           raw: response.content,
+          usage,
         });
       }
       return {
         toolInput: toolUse.input,
-        usage: {
-          inputTokens: response.usage.input_tokens,
-          outputTokens: response.usage.output_tokens,
-        },
+        usage,
         model: response.model,
         structuredOutput: 'native',
         raw: response.content,

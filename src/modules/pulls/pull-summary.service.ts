@@ -20,6 +20,14 @@ import { PullSummaryDto } from './dto/pull-summary.dto';
 
 const REGENERATE_WINDOW_SECONDS = 120;
 const IN_FLIGHT: AiScanStatus[] = [AiScanStatus.QUEUED, AiScanStatus.RUNNING];
+// Failures that regenerating cannot fix: the same request stops at the same
+// output limit again. The default hint suggests regenerating.
+const FAILED_HINTS: Record<string, string> = {
+  reasoning_exhausted:
+    'The AI model spent its whole output budget on reasoning before answering. Regenerating will fail the same way — split the pull request, or an Admin can choose another model in Settings → AI Provider.',
+  output_truncated:
+    'The AI answer was cut off at the output token limit. Regenerating will fail the same way — an Admin can choose another model in Settings → AI Provider.',
+};
 
 function kb(bytes: number): string {
   return `${Math.round(bytes / 1024)} KB`;
@@ -205,7 +213,9 @@ export class PullSummaryService {
       case AiScanStatus.FAILED:
         return {
           code: scan.aiErrorCode ?? 'failed',
-          hint: `AI review failed (${scan.aiErrorCode ?? 'unknown'}). An Admin or Reviewer can regenerate it.`,
+          hint:
+            FAILED_HINTS[scan.aiErrorCode ?? ''] ??
+            `AI review failed (${scan.aiErrorCode ?? 'unknown'}). An Admin or Reviewer can regenerate it.`,
         };
       default:
         return null;
