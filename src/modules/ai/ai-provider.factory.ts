@@ -21,6 +21,8 @@ import { assertSafeBaseUrl } from './base-url-guard';
 // Settings → Test connection can try a configuration before it is saved.
 // Anything given here wins over what is stored; the key is used for this
 // one adapter and never persisted.
+const MODEL_LISTING_PLACEHOLDER = 'model-listing';
+
 export interface AiProviderOverride {
   provider?: AiProviderName;
   model?: string;
@@ -117,6 +119,20 @@ export class AiProviderFactory {
     }
 
     return createAiProvider(name, { model, apiKey, baseUrl });
+  }
+
+  // For listing the models a key can use: the same key, base URL and SSRF
+  // checks as `for`, without a model having to be chosen yet (an
+  // openai_compatible org has no default model). The adapter is only asked
+  // for listModels(), so the model name is never sent anywhere.
+  forModelListing(
+    organizationId: string,
+    override: AiProviderOverride = {},
+  ): Promise<AiProvider> {
+    return this.for(organizationId, {
+      ...override,
+      model: override.model ?? MODEL_LISTING_PLACEHOLDER,
+    });
   }
 
   compatAllowlist(): readonly string[] {

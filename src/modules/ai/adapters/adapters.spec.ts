@@ -4,12 +4,31 @@ import { OpenAiCompatibleProvider } from './openai-compatible.provider';
 import { OpenAiProvider } from './openai.provider';
 
 const mockAnthropicCreate = jest.fn();
+const mockAnthropicModelsList = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     messages: { create: mockAnthropicCreate },
+    models: { list: mockAnthropicModelsList },
   })),
 }));
+
+// What the SDKs' list() returns: an auto-paginating async iterable.
+function pages<T>(items: T[]): AsyncIterable<T> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const item of items) {
+        yield await Promise.resolve(item);
+      }
+    },
+  };
+}
+
+function failingPages(error: Error): AsyncIterable<never> {
+  return {
+    [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(error) }),
+  };
+}
 
 const mockChatCreate = jest.fn();
 const mockModelsRetrieve = jest.fn();
@@ -301,5 +320,117 @@ describe('OpenAiCompatibleProvider', () => {
     await expect(provider.healthcheck()).rejects.toMatchObject({
       code: 'provider_unreachable',
     });
+  });
+});
+
+describe('listModels', () => {
+  it('Anthropic: every model, with its name and context window', async () => {
+    mockAnthropicModelsList.mockReturnValue(
+      pages([
+        {
+          id: 'claude-opus-5-5',
+          display_name: 'Claude Opus 5.5',
+          created_at: '2026-08-01T00:00:00Z',
+          max_input_tokens: 1_000_000,
+        },
+        {
+          id: 'claude-haiku-4-5',
+          display_name: 'Claude Haiku 4.5',
+          created_at: '2025-10-01T00:00:00Z',
+          max_input_tokens: null,
+        },
+      ]),
+    );
+    const provider = new AnthropicProvider({
+      model: 'm',
+      apiKey: 'k',
+      baseUrl: null,
+    });
+
+    await expect(provider.listModels()).resolves.toEqual([
+      {
+        id: 'claude-opus-5-5',
+        label: 'Claude Opus 5.5',
+        contextWindow: 1_000_000,
+        createdAt: new Date('2026-08-01T00:00:00Z'),
+      },
+      {
+        id: 'claude-haiku-4-5',
+        label: 'Claude Haiku 4.5',
+        contextWindow: null,
+        createdAt: new Date('2025-10-01T00:00:00Z'),
+      },
+    ]);
+  });
+
+  it('Anthropic: a refused key is auth_failed', async () => {
+    mockAnthropicModelsList.mockReturnValue(
+      failingPages(httpError(401, 'invalid x-api-key')),
+    );
+    const provider = new AnthropicProvider({
+      model: 'm',
+      apiKey: 'k',
+      baseUrl: null,
+    });
+    await expect(provider.listModels()).rejects.toMatchObject({
+      code: 'auth_failed',
+    });
+  });
+
+  // OpenAI lists embeddings, speech, images… with no capability field.
+  it('OpenAI: only its chat models', async () => {
+    mockModelsList.mockReturnValue(
+      pages([
+        { id: 'gpt-4o', created: 1_715_000_000 },
+        { id: 'text-embedding-3-small', created: 1_705_000_000 },
+        { id: 'whisper-1', created: 1_677_000_000 },
+        { id: 'o4-mini', created: 1_744_000_000 },
+        { id: 'dall-e-3', created: 1_698_000_000 },
+        { id: 'gpt-4o-realtime-preview', created: 1_727_000_000 },
+        { id: 'babbage-002', created: 1_692_000_000 },
+      ]),
+    );
+    const provider = new OpenAiProvider({
+      model: 'm',
+      apiKey: 'k',
+      baseUrl: null,
+    });
+
+    const models = await provider.listModels();
+
+    expect(models.map((model) => model.id)).toEqual(['gpt-4o', 'o4-mini']);
+    expect(models[0]).toEqual({
+      id: 'gpt-4o',
+      label: 'gpt-4o',
+      contextWindow: null,
+      createdAt: new Date(1_715_000_000 * 1000),
+    });
+  });
+
+  // A gateway's names are its own (SumoPod serves Claude as well).
+  it('OpenAI-compatible: what the gateway serves, minus non-chat models', async () => {
+    mockModelsList.mockReturnValue(
+      pages([
+        { id: 'gpt-4o-mini', created: 0 },
+        { id: 'claude-sonnet-5', created: 0 },
+        { id: 'llama-3.1-70b-instruct', created: 0 },
+        { id: 'text-embedding-3-large', created: 0 },
+      ]),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      model: 'm',
+      apiKey: null,
+      baseUrl: 'https://ai.example.com/v1',
+    });
+
+    const models = await provider.listModels();
+
+    expect(models.map((model) => model.id)).toEqual([
+      'gpt-4o-mini',
+      'claude-sonnet-5',
+      'llama-3.1-70b-instruct',
+    ]);
+    // `created: 0` is "unknown", not 1970.
+    expect(models[0].createdAt).toBeNull();
   });
 });
