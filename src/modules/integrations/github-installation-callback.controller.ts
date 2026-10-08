@@ -60,11 +60,16 @@ export class GithubInstallationCallbackController {
       );
       return;
     }
-    const { orgId, userId, returnTo } = intent;
+    const { orgId, orgSlug, userId, returnTo } = intent;
+    // FE routes: the onboarding wizard, or the org's Settings page
+    // (`app/[slug]/settings` — by slug, and the Integrations card lives on
+    // that page; it reads `?github=` and toasts). The old
+    // `/orgs/:orgId/settings/integrations` does not exist there: every
+    // install from Settings landed on a 404.
     const redirectBase =
       returnTo === GithubInstallReturnTo.SETUP
         ? `${feUrl}/setup?step=2&orgId=${orgId}`
-        : `${feUrl}/orgs/${orgId}/settings/integrations`;
+        : `${feUrl}/${encodeURIComponent(orgSlug)}/settings`;
     const separator = redirectBase.includes('?') ? '&' : '?';
 
     try {
