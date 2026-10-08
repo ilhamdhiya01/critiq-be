@@ -12,6 +12,12 @@ export interface GithubInstallIntentPayload {
   returnTo: GithubInstallReturnTo;
 }
 
+// What the callback gets back: the FE's org routes are by slug
+// (`/<slug>/settings`), not by id.
+export interface ConsumedGithubInstallIntent extends GithubInstallIntentPayload {
+  orgSlug: string;
+}
+
 // Bridges the GitHub App installation redirect round trip (Critiq ->
 // github.com -> Critiq callback) via a single-use, TTL'd Postgres row —
 // not a signed JWT (the previous approach): a JWT `state` param can't be
@@ -44,8 +50,11 @@ export class GithubInstallIntentService {
 
   // Single-use: the row is deleted as part of this call (whether found or
   // not), so a replayed/reused `state` value can never succeed twice, even
-  // if it hasn't technically expired yet.
-  async consume(state: string): Promise<GithubInstallIntentPayload | null> {
+  // if it hasn't technically expired yet. The org's slug is read from the
+  // DB here — the callback is unauthenticated, so it never comes from the
+  // request — and an intent whose organization is gone is treated as
+  // invalid.
+  async consume(state: string): Promise<ConsumedGithubInstallIntent | null> {
     const intent = await this.prisma.githubInstallIntent.findUnique({
       where: { state },
     });
@@ -60,8 +69,17 @@ export class GithubInstallIntentService {
       return null;
     }
 
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: intent.organizationId },
+      select: { slug: true },
+    });
+    if (!organization) {
+      return null;
+    }
+
     return {
       orgId: intent.organizationId,
+      orgSlug: organization.slug,
       userId: intent.userId,
       returnTo: intent.returnTo,
     };
