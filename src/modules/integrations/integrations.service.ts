@@ -147,6 +147,21 @@ export class IntegrationsService {
     return this.toResponseDto(integration);
   }
 
+  // The slug of the org already holding this GitHub App installation, or
+  // null when Critiq does not know it. For the installation callback when
+  // GitHub returns from a change made on GitHub itself ("Manage on GitHub":
+  // repository access edited, no Critiq intent). One org per installation —
+  // connectGithub refuses a second (installation_in_use).
+  async findOrgSlugForGithubInstallation(
+    installationId: string,
+  ): Promise<string | null> {
+    const integration = await this.prisma.integration.findFirst({
+      where: { source: Provider.GITHUB, installationId },
+      select: { organization: { select: { slug: true } } },
+    });
+    return integration?.organization.slug ?? null;
+  }
+
   // Persists a GitHub App installation already verified server-side by the
   // caller (GithubAppService.verifyInstallation) — this method never talks
   // to GitHub itself, it only writes the Integration row. Idempotent on

@@ -22,6 +22,7 @@ function setup(intent: Record<string, unknown> | null) {
   };
   const integrations = {
     connectGithub: jest.fn().mockResolvedValue(undefined),
+    findOrgSlugForGithubInstallation: jest.fn().mockResolvedValue(null),
   };
   const controller = new GithubInstallationCallbackController(
     integrations as unknown as IntegrationsService,
@@ -100,5 +101,44 @@ describe('GithubInstallationCallbackController', () => {
       `${FE_URL}/integrations/github/claim?installation_id=169099670`,
     );
     expect(integrations.connectGithub).not.toHaveBeenCalled();
+  });
+
+  // "Manage on GitHub" → repository access changed on GitHub: GitHub
+  // returns with setup_action=update and no Critiq state.
+  describe('a change made on GitHub to a known installation', () => {
+    it('goes back to that org Settings page, writing nothing', async () => {
+      const { controller, res, integrations } = setup(null);
+      integrations.findOrgSlugForGithubInstallation.mockResolvedValue(
+        'run-system',
+      );
+
+      expect(await callback(controller, res, 'update')).toBe(
+        `${FE_URL}/run-system/settings?github=updated`,
+      );
+      expect(
+        integrations.findOrgSlugForGithubInstallation,
+      ).toHaveBeenCalledWith('169099670');
+      expect(integrations.connectGithub).not.toHaveBeenCalled();
+    });
+
+    it('still hands an unknown installation to the claim page', async () => {
+      const { controller, res } = setup(null);
+      expect(await callback(controller, res, 'update')).toBe(
+        `${FE_URL}/integrations/github/claim?installation_id=169099670`,
+      );
+    });
+
+    // Only an update is a change to an existing installation; a fresh
+    // install without a Critiq intent is a claim.
+    it('does not look up a fresh install without an intent', async () => {
+      const { controller, res, integrations } = setup(null);
+      integrations.findOrgSlugForGithubInstallation.mockResolvedValue(
+        'run-system',
+      );
+      expect(await callback(controller, res, 'install')).toMatch(/\/claim\?/);
+      expect(
+        integrations.findOrgSlugForGithubInstallation,
+      ).not.toHaveBeenCalled();
+    });
   });
 });
