@@ -21,6 +21,7 @@ import {
 } from '../../generated/prisma/enums';
 import { ScanQueueService } from '../../queue/scan-queue.service';
 import { RULESET_VERSION } from '../../queue/rules/rules.constants';
+import { assertGithubAccess } from '../integrations/github-access';
 import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { BranchListResponseDto } from './dto/branch-list-response.dto';
@@ -131,6 +132,7 @@ export class ReposService {
     if (!repository || repository.organizationId !== organizationId) {
       throw new NotFoundException('Repository not found.');
     }
+    assertGithubAccess(repository.integration);
 
     const result = await this.fetchProviderBranches(
       repository.integration,
@@ -512,6 +514,7 @@ export class ReposService {
         message: 'token_expired',
       });
     }
+    assertGithubAccess(integration);
     return integration;
   }
 

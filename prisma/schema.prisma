@@ -179,6 +179,12 @@ enum IntegrationState {
   // (Fase 4) to detect that approval automatically — this state persists
   // until an admin re-runs the install flow after approval.
   PENDING_APPROVAL
+  // GitHub App only, from the App's `installation` webhook: removed or
+  // suspended on GitHub's side. The row and its repositories are kept —
+  // reinstalling upserts the same row back to ACTIVE. Disconnecting from
+  // Critiq deletes it instead (DELETE …/integrations/github).
+  UNINSTALLED
+  SUSPENDED
 }
 
 // Short-lived, single-use record bridging the GitHub App installation
