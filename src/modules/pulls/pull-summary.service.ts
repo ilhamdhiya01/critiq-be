@@ -20,6 +20,19 @@ import { PullSummaryDto } from './dto/pull-summary.dto';
 
 const REGENERATE_WINDOW_SECONDS = 120;
 const IN_FLIGHT: AiScanStatus[] = [AiScanStatus.QUEUED, AiScanStatus.RUNNING];
+// Statuses that name a missing organization setting — an Admin can fix them
+// after the scan, so GET summary checks them against the settings now.
+const CONFIGURATION_STATUSES: AiScanStatus[] = [
+  AiScanStatus.NOT_CONFIGURED,
+  AiScanStatus.CONSENT_REQUIRED,
+];
+// The setting was missing when the scan ran and is in place now.
+const STALE_HINTS: Record<string, string> = {
+  not_configured:
+    'No AI provider was configured when this scan ran. One is configured now — an Admin or Reviewer can regenerate to run the AI review.',
+  consent_required:
+    'Sending diffs to the AI provider was not enabled when this scan ran. It is enabled now — an Admin or Reviewer can regenerate to run the AI review.',
+};
 // Failures that regenerating cannot fix: the same request stops at the same
 // output limit again. The default hint suggests regenerating.
 const FAILED_HINTS: Record<string, string> = {
@@ -72,6 +85,7 @@ export class PullSummaryService {
         error: {
           code: 'no_scan',
           hint: 'This pull request has not been scanned yet.',
+          stale: false,
         },
       });
     }
@@ -98,7 +112,7 @@ export class PullSummaryService {
         scan.aiTokensIn !== null && scan.aiTokensOut !== null
           ? { in: scan.aiTokensIn, out: scan.aiTokensOut }
           : null,
-      error: this.errorFor(scan),
+      error: await this.currentErrorFor(organizationId, scan),
     });
   }
 
@@ -177,6 +191,36 @@ export class PullSummaryService {
       { field: 'pullId', message: toApiAiStatus(status) ?? 'scan_not_done' },
       HttpStatus.PRECONDITION_FAILED,
     );
+  }
+
+  // A scan's aiStatus is decided once, when it finishes. A missing setting
+  // may have been fixed since: then the error says so (stale) instead of
+  // sending the user back to Settings, or names what is missing now.
+  private async currentErrorFor(
+    organizationId: string,
+    scan: {
+      aiStatus: AiScanStatus | null;
+      aiErrorCode: string | null;
+      diffBytes: number | null;
+    },
+  ): Promise<{ code: string; hint: string; stale: boolean } | null> {
+    if (scan.aiStatus && CONFIGURATION_STATUSES.includes(scan.aiStatus)) {
+      const configuration =
+        await this.aiScanService.configurationFor(organizationId);
+      if (configuration?.ready) {
+        const code = toApiAiStatus(scan.aiStatus)!;
+        return { code, hint: STALE_HINTS[code], stale: true };
+      }
+      if (configuration) {
+        const error = this.errorFor({
+          ...scan,
+          aiStatus: configuration.blockedBy,
+        });
+        return error && { ...error, stale: false };
+      }
+    }
+    const error = this.errorFor(scan);
+    return error && { ...error, stale: false };
   }
 
   private errorFor(scan: {

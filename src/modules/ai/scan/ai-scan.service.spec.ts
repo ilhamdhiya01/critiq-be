@@ -87,6 +87,11 @@ function setup(scan = scanRow()) {
         .fn()
         .mockResolvedValue({ encryptedKey: 'enc', baseUrl: null }),
     },
+    organization: {
+      findUnique: jest.fn((): Promise<unknown> =>
+        Promise.resolve(scan.organization),
+      ),
+    },
     aiUsageDaily: { findUnique: jest.fn().mockResolvedValue(null) },
     finding: { findMany: jest.fn().mockResolvedValue([]) },
     $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
@@ -119,6 +124,71 @@ function statusWritten(prisma: ReturnType<typeof setup>['prisma']) {
   ][];
   return calls.map(([args]) => args.data.aiStatus);
 }
+
+// The same checks as maybeEnqueue's steps 2–3, read without a scan: GET
+// summary uses it to tell a since-fixed setting from a still-missing one.
+describe('AiScanService.configurationFor', () => {
+  it('is ready with provider, key, model and consent', async () => {
+    const { service } = setup();
+    await expect(service.configurationFor('org_1')).resolves.toEqual({
+      ready: true,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+  });
+
+  it('is not configured without a provider', async () => {
+    const scan = scanRow();
+    scan.organization.aiProvider = null as never;
+    const { service, prisma } = setup(scan);
+    await expect(service.configurationFor('org_1')).resolves.toEqual({
+      ready: false,
+      blockedBy: AiScanStatus.NOT_CONFIGURED,
+    });
+    expect(prisma.aiCredential.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('is not configured without a key', async () => {
+    const { service, prisma } = setup();
+    prisma.aiCredential.findUnique.mockResolvedValue(null);
+    await expect(service.configurationFor('org_1')).resolves.toEqual({
+      ready: false,
+      blockedBy: AiScanStatus.NOT_CONFIGURED,
+    });
+  });
+
+  // A self-hosted server may need no key — the base URL is the credential.
+  it('accepts openai_compatible with a base URL and no key', async () => {
+    const scan = scanRow();
+    scan.organization.aiProvider = AiProviderId.OPENAI_COMPATIBLE as never;
+    scan.organization.aiModel = 'llama3';
+    const { service, prisma } = setup(scan);
+    prisma.aiCredential.findUnique.mockResolvedValue({
+      encryptedKey: null,
+      baseUrl: 'https://ollama.example.com/v1',
+    });
+    await expect(service.configurationFor('org_1')).resolves.toMatchObject({
+      ready: true,
+      provider: 'openai_compatible',
+    });
+  });
+
+  it('names consent once everything else is set', async () => {
+    const scan = scanRow();
+    scan.organization.aiConsentAt = null as never;
+    const { service } = setup(scan);
+    await expect(service.configurationFor('org_1')).resolves.toEqual({
+      ready: false,
+      blockedBy: AiScanStatus.CONSENT_REQUIRED,
+    });
+  });
+
+  it('is null for an unknown organization', async () => {
+    const { service, prisma } = setup();
+    prisma.organization.findUnique.mockResolvedValue(null);
+    await expect(service.configurationFor('org_x')).resolves.toBeNull();
+  });
+});
 
 describe('AiScanService.maybeEnqueue', () => {
   it('does nothing for a scan that is not DONE', async () => {
