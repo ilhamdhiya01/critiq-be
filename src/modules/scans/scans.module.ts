@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { RepositoryScansController } from './repository-scans.controller';
 import { ScansController } from './scans.controller';
 import { ScansService } from './scans.service';
 
@@ -7,7 +8,7 @@ import { ScansService } from './scans.service';
 // PullsModule imports this one for the per-PR scan routes; the reverse would
 // be a cycle.
 @Module({
-  controllers: [ScansController],
+  controllers: [ScansController, RepositoryScansController],
   providers: [ScansService],
   exports: [ScansService],
 })

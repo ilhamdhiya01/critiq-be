@@ -29,6 +29,8 @@ export interface GithubRepository {
 
 export interface GithubRepositoryDetail {
   default_branch: string;
+  // Main language by GitHub's own detection; null when it has none.
+  language: string | null;
 }
 
 export interface GithubBranch {

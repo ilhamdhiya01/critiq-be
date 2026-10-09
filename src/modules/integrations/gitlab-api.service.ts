@@ -143,6 +143,30 @@ export class GitlabApiService {
     }
   }
 
+  // The project's main language — GitLab's project detail has none; its
+  // languages endpoint returns { name: percentage }. Display only, so best
+  // effort: any failure is null, never an error for the caller.
+  async fetchMainLanguage(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+  ): Promise<string | null> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get<Record<string, number>>(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/languages`,
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+      const ranked = Object.entries(response.data ?? {}).sort(
+        ([, a], [, b]) => b - a,
+      );
+      return ranked[0]?.[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   // One page of branches, most recently updated first — a repo with
   // hundreds of issue branches listed by name showed the user 500 stale
   // ones and none of the active. `search` is GitLab's own filter across

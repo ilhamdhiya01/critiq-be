@@ -154,6 +154,15 @@ export class ScanProcessor
     } else {
       diff = await this.fetchDiff(job.data, log);
     }
+    // Display only, once per repository — never affects the scan.
+    await this.pullsService
+      .fillMissingLanguage(organizationId, repositoryId)
+      .catch((error: unknown) =>
+        this.logger.warn('scan.language_lookup_failed', {
+          ...log,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     this.assertWithinDeadline(deadline);
 
     // 3–5. Filter, parse, run rules, classify suppression, dedupe, cap —

@@ -1,3 +1,5 @@
+import type { DefaultPolicyWireValue } from './create-repos.dto';
+
 // `missing` (branches in scope that no longer exist at the provider) and
 // `missingCheckStatus` are a deliberately honest pair while there's no
 // Redis cache yet (Fase 4): computing `missing` accurately would mean a
@@ -10,6 +12,9 @@
 export class RepoScanConfigResponseDto {
   defaultBranch!: string;
   branches!: string[];
+  // One per entry of `branches`, in the same order. Applies to pull
+  // requests opened afterwards — a PR keeps the policy it was opened with.
+  policies!: { branch: string; policy: DefaultPolicyWireValue }[];
   missing!: string[];
   missingCheckStatus!: 'not_available';
   defaultBranchChangedAt!: Date | null;
@@ -17,6 +22,7 @@ export class RepoScanConfigResponseDto {
   constructor(partial: {
     defaultBranch: string;
     branches: string[];
+    policies: { branch: string; policy: DefaultPolicyWireValue }[];
     defaultBranchChangedAt: Date | null;
   }) {
     Object.assign(this, {

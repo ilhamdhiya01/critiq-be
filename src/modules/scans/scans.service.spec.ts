@@ -110,6 +110,9 @@ function finding(
 function setup() {
   const prisma = {
     pullRequest: { findUnique: jest.fn().mockResolvedValue(pull) },
+    repository: {
+      findUnique: jest.fn().mockResolvedValue({ organizationId: ORG }),
+    },
     scan: {
       findUnique: jest.fn().mockResolvedValue(scan),
       findFirst: jest.fn().mockResolvedValue(null),
@@ -178,6 +181,58 @@ describe('ScansService', () => {
         service.listForPull(ORG, REPO, pull.id),
       ).rejects.toMatchObject({ status: HttpStatus.NOT_FOUND });
       expect(scanQueueService.enqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  // The repository page's scan history, across its PRs.
+  describe('listForRepository', () => {
+    it('lists the scans newest first with the PR each ran on', async () => {
+      const { service, prisma } = setup();
+      prisma.scan.findMany.mockResolvedValue([
+        {
+          ...scan,
+          pullRequest: {
+            id: pull.id,
+            externalId: '461',
+            title: 'Rate limiter',
+          },
+        },
+      ]);
+
+      const rows = await service.listForRepository(ORG, REPO);
+
+      expect(prisma.scan.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { organizationId: ORG, repositoryId: REPO },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        }),
+      );
+      expect(rows[0]).toMatchObject({
+        id: scan.id,
+        status: scan.status,
+        criticalCount: scan.criticalCount,
+        pull: { id: pull.id, number: '461', title: 'Rate limiter' },
+      });
+    });
+
+    it('takes the requested limit', async () => {
+      const { service, prisma } = setup();
+      await service.listForRepository(ORG, REPO, 5);
+      expect(prisma.scan.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 5 }),
+      );
+    });
+
+    it('404s a repository from another organization', async () => {
+      const { service, prisma } = setup();
+      prisma.repository.findUnique.mockResolvedValue({
+        organizationId: 'org_other',
+      });
+      await expect(service.listForRepository(ORG, REPO)).rejects.toMatchObject({
+        status: HttpStatus.NOT_FOUND,
+      });
+      expect(prisma.scan.findMany).not.toHaveBeenCalled();
     });
   });
 

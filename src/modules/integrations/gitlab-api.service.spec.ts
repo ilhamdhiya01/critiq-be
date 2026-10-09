@@ -197,3 +197,37 @@ describe('GitlabApiService.mapGitlabRequestError', () => {
     });
   });
 });
+
+// Display only: GitLab returns { language: percentage }; the top one wins,
+// and any failure is null rather than an error for the caller.
+describe('GitlabApiService.fetchMainLanguage', () => {
+  it('picks the language with the highest share', async () => {
+    const { http, service } = setup();
+    http.get.mockReturnValue(
+      of({ data: { CSS: 12.5, PHP: 80.1, Blade: 7.4 } }),
+    );
+    await expect(
+      service.fetchMainLanguage('https://gitlab.com', 'token', '42'),
+    ).resolves.toBe('PHP');
+    expect(http.get).toHaveBeenCalledWith(
+      'https://gitlab.com/api/v4/projects/42/languages',
+      expect.anything(),
+    );
+  });
+
+  it('is null for a project without detected languages', async () => {
+    const { http, service } = setup();
+    http.get.mockReturnValue(of({ data: {} }));
+    await expect(
+      service.fetchMainLanguage('https://gitlab.com', 'token', '42'),
+    ).resolves.toBeNull();
+  });
+
+  it('is null when GitLab fails', async () => {
+    const { http, service } = setup();
+    http.get.mockReturnValue(throwError(() => axiosError(403)));
+    await expect(
+      service.fetchMainLanguage('https://gitlab.com', 'token', '42'),
+    ).resolves.toBeNull();
+  });
+});

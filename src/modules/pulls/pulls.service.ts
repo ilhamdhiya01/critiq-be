@@ -533,6 +533,50 @@ export class PullsService {
     return contents;
   }
 
+  // Repositories connected before Repository.language existed are asked
+  // once, on their next scan — the worker already talks to the provider,
+  // GET and the webhook never do. Display only: a GitHub failure leaves it
+  // to the next scan; GitLab's lookup is already best effort (null).
+  async fillMissingLanguage(
+    organizationId: string,
+    repositoryId: string,
+  ): Promise<void> {
+    const repository = await this.prisma.repository.findUnique({
+      where: { id: repositoryId },
+      include: { integration: true },
+    });
+    if (
+      !repository ||
+      repository.organizationId !== organizationId ||
+      repository.languageCheckedAt
+    ) {
+      return;
+    }
+    const { integration } = repository;
+    let language: string | null;
+    if (integration.source === Provider.GITHUB) {
+      const [owner, repo] = repository.path.split('/');
+      const detail = await this.githubAppService.fetchRepository(
+        integration.installationId ?? '',
+        owner,
+        repo,
+      );
+      language = detail.language ?? null;
+    } else {
+      language = await this.gitlabApiService.fetchMainLanguage(
+        integration.instanceUrl ?? '',
+        integration.encryptedToken
+          ? this.encryptionService.decrypt(integration.encryptedToken)
+          : '',
+        repository.externalId,
+      );
+    }
+    await this.prisma.repository.updateMany({
+      where: { id: repositoryId, languageCheckedAt: null },
+      data: { language, languageCheckedAt: new Date() },
+    });
+  }
+
   // The PR with its repository and integration, tenant-checked (404 across
   // orgs/repos) and refusing a dead credential — shared by the diff and
   // head-file fetches so both resolve access the same way.

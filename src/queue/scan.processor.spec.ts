@@ -225,6 +225,7 @@ function setup(options: {
   };
   const pullsService = {
     getDiff: jest.fn().mockResolvedValue({ files: [], truncated: false }),
+    fillMissingLanguage: jest.fn().mockResolvedValue(undefined),
     getCompareDiff: jest.fn().mockResolvedValue({
       ...(options.compare ?? { files: [], ancestor: true }),
       truncated: false,
@@ -460,6 +461,30 @@ describe('ScanProcessor — provider errors', () => {
     pullsService.getCompareDiff.mockRejectedValue(unreachable);
 
     await expect(processor.process(job)).rejects.toBe(unreachable);
+  });
+});
+
+// Repository.language for repos connected before the column existed: asked
+// once on a scan, display only — a failed lookup never fails the scan.
+describe('ScanProcessor — repository language', () => {
+  it('fills a missing language during the scan', async () => {
+    const { processor, pullsService } = setup({
+      compare: { files: [], ancestor: true },
+    });
+    await processor.process(job);
+    expect(pullsService.fillMissingLanguage).toHaveBeenCalledWith(
+      'org_1',
+      'repo_1',
+    );
+  });
+
+  it('finishes the scan when the lookup fails', async () => {
+    const { processor, pullsService, tx } = setup({
+      compare: { files: [], ancestor: true },
+    });
+    pullsService.fillMissingLanguage.mockRejectedValue(new Error('boom'));
+    await expect(processor.process(job)).resolves.toBeUndefined();
+    expect(countsWritten(tx)).toBeDefined();
   });
 });
 
