@@ -8,6 +8,11 @@ export interface AiJobPayload {
   scanId: string;
   organizationId: string;
   pullId: string;
+  // Decided at enqueue, before the scan's AI columns are overwritten: the
+  // scan's earlier AI run is comparable (same provider, model, prompt), so
+  // its findings are merged with this run's, not replaced
+  // (regenerate-merge.ts). Absent on jobs queued before this existed.
+  mergePrevious?: boolean;
 }
 
 // `ai-{scanId}-{requestedAt}`, not the spec's `ai:{scanId}`: BullMQ 6

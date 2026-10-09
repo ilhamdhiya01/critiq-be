@@ -103,6 +103,33 @@ export class GithubAppService {
     }
   }
 
+  // Uninstalls the App from the GitHub account, authenticated as the App.
+  // 404 means it is already gone (uninstalled on GitHub first) — the outcome
+  // the caller wants, so not an error. Anything else is: the caller must not
+  // forget an installation that still has access to the account's code.
+  async deleteInstallation(installationId: string): Promise<void> {
+    const appAuthentication = await this.appAuth({ type: 'app' });
+    try {
+      await request('DELETE /app/installations/{installation_id}', {
+        installation_id: Number(installationId),
+        headers: { authorization: `bearer ${appAuthentication.token}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      });
+    } catch (error) {
+      if (error instanceof RequestError && error.status === 404) {
+        return;
+      }
+      const timedOut = error instanceof Error && error.name === 'TimeoutError';
+      if (timedOut || error instanceof RequestError) {
+        throw new HttpException(
+          { field: 'installation_id', message: 'github_unreachable' },
+          HttpStatus.BAD_GATEWAY,
+        );
+      }
+      throw error;
+    }
+  }
+
   async listInstallationRepositories(
     installationId: string,
     query?: string,

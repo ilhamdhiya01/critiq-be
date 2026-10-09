@@ -71,7 +71,7 @@ function setup() {
       'installWebhook',
     )
     .mockResolvedValue({ status: 'installed' });
-  return { service, gitlab, tx };
+  return { service, gitlab, tx, prisma };
 }
 
 const branches = (...list: string[]) => list.map((name) => ({ name }));
@@ -142,6 +142,24 @@ describe('ReposService branch list', () => {
     );
     expect(result.branches).toEqual(['1578-new-sewing-machine-list']);
     expect(result.total).toBe(1);
+  });
+
+  // The App was removed or suspended on GitHub: no token can be minted, and
+  // the FE needs to know which, not a generic installation_invalid.
+  it.each([
+    [IntegrationState.UNINSTALLED, 'github_uninstalled'],
+    [IntegrationState.SUSPENDED, 'github_suspended'],
+  ])('409s when the GitHub App is %s', async (state, message) => {
+    const { service, prisma } = setup();
+    prisma.integration.findUnique.mockResolvedValue({
+      ...GITLAB_INTEGRATION,
+      source: Provider.GITHUB,
+      installationId: '169478542',
+      state,
+    });
+    await expect(
+      service.getBranchesForCandidate(ORG, Provider.GITHUB, '42'),
+    ).rejects.toMatchObject({ status: 409, response: { message } });
   });
 });
 

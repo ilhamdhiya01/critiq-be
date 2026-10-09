@@ -23,6 +23,7 @@ import {
   GithubAppService,
   type GithubInstallation,
 } from './github-app.service';
+import { assertGithubAccess } from './github-access';
 import { GitlabApiService, type GitlabProject } from './gitlab-api.service';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -147,6 +148,21 @@ export class IntegrationsService {
     return this.toResponseDto(integration);
   }
 
+  // The slug of the org already holding this GitHub App installation, or
+  // null when Critiq does not know it. For the installation callback when
+  // GitHub returns from a change made on GitHub itself ("Manage on GitHub":
+  // repository access edited, no Critiq intent). One org per installation —
+  // connectGithub refuses a second (installation_in_use).
+  async findOrgSlugForGithubInstallation(
+    installationId: string,
+  ): Promise<string | null> {
+    const integration = await this.prisma.integration.findFirst({
+      where: { source: Provider.GITHUB, installationId },
+      select: { organization: { select: { slug: true } } },
+    });
+    return integration?.organization.slug ?? null;
+  }
+
   // Persists a GitHub App installation already verified server-side by the
   // caller (GithubAppService.verifyInstallation) — this method never talks
   // to GitHub itself, it only writes the Integration row. Idempotent on
@@ -239,6 +255,42 @@ export class IntegrationsService {
 
     await this.revokeRepositoryWebhooks(integration);
     await this.prisma.integration.delete({ where: { id: integration.id } });
+  }
+
+  // Uninstalls the App on GitHub first, then deletes the row — cascading
+  // to its repositories, pulls and scans, like disconnectGitlab. Unlike
+  // GitLab's webhook revoke, a GitHub failure aborts: deleting the row while
+  // the App stays installed would leave Critiq able to read the account's
+  // code with nothing in Critiq showing it. Already uninstalled on GitHub
+  // (UNINSTALLED, or the event never arrived) is a 404 there, not a failure.
+  async disconnectGithub(
+    organizationId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const integration = await this.prisma.integration.findUnique({
+      where: {
+        organizationId_source: { organizationId, source: Provider.GITHUB },
+      },
+      include: { _count: { select: { repositories: true } } },
+    });
+    if (!integration) {
+      throw new NotFoundException(
+        'No GitHub integration found for this organization.',
+      );
+    }
+
+    const installationId = this.assertGithubInstallationId(integration);
+    await this.githubAppService.deleteInstallation(installationId);
+    await this.prisma.integration.delete({ where: { id: integration.id } });
+
+    // TODO(audit log model): persisted row once the table exists.
+    this.logger.info('audit.integration.github_disconnected', {
+      orgId: organizationId,
+      by: actorUserId,
+      installationId,
+      installationLogin: integration.installationLogin,
+      repositories: integration._count.repositories,
+    });
   }
 
   // Revokes every connected repo's GitLab hook before the Integration row
@@ -382,6 +434,7 @@ export class IntegrationsService {
         message: 'github_not_connected',
       });
     }
+    assertGithubAccess(integration);
 
     const installationId = this.assertGithubInstallationId(integration);
     const repos = await this.githubAppService.listInstallationRepositories(

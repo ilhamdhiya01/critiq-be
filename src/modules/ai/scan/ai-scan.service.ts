@@ -36,6 +36,7 @@ import {
   persistAiResult,
   ScanForAi,
 } from './ai-scan.persistence';
+import { isComparableRun } from './regenerate-merge';
 
 const CACHE_TTL_SECONDS = 30 * 86_400;
 const BUDGET_NOTIFY_TTL_SECONDS = 26 * 3600;
@@ -89,6 +90,23 @@ export function todayUtc(): Date {
   return new Date(new Date().toISOString().slice(0, 10));
 }
 
+// Whether the organization's AI settings let a scan through, and with what.
+// The first missing setting is the status a scan records for it.
+export type AiConfiguration =
+  | { ready: true; provider: AiProviderName; model: string }
+  | {
+      ready: false;
+      blockedBy:
+        | typeof AiScanStatus.NOT_CONFIGURED
+        | typeof AiScanStatus.CONSENT_REQUIRED;
+    };
+
+interface OrganizationAiSettings {
+  aiProvider: AiProviderId | null;
+  aiModel: string | null;
+  aiConsentAt: Date | null;
+}
+
 // Decides whether a finished static scan gets an AI review, and starts it.
 // The first failing prerequisite is recorded on scans.aiStatus — that is
 // what GET …/summary explains to the user.
@@ -101,6 +119,22 @@ export class AiScanService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
+
+  // The organization's AI settings as they are now. A scan's aiStatus is
+  // decided once, when it finishes — GET …/summary uses this to tell a
+  // NOT_CONFIGURED/CONSENT_REQUIRED scan that has since become runnable
+  // apart from one that is still blocked. Null for an unknown organization.
+  async configurationFor(
+    organizationId: string,
+  ): Promise<AiConfiguration | null> {
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { aiProvider: true, aiModel: true, aiConsentAt: true },
+    });
+    return organization
+      ? this.resolveConfiguration(organizationId, organization)
+      : null;
+  }
 
   // Returns the resulting aiStatus, or null when the scan is not DONE (the
   // AI step never applies to a failed or superseded static scan).
@@ -133,37 +167,16 @@ export class AiScanService {
       return settle(AiScanStatus.SKIPPED_MANUAL_MODE);
     }
 
-    // 2. Provider + credential, without decrypting anything.
+    // 2–3. Provider + credential + model, then consent.
     const { organization } = scan;
-    const providerId = organization.aiProvider;
-    const credential = providerId
-      ? await this.prisma.aiCredential.findUnique({
-          where: {
-            organizationId_provider: {
-              organizationId: scan.organizationId,
-              provider: providerId,
-            },
-          },
-          select: { encryptedKey: true, baseUrl: true },
-        })
-      : null;
-    const configured =
-      providerId === AiProviderId.OPENAI_COMPATIBLE
-        ? Boolean(credential?.baseUrl)
-        : Boolean(credential?.encryptedKey);
-    if (!providerId || !configured) {
-      return settle(AiScanStatus.NOT_CONFIGURED);
+    const configuration = await this.resolveConfiguration(
+      scan.organizationId,
+      organization,
+    );
+    if (!configuration.ready) {
+      return settle(configuration.blockedBy);
     }
-    const provider = toProviderName(providerId);
-    const model = organization.aiModel ?? defaultModelFor(provider);
-    if (!model) {
-      return settle(AiScanStatus.NOT_CONFIGURED);
-    }
-
-    // 3. Consent.
-    if (!organization.aiConsentAt) {
-      return settle(AiScanStatus.CONSENT_REQUIRED);
-    }
+    const { provider, model } = configuration;
 
     // 4. Nothing changed since the base scan (a rescan of the same head):
     // every finding was carried forward, so the previous summary still
@@ -203,8 +216,19 @@ export class AiScanService {
       diffMode: scan.diffMode,
       prevHeadSha: scan.prevHeadSha,
     });
+    // A regenerate of this scan by a comparable run keeps the earlier
+    // run's findings (regenerate-merge.ts). Read before step 8 overwrites
+    // the scan's AI columns.
+    const mergePrevious = isComparableRun(
+      {
+        provider: scan.aiProvider,
+        model: scan.aiModel,
+        promptVersion: scan.aiPromptVersion,
+      },
+      { provider, model, promptVersion: AI_PROMPT_VERSION },
+    );
     if (!options.force) {
-      const cached = await this.copyFromCache(scan, cacheKey);
+      const cached = await this.copyFromCache(scan, cacheKey, mergePrevious);
       if (cached) {
         this.logger.info('audit.ai.completed', {
           ...log,
@@ -234,7 +258,12 @@ export class AiScanService {
     try {
       await this.aiQueue.add(
         'ai',
-        { scanId, organizationId: scan.organizationId, pullId: scan.pullId },
+        {
+          scanId,
+          organizationId: scan.organizationId,
+          pullId: scan.pullId,
+          mergePrevious,
+        },
         {
           jobId: buildAiJobId(scanId, Date.now()),
           attempts: AI_JOB_ATTEMPTS,
@@ -290,6 +319,44 @@ export class AiScanService {
         outputTokens: { increment: usage.outputTokens },
       },
     });
+  }
+
+  // Provider + credential (without decrypting anything) + model, then
+  // consent — in this order, so the status names the first thing to fix.
+  private async resolveConfiguration(
+    organizationId: string,
+    organization: OrganizationAiSettings,
+  ): Promise<AiConfiguration> {
+    const notConfigured: AiConfiguration = {
+      ready: false,
+      blockedBy: AiScanStatus.NOT_CONFIGURED,
+    };
+    const providerId = organization.aiProvider;
+    if (!providerId) {
+      return notConfigured;
+    }
+    const credential = await this.prisma.aiCredential.findUnique({
+      where: {
+        organizationId_provider: { organizationId, provider: providerId },
+      },
+      select: { encryptedKey: true, baseUrl: true },
+    });
+    const configured =
+      providerId === AiProviderId.OPENAI_COMPATIBLE
+        ? Boolean(credential?.baseUrl)
+        : Boolean(credential?.encryptedKey);
+    if (!configured) {
+      return notConfigured;
+    }
+    const provider = toProviderName(providerId);
+    const model = organization.aiModel ?? defaultModelFor(provider);
+    if (!model) {
+      return notConfigured;
+    }
+    if (!organization.aiConsentAt) {
+      return { ready: false, blockedBy: AiScanStatus.CONSENT_REQUIRED };
+    }
+    return { ready: true, provider, model };
   }
 
   private async setStatus(
@@ -404,6 +471,7 @@ export class AiScanService {
   private async copyFromCache(
     scan: ScanForAi,
     cacheKey: string,
+    mergePrevious: boolean,
   ): Promise<boolean> {
     let sourceScanId: string | null;
     try {
@@ -500,6 +568,7 @@ export class AiScanService {
           promptVersion: source.aiPromptVersion ?? AI_PROMPT_VERSION,
           tokensIn: null,
           tokensOut: null,
+          mergeWithPrevious: mergePrevious,
         },
         // Any settled state (or none yet) may take a cached copy; a run in
         // flight may not be overwritten.

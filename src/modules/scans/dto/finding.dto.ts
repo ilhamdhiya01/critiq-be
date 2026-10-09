@@ -30,6 +30,38 @@ export function toApiSuppressionReason(
   }
 }
 
+export interface FindingMeta {
+  reportedSeverity?: FindingSeverity;
+  severityChanged?: { previous: FindingSeverity; latest: FindingSeverity };
+  notReproduced?: true;
+}
+
+function metaOf(finding: {
+  severity: FindingSeverity;
+  reportedSeverity?: FindingSeverity | null;
+  previousRunSeverity?: FindingSeverity | null;
+  latestRunSeverity?: FindingSeverity | null;
+  notReproduced?: boolean;
+}): FindingMeta | null {
+  const meta: FindingMeta = {};
+  if (
+    finding.reportedSeverity &&
+    finding.reportedSeverity !== finding.severity
+  ) {
+    meta.reportedSeverity = finding.reportedSeverity;
+  }
+  if (finding.previousRunSeverity && finding.latestRunSeverity) {
+    meta.severityChanged = {
+      previous: finding.previousRunSeverity,
+      latest: finding.latestRunSeverity,
+    };
+  }
+  if (finding.notReproduced) {
+    meta.notReproduced = true;
+  }
+  return Object.keys(meta).length > 0 ? meta : null;
+}
+
 // One flagged issue from a scan. Mirrors the Finding row minus the internal
 // bookkeeping the FE has no use for (organizationId, scanId, fingerprint) —
 // the usual "never return a raw Prisma entity" rule.
@@ -51,9 +83,15 @@ export class FindingDto {
   category!: ApiFindingCategory | null;
   // AI findings only.
   confidence!: number | null;
-  // AI findings only, and only when Critiq's calibration changed what the
-  // model reported (confidence downgrade, hedged title): its own severity.
-  meta!: { reportedSeverity: FindingSeverity } | null;
+  // AI findings only; null when there is nothing to say. Each key only when
+  // it applies:
+  //  - reportedSeverity: Critiq's calibration (confidence downgrade, hedged
+  //    title) changed what the model reported — the model's own severity;
+  //  - severityChanged: two AI runs on the same commit rated it differently
+  //    (regenerate); `severity` is the higher, these are each run's;
+  //  - notReproduced: an earlier run on the same commit reported it, the
+  //    latest did not — still counted, a reviewer decides.
+  meta!: FindingMeta | null;
   // Lifecycle across the PR's pushes (v1.5.1 langkah 3).
   status!: ApiFindingStatus;
   firstSeenScanId!: string | null;
@@ -76,12 +114,24 @@ export class FindingDto {
     // Prisma Decimal, or a plain number.
     confidence?: { toNumber(): number } | number | null;
     reportedSeverity?: FindingSeverity | null;
+    previousRunSeverity?: FindingSeverity | null;
+    latestRunSeverity?: FindingSeverity | null;
+    notReproduced?: boolean;
     status?: FindingStatus;
     firstSeenScanId?: string | null;
     originFindingId?: string | null;
     resolvedInScanId?: string | null;
   }) {
-    const { confidence, category, status, reportedSeverity, ...rest } = partial;
+    const {
+      confidence,
+      category,
+      status,
+      reportedSeverity,
+      previousRunSeverity,
+      latestRunSeverity,
+      notReproduced,
+      ...rest
+    } = partial;
     Object.assign(this, {
       firstSeenScanId: null,
       originFindingId: null,
@@ -90,10 +140,13 @@ export class FindingDto {
       status: toApiFindingStatus(status ?? FindingStatus.NEW),
       suppressedReason: toApiSuppressionReason(partial.suppressedReason),
       category: toApiCategory(category ?? null),
-      meta:
-        reportedSeverity && reportedSeverity !== partial.severity
-          ? { reportedSeverity }
-          : null,
+      meta: metaOf({
+        severity: partial.severity,
+        reportedSeverity,
+        previousRunSeverity,
+        latestRunSeverity,
+        notReproduced,
+      }),
       confidence:
         confidence == null
           ? null

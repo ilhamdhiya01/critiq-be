@@ -5,6 +5,7 @@ import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import {
+  IntegrationState,
   Provider,
   PullRequestState,
   ScanStatus,
@@ -42,7 +43,10 @@ const repository = {
 };
 
 function setup() {
-  const prisma = { repository: { findFirst: jest.fn() } };
+  const prisma = {
+    repository: { findFirst: jest.fn() },
+    integration: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  };
   const encryptionService = { decrypt: jest.fn(() => GITLAB_SECRET) };
   const configService = { getOrThrow: jest.fn(() => GITHUB_SECRET) };
   const pullsService = {
@@ -287,6 +291,106 @@ describe('WebhooksService — GitHub', () => {
     expect(redis.del).toHaveBeenCalledWith(
       'webhook:delivery:GITHUB:delivery-1',
     );
+  });
+});
+
+// Uninstalled or suspended on GitHub: only the state changes — the row, its
+// repositories and their history stay for a reinstall to pick up.
+describe('WebhooksService — GitHub installation events', () => {
+  function installationEvent(action: string, id = 169478542) {
+    return signedGithub(
+      { action, installation: { id, account: { login: 'acme' } } },
+      { 'x-github-event': 'installation' },
+    );
+  }
+
+  it.each([
+    ['deleted', IntegrationState.UNINSTALLED],
+    ['suspend', IntegrationState.SUSPENDED],
+  ])('marks the integration on %s', async (action, state) => {
+    const { service, prisma } = setup();
+    const { rawBody, headers } = installationEvent(action);
+
+    const outcome = await service.handleGithubEvent(rawBody, headers);
+
+    expect(outcome).toEqual({ kind: 'installation_updated' });
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith({
+      where: { source: Provider.GITHUB, installationId: '169478542' },
+      data: { state },
+    });
+  });
+
+  // Unsuspend lifts a suspension only — it never revives an uninstalled or
+  // pending-approval row.
+  it('restores only a suspended integration on unsuspend', async () => {
+    const { service, prisma } = setup();
+    const { rawBody, headers } = installationEvent('unsuspend');
+
+    await service.handleGithubEvent(rawBody, headers);
+
+    expect(prisma.integration.updateMany).toHaveBeenCalledWith({
+      where: {
+        source: Provider.GITHUB,
+        installationId: '169478542',
+        state: IntegrationState.SUSPENDED,
+      },
+      data: { state: IntegrationState.ACTIVE },
+    });
+  });
+
+  // Disconnecting from Critiq deletes the row first; GitHub then reports
+  // the uninstall for an installation Critiq no longer knows.
+  it('skips (200) an installation Critiq does not know', async () => {
+    const { service, prisma } = setup();
+    prisma.integration.updateMany.mockResolvedValue({ count: 0 });
+    const { rawBody, headers } = installationEvent('deleted');
+
+    const outcome = await service.handleGithubEvent(rawBody, headers);
+
+    expect(outcome).toEqual({
+      kind: 'skipped',
+      reason: 'unknown_installation',
+    });
+  });
+
+  // `created` is handled by the install callback, which knows the org.
+  it.each(['created', 'new_permissions_accepted'])(
+    'ignores %s',
+    async (action) => {
+      const { service, prisma } = setup();
+      const { rawBody, headers } = installationEvent(action);
+
+      const outcome = await service.handleGithubEvent(rawBody, headers);
+
+      expect(outcome).toEqual({ kind: 'skipped', reason: 'unsupported_event' });
+      expect(prisma.integration.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('skips a malformed installation payload', async () => {
+    const { service, prisma } = setup();
+    const { rawBody, headers } = signedGithub(
+      { action: 'deleted' },
+      { 'x-github-event': 'installation' },
+    );
+
+    const outcome = await service.handleGithubEvent(rawBody, headers);
+
+    expect(outcome).toEqual({ kind: 'skipped', reason: 'malformed' });
+    expect(prisma.integration.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a forged installation event before touching the database', async () => {
+    const { service, prisma } = setup();
+    const { rawBody, headers } = installationEvent('deleted');
+
+    const outcome = await service.handleGithubEvent(rawBody, {
+      ...headers,
+      'x-hub-signature-256': 'sha256=forged',
+    });
+
+    expect(outcome).toEqual({ kind: 'rejected' });
+    expect(prisma.integration.updateMany).not.toHaveBeenCalled();
   });
 });
 

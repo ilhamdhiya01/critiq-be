@@ -26,8 +26,10 @@ export class PullSummaryDto {
   cached!: boolean;
   filesOmitted!: string[];
   tokens!: { in: number; out: number } | null;
-  // Why there is no summary, with what to do about it.
-  error!: { code: string; hint: string } | null;
+  // Why there is no summary, with what to do about it. stale: the scan
+  // recorded not_configured/consent_required, but the organization's AI
+  // settings are complete now — regenerating runs the review.
+  error!: { code: string; hint: string; stale: boolean } | null;
 
   constructor(partial: PullSummaryDto) {
     Object.assign(this, partial);

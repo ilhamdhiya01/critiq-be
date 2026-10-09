@@ -21,6 +21,7 @@ import type {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
 } from '../webhooks/webhook-payload';
+import { assertGithubAccess } from '../integrations/github-access';
 import {
   GithubAppService,
   GithubPullRequestFile,
@@ -343,6 +344,9 @@ export class PullsService {
                   category: finding.category,
                   confidence: finding.confidence,
                   reportedSeverity: finding.reportedSeverity,
+                  previousRunSeverity: finding.previousRunSeverity,
+                  latestRunSeverity: finding.latestRunSeverity,
+                  notReproduced: finding.notReproduced,
                   status: finding.status,
                   firstSeenScanId: finding.firstSeenScanId,
                   originFindingId: finding.originFindingId,
@@ -564,6 +568,7 @@ export class PullsService {
             : 'token_invalid',
       });
     }
+    assertGithubAccess(integration);
     return pull;
   }
 

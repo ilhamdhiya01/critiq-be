@@ -48,23 +48,45 @@ export class GithubInstallationCallbackController {
       ? await this.githubInstallIntentService.consume(query.state)
       : null;
     if (!intent) {
-      // No valid intent (missing, already consumed, or expired). This also
-      // covers the case where the admin installed the App directly from
-      // GitHub's Marketplace/App page rather than via Critiq's own "Connect
-      // GitHub" button — there was never an intent to look up in the first
-      // place. Either way, Critiq doesn't yet know which organization this
-      // installation belongs to, so hand off to an FE flow that asks the
+      // An installation Critiq already holds, changed on GitHub ("Manage on
+      // GitHub" → repository access): back to that org's Settings. Nothing
+      // is written — this request carries no session, and the granted repos
+      // are read live from GitHub (candidates). The slug is the only thing
+      // this reveals for a known installation id, and it is in every FE URL
+      // of that org anyway.
+      if (query.setup_action === 'update') {
+        const slug =
+          await this.integrationsService.findOrgSlugForGithubInstallation(
+            query.installation_id,
+          );
+        if (slug) {
+          res.redirect(
+            `${feUrl}/${encodeURIComponent(slug)}/settings?github=updated`,
+          );
+          return;
+        }
+      }
+      // No valid intent (missing, already consumed, or expired) for an
+      // installation Critiq does not know — e.g. the admin installed the
+      // App directly from GitHub's Marketplace/App page rather than via
+      // Critiq's own "Connect GitHub" button. Critiq doesn't know which
+      // organization it belongs to, so hand off to an FE flow that asks the
       // user to pick one, rather than silently failing.
       res.redirect(
         `${feUrl}/integrations/github/claim?installation_id=${encodeURIComponent(query.installation_id)}`,
       );
       return;
     }
-    const { orgId, userId, returnTo } = intent;
+    const { orgId, orgSlug, userId, returnTo } = intent;
+    // FE routes: the onboarding wizard, or the org's Settings page
+    // (`app/[slug]/settings` — by slug, and the Integrations card lives on
+    // that page; it reads `?github=` and toasts). The old
+    // `/orgs/:orgId/settings/integrations` does not exist there: every
+    // install from Settings landed on a 404.
     const redirectBase =
       returnTo === GithubInstallReturnTo.SETUP
         ? `${feUrl}/setup?step=2&orgId=${orgId}`
-        : `${feUrl}/orgs/${orgId}/settings/integrations`;
+        : `${feUrl}/${encodeURIComponent(orgSlug)}/settings`;
     const separator = redirectBase.includes('?') ? '&' : '?';
 
     try {
