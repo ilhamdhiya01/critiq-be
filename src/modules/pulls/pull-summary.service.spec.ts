@@ -58,6 +58,11 @@ function setup(scan: Record<string, unknown> | null = latestScan()) {
   };
   const aiScanService = {
     maybeEnqueue: jest.fn().mockResolvedValue(AiScanStatus.QUEUED),
+    configurationFor: jest.fn().mockResolvedValue({
+      ready: true,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    }),
   };
   const rateLimiter = { tryAcquire: jest.fn().mockResolvedValue(true) };
   const scansService = {
@@ -112,13 +117,77 @@ describe('PullSummaryService.getSummary', () => {
     [AiScanStatus.SKIPPED_TOO_LARGE, 'skipped_too_large', /293 KB > 200 KB/],
     [AiScanStatus.BUDGET_EXCEEDED, 'budget_exceeded', /00:00 UTC/],
   ])('explains %s', async (aiStatus, code, hint) => {
-    const { service } = setup(
+    const { service, aiScanService } = setup(
       latestScan({ aiStatus, aiSummary: null, diffBytes: 300_000 }),
     );
+    // Still missing the same setting.
+    aiScanService.configurationFor.mockResolvedValue({
+      ready: false,
+      blockedBy: aiStatus,
+    });
     const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
     expect(summary.summaryMd).toBeNull();
-    expect(summary.error?.code).toBe(code);
-    expect(summary.error?.hint).toMatch(hint);
+    expect(summary.error).toEqual({
+      code,
+      hint: expect.stringMatching(hint) as string,
+      stale: false,
+    });
+  });
+
+  // aiStatus is decided when the scan finishes; an Admin may complete the
+  // settings afterwards. Without this the PR keeps saying "configure a
+  // provider" next to a Settings page that already has one.
+  it.each([
+    [AiScanStatus.NOT_CONFIGURED, 'not_configured'],
+    [AiScanStatus.CONSENT_REQUIRED, 'consent_required'],
+  ])(
+    'marks %s stale once the settings are complete',
+    async (aiStatus, code) => {
+      const { service, aiScanService } = setup(
+        latestScan({ aiStatus, aiSummary: null }),
+      );
+      const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+      expect(aiScanService.configurationFor).toHaveBeenCalledWith('org_1');
+      expect(summary.aiStatus).toBe(code);
+      expect(summary.error).toEqual({
+        code,
+        hint: expect.stringMatching(
+          /can regenerate to run the AI review/,
+        ) as string,
+        stale: true,
+      });
+    },
+  );
+
+  it('names the setting that is missing now', async () => {
+    const { service, aiScanService } = setup(
+      latestScan({ aiStatus: AiScanStatus.NOT_CONFIGURED, aiSummary: null }),
+    );
+    aiScanService.configurationFor.mockResolvedValue({
+      ready: false,
+      blockedBy: AiScanStatus.CONSENT_REQUIRED,
+    });
+    const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+    expect(summary.error).toMatchObject({
+      code: 'consent_required',
+      stale: false,
+    });
+  });
+
+  // Only missing settings can be fixed after the fact; a policy, a size or
+  // a budget decision stands as recorded.
+  it.each([
+    AiScanStatus.SKIPPED_MANUAL_MODE,
+    AiScanStatus.SKIPPED_TOO_LARGE,
+    AiScanStatus.BUDGET_EXCEEDED,
+    AiScanStatus.FAILED,
+  ])('does not re-check the settings for %s', async (aiStatus) => {
+    const { service, aiScanService } = setup(
+      latestScan({ aiStatus, aiSummary: null }),
+    );
+    const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+    expect(aiScanService.configurationFor).not.toHaveBeenCalled();
+    expect(summary.error?.stale).toBe(false);
   });
 
   // The same request stops at the same limit again: regenerating is not the
