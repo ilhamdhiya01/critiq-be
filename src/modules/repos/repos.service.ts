@@ -17,6 +17,7 @@ import {
   Provider,
   PullRequestState,
   ReviewPolicy,
+  ScanStatus,
   ScanTrigger,
 } from '../../generated/prisma/enums';
 import { ScanQueueService } from '../../queue/scan-queue.service';
@@ -48,6 +49,10 @@ const DEFAULT_POLICY_MAP: Record<DefaultPolicyWireValue, ReviewPolicy> = {
   require_both: ReviewPolicy.REQUIRE_BOTH,
 };
 
+function toPolicyWireValue(policy: ReviewPolicy): DefaultPolicyWireValue {
+  return policy.toLowerCase() as DefaultPolicyWireValue;
+}
+
 // Branch names allowed at MVP: exact names only (D6, PRD v1.4.2) — no
 // glob/wildcard support, so anything that looks like one is rejected
 // outright rather than silently treated as a literal string.
@@ -65,9 +70,26 @@ interface ProviderIntegration {
   encryptedToken: string | null;
 }
 
+// What the repositories list and detail show beside the repo itself.
+export interface RepositoryStats {
+  openPullCount: number;
+  // Active criticals in the latest scan of each open PR (criticalCount
+  // already excludes suppressed findings).
+  openCriticalCount: number;
+  // The most recent DONE/FAILED scan of the repository.
+  lastScanAt: Date | null;
+}
+
+const EMPTY_STATS: RepositoryStats = {
+  openPullCount: 0,
+  openCriticalCount: 0,
+  lastScanAt: null,
+};
+
 interface CheckedProviderRepo {
   path: string;
   defaultBranch: string;
+  language: string | null;
   // Of the branches asked about, those the provider does not have.
   missingBranches: string[];
 }
@@ -156,16 +178,18 @@ export class ReposService {
       organizationId,
       repositoryId,
     );
-    return new RepoScanConfigResponseDto({
-      defaultBranch: scanConfig.defaultBranch,
-      branches: scanConfig.branches,
-      defaultBranchChangedAt: scanConfig.defaultBranchChangedAt,
-    });
+    const policies = await this.findBranchPolicies(repositoryId);
+    return this.toScanConfigDto(scanConfig, policies);
   }
 
+  // Scope and review policy per branch, written together so a branch can
+  // never be in scope without a policy (before, a branch added here had
+  // none and its PRs fell back to MANUAL_ONLY). A policy change applies to
+  // PRs opened afterwards: effectivePolicy is snapshotted on the PR.
   async updateScanConfig(
     organizationId: string,
     repositoryId: string,
+    actorUserId: string,
     dto: UpdateScanConfigDto,
   ): Promise<RepoScanConfigResponseDto> {
     const scanConfig = await this.findScanConfigOrThrow(
@@ -192,24 +216,186 @@ export class ReposService {
 
     // Server always inserts defaultBranch if the client omitted it
     // (idempotent — PRD v1.4.2 §12.4), and it always sorts first.
+    // Deduped too: a branch listed twice would otherwise be stored twice.
     const withoutDefault = trimmed.filter(
       (branch) => branch !== scanConfig.defaultBranch,
     );
-    const branches = [scanConfig.defaultBranch, ...withoutDefault];
+    const branches = [
+      ...new Set([scanConfig.defaultBranch, ...withoutDefault]),
+    ];
 
-    const updated = await this.prisma.repoScanConfig.update({
-      where: { id: scanConfig.id },
-      data: { branches },
+    const requested = new Map<string, ReviewPolicy>();
+    for (const { branch, policy } of dto.policies ?? []) {
+      const name = branch.trim();
+      if (requested.has(name)) {
+        throw new UnprocessableEntityException({
+          field: 'policies',
+          message: 'duplicate_policy_branch',
+          branch: name,
+        });
+      }
+      if (!branches.includes(name)) {
+        throw new UnprocessableEntityException({
+          field: 'policies',
+          message: 'policy_branch_not_in_scope',
+          branch: name,
+        });
+      }
+      requested.set(name, DEFAULT_POLICY_MAP[policy]);
+    }
+
+    // A branch added to the scope must exist at the provider, as at connect
+    // — Critiq never creates branches. Only added ones are checked: one
+    // deleted at the provider since must not block every later save.
+    const added = branches.filter(
+      (branch) => !scanConfig.branches.includes(branch),
+    );
+    if (added.length > 0) {
+      const unknown = await this.findUnknownBranches(repositoryId, added);
+      if (unknown.length > 0) {
+        throw new UnprocessableEntityException({
+          field: 'branches',
+          message: 'unknown_branch',
+          branch: unknown[0],
+        });
+      }
+    }
+
+    // Requested → stored → the default branch's → MANUAL_ONLY (the same
+    // fallback a PR gets for a branch without a row).
+    const current = await this.findBranchPolicies(repositoryId);
+    const defaultBranchPolicy =
+      requested.get(scanConfig.defaultBranch) ??
+      current.get(scanConfig.defaultBranch) ??
+      ReviewPolicy.MANUAL_ONLY;
+    const next = new Map(
+      branches.map((branch) => [
+        branch,
+        requested.get(branch) ?? current.get(branch) ?? defaultBranchPolicy,
+      ]),
+    );
+    const changed = branches.filter(
+      (branch) => current.get(branch) !== next.get(branch),
+    );
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const config = await tx.repoScanConfig.update({
+        where: { id: scanConfig.id },
+        data: { branches },
+      });
+      await tx.branchScanPolicy.deleteMany({
+        where: { repositoryId, branch: { notIn: branches } },
+      });
+      for (const branch of changed) {
+        const policy = next.get(branch)!;
+        await tx.branchScanPolicy.upsert({
+          where: { repositoryId_branch: { repositoryId, branch } },
+          create: { organizationId, repositoryId, branch, policy },
+          update: { policy },
+        });
+      }
+      return config;
     });
 
-    // TODO Fase 4: record an AuditLog entry (repo.scan_config_updated) here
-    // with {before: scanConfig.branches, after: branches} — AuditLog model
-    // doesn't exist yet.
+    // TODO(audit log model): persisted row once the table exists.
+    this.logger.info('audit.repo.scan_config_updated', {
+      orgId: organizationId,
+      repoId: repositoryId,
+      by: actorUserId,
+      branches: { before: scanConfig.branches, after: branches },
+      policies: changed.map((branch) => ({
+        branch,
+        before: current.has(branch)
+          ? toPolicyWireValue(current.get(branch)!)
+          : null,
+        after: toPolicyWireValue(next.get(branch)!),
+      })),
+    });
 
+    return this.toScanConfigDto(updated, next);
+  }
+
+  // The branches, of those given, the repository does not have at the
+  // provider — checked one by one (branchExists), not against a listed
+  // page, like the connect check.
+  private async findUnknownBranches(
+    repositoryId: string,
+    branches: string[],
+  ): Promise<string[]> {
+    const repository = await this.prisma.repository.findUniqueOrThrow({
+      where: { id: repositoryId },
+      include: { integration: true },
+    });
+    const { integration } = repository;
+    if (integration.state === IntegrationState.TOKEN_EXPIRED) {
+      throw new ConflictException({
+        field: 'organizationId',
+        message: 'token_expired',
+      });
+    }
+    assertGithubAccess(integration);
+
+    let exists: boolean[];
+    if (integration.source === Provider.GITHUB) {
+      const installationId = this.githubInstallationId(integration);
+      const [owner, repo] = repository.path.split('/');
+      exists = await Promise.all(
+        branches.map((branch) =>
+          this.githubAppService.branchExists(
+            installationId,
+            owner,
+            repo,
+            branch,
+          ),
+        ),
+      );
+    } else {
+      const { instanceUrl, token } = this.gitlabCredential(integration);
+      exists = await Promise.all(
+        branches.map((branch) =>
+          this.gitlabApiService.branchExists(
+            instanceUrl,
+            token,
+            repository.externalId,
+            branch,
+          ),
+        ),
+      );
+    }
+    return branches.filter((_, index) => !exists[index]);
+  }
+
+  private async findBranchPolicies(
+    repositoryId: string,
+  ): Promise<Map<string, ReviewPolicy>> {
+    const rows = await this.prisma.branchScanPolicy.findMany({
+      where: { repositoryId },
+      select: { branch: true, policy: true },
+    });
+    return new Map(rows.map((row) => [row.branch, row.policy]));
+  }
+
+  // One policy per branch in scope, in scope order. A branch without a row
+  // (only possible before the backfill migration ran) reports MANUAL_ONLY —
+  // what its PRs actually get.
+  private toScanConfigDto(
+    scanConfig: {
+      defaultBranch: string;
+      branches: string[];
+      defaultBranchChangedAt: Date | null;
+    },
+    policies: Map<string, ReviewPolicy>,
+  ): RepoScanConfigResponseDto {
     return new RepoScanConfigResponseDto({
-      defaultBranch: updated.defaultBranch,
-      branches: updated.branches,
-      defaultBranchChangedAt: updated.defaultBranchChangedAt,
+      defaultBranch: scanConfig.defaultBranch,
+      branches: scanConfig.branches,
+      policies: scanConfig.branches.map((branch) => ({
+        branch,
+        policy: toPolicyWireValue(
+          policies.get(branch) ?? ReviewPolicy.MANUAL_ONLY,
+        ),
+      })),
+      defaultBranchChangedAt: scanConfig.defaultBranchChangedAt,
     });
   }
 
@@ -288,6 +474,8 @@ export class ReposService {
               externalId: providerRepoId,
               path,
               defaultBranch: providerRepo.defaultBranch,
+              language: providerRepo.language,
+              languageCheckedAt: new Date(),
             },
           });
           await tx.organization.update({
@@ -357,10 +545,13 @@ export class ReposService {
   }
 
   async list(organizationId: string): Promise<RepositoryListItemDto[]> {
-    const repositories = await this.prisma.repository.findMany({
-      where: { organizationId },
-      include: { scanConfig: true },
-    });
+    const [repositories, stats] = await Promise.all([
+      this.prisma.repository.findMany({
+        where: { organizationId },
+        include: { scanConfig: true },
+      }),
+      this.repositoryStats(organizationId),
+    ]);
 
     return repositories.map(
       (repository) =>
@@ -370,8 +561,55 @@ export class ReposService {
           path: repository.path,
           defaultBranch: repository.defaultBranch,
           monitoredBranchCount: repository.scanConfig?.branches.length ?? 0,
+          language: repository.language,
+          ...(stats.get(repository.id) ?? EMPTY_STATS),
         }),
     );
+  }
+
+  // Open PRs, their active criticals and the last finished scan, per
+  // repository of the organization — from the database only, no provider
+  // call. Two queries for the whole list, not one per repository.
+  private async repositoryStats(
+    organizationId: string,
+    repositoryId?: string,
+  ): Promise<Map<string, RepositoryStats>> {
+    const scope = repositoryId
+      ? { organizationId, repositoryId }
+      : { organizationId };
+    const [openPulls, lastScans] = await Promise.all([
+      this.prisma.pullRequest.findMany({
+        where: { ...scope, state: PullRequestState.OPEN },
+        select: {
+          repositoryId: true,
+          latestScan: { select: { criticalCount: true } },
+        },
+      }),
+      this.prisma.scan.groupBy({
+        by: ['repositoryId'],
+        where: {
+          ...scope,
+          status: { in: [ScanStatus.DONE, ScanStatus.FAILED] },
+        },
+        _max: { finishedAt: true },
+      }),
+    ]);
+
+    const stats = new Map<string, RepositoryStats>();
+    const statsFor = (id: string) => {
+      const current = stats.get(id) ?? { ...EMPTY_STATS };
+      stats.set(id, current);
+      return current;
+    };
+    for (const pull of openPulls) {
+      const current = statsFor(pull.repositoryId);
+      current.openPullCount += 1;
+      current.openCriticalCount += pull.latestScan?.criticalCount ?? 0;
+    }
+    for (const scan of lastScans) {
+      statsFor(scan.repositoryId).lastScanAt = scan._max.finishedAt;
+    }
+    return stats;
   }
 
   async getDetail(
@@ -380,24 +618,30 @@ export class ReposService {
   ): Promise<RepositoryDetailDto> {
     const repository = await this.prisma.repository.findUnique({
       where: { id: repositoryId },
-      include: { scanConfig: true },
+      include: {
+        scanConfig: true,
+        branchPolicies: { select: { branch: true, policy: true } },
+      },
     });
     if (!repository || repository.organizationId !== organizationId) {
       throw new NotFoundException('Repository not found.');
     }
+    const stats = await this.repositoryStats(organizationId, repositoryId);
 
     return new RepositoryDetailDto({
       id: repository.id,
       provider: repository.provider,
       path: repository.path,
       defaultBranch: repository.defaultBranch,
+      language: repository.language,
+      ...(stats.get(repository.id) ?? EMPTY_STATS),
       scanConfig: repository.scanConfig
-        ? new RepoScanConfigResponseDto({
-            defaultBranch: repository.scanConfig.defaultBranch,
-            branches: repository.scanConfig.branches,
-            defaultBranchChangedAt:
-              repository.scanConfig.defaultBranchChangedAt,
-          })
+        ? this.toScanConfigDto(
+            repository.scanConfig,
+            new Map(
+              repository.branchPolicies.map((row) => [row.branch, row.policy]),
+            ),
+          )
         : null,
     });
   }
@@ -667,13 +911,19 @@ export class ReposService {
       return {
         path: `${owner}/${repo}`,
         defaultBranch: detail.default_branch,
+        language: detail.language ?? null,
         missingBranches: branches.filter((_, index) => !exists[index]),
       };
     }
 
     const { instanceUrl, token } = this.gitlabCredential(integration);
-    const [detail, exists] = await Promise.all([
+    const [detail, language, exists] = await Promise.all([
       this.gitlabApiService.fetchProject(instanceUrl, token, providerRepoId),
+      this.gitlabApiService.fetchMainLanguage(
+        instanceUrl,
+        token,
+        providerRepoId,
+      ),
       Promise.all(
         branches.map((branch) =>
           this.gitlabApiService.branchExists(
@@ -688,6 +938,7 @@ export class ReposService {
     return {
       path: detail.path_with_namespace,
       defaultBranch: detail.default_branch,
+      language,
       missingBranches: branches.filter((_, index) => !exists[index]),
     };
   }

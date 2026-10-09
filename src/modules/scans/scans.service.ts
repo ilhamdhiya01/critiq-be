@@ -48,6 +48,7 @@ const STATUS_RANK: Record<FindingStatus, number> = {
   [FindingStatus.PERSISTED]: 2,
   [FindingStatus.RESOLVED]: 3,
 };
+import { RepositoryScanDto } from './dto/repository-scan.dto';
 import { ScanFindingsDto } from './dto/scan-findings.dto';
 import {
   ActiveScanDto,
@@ -90,6 +91,42 @@ export class ScansService {
       take: SCAN_HISTORY_LIMIT,
     });
     return scans.map((scan) => this.toScanDto(scan));
+  }
+
+  // A repository's scan history across its PRs, newest first — every
+  // attempt, like listForPull. Check-after-fetch: another org's repository
+  // is indistinguishable from a missing one.
+  async listForRepository(
+    organizationId: string,
+    repositoryId: string,
+    limit = SCAN_HISTORY_LIMIT,
+  ): Promise<RepositoryScanDto[]> {
+    const repository = await this.prisma.repository.findUnique({
+      where: { id: repositoryId },
+      select: { organizationId: true },
+    });
+    if (!repository || repository.organizationId !== organizationId) {
+      throw new NotFoundException('Repository not found.');
+    }
+    const scans = await this.prisma.scan.findMany({
+      where: { organizationId, repositoryId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: {
+        pullRequest: { select: { id: true, externalId: true, title: true } },
+      },
+    });
+    return scans.map(
+      ({ pullRequest, ...scan }) =>
+        new RepositoryScanDto({
+          ...this.toScanDto(scan),
+          pull: {
+            id: pullRequest.id,
+            number: pullRequest.externalId,
+            title: pullRequest.title,
+          },
+        }),
+    );
   }
 
   // Manual rescan (Admin/Reviewer). Always a new attempt on the PR's current

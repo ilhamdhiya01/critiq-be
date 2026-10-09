@@ -65,17 +65,19 @@ export class ReposController {
     return this.reposService.getScanConfig(orgId, id);
   }
 
-  // Admin only — changing which branches are scanned is a repo-config
-  // mutation, same gating rationale as connecting/disconnecting.
+  // Admin only — changing which branches are scanned, or their review
+  // policy, is a repo-config mutation, same gating rationale as
+  // connecting/disconnecting.
   @Put(':id/scan-config')
   @OrgAuth([Role.ADMIN])
   @ResponseMessage('Scan config updated successfully')
   updateScanConfig(
+    @Req() req: RequestWithSession,
     @Param('orgId') orgId: string,
     @Param('id') id: string,
     @Body() dto: UpdateScanConfigDto,
   ) {
-    return this.reposService.updateScanConfig(orgId, id, dto);
+    return this.reposService.updateScanConfig(orgId, id, req.user.sub, dto);
   }
 
   // Admin only, same gating as every other repo-config mutation: this
