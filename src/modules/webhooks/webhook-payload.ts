@@ -183,6 +183,26 @@ export function isGithubPullRequestPayload(
   return true;
 }
 
+// The App's own `installation` event (created, deleted, suspend,
+// unsuspend, new_permissions_accepted) — GitHub sends it to every App
+// regardless of the events it subscribes to. Only the action and the
+// installation id are read.
+export interface GithubInstallationPayload {
+  action: string;
+  installation: { id: number };
+}
+
+export function isGithubInstallationPayload(
+  value: unknown,
+): value is GithubInstallationPayload {
+  return (
+    isRecord(value) &&
+    typeof value.action === 'string' &&
+    isRecord(value.installation) &&
+    typeof value.installation.id === 'number'
+  );
+}
+
 // GitHub sends `ping` once when a webhook is first saved, and it carries a
 // `zen` string and `hook_id` but no `repository` — so it is a perfectly
 // valid delivery that simply has nothing for this service to act on.

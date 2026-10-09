@@ -61,6 +61,19 @@ export class IntegrationsController {
     return null;
   }
 
+  // Uninstalls the App on GitHub too, then removes the integration with its
+  // repositories and scan history. 502 github_unreachable removes nothing.
+  @Delete('github')
+  @OrgAuth([Role.ADMIN])
+  @ResponseMessage('GitHub integration disconnected successfully')
+  async disconnectGithub(
+    @Param('orgId') orgId: string,
+    @Req() req: RequestWithSession,
+  ) {
+    await this.integrationsService.disconnectGithub(orgId, req.user.sub);
+    return null;
+  }
+
   // Admin-only rather than open to all members: this triggers a live call
   // to the GitLab API on demand, and the status it returns is already
   // visible via GET /integrations — no reason to let a Viewer repeatedly

@@ -21,6 +21,7 @@ import type {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
 } from '../webhooks/webhook-payload';
+import { assertGithubAccess } from '../integrations/github-access';
 import {
   GithubAppService,
   GithubPullRequestFile,
@@ -567,6 +568,7 @@ export class PullsService {
             : 'token_invalid',
       });
     }
+    assertGithubAccess(integration);
     return pull;
   }
 

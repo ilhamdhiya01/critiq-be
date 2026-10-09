@@ -23,6 +23,7 @@ import {
   GithubAppService,
   type GithubInstallation,
 } from './github-app.service';
+import { assertGithubAccess } from './github-access';
 import { GitlabApiService, type GitlabProject } from './gitlab-api.service';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -256,6 +257,42 @@ export class IntegrationsService {
     await this.prisma.integration.delete({ where: { id: integration.id } });
   }
 
+  // Uninstalls the App on GitHub first, then deletes the row — cascading
+  // to its repositories, pulls and scans, like disconnectGitlab. Unlike
+  // GitLab's webhook revoke, a GitHub failure aborts: deleting the row while
+  // the App stays installed would leave Critiq able to read the account's
+  // code with nothing in Critiq showing it. Already uninstalled on GitHub
+  // (UNINSTALLED, or the event never arrived) is a 404 there, not a failure.
+  async disconnectGithub(
+    organizationId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const integration = await this.prisma.integration.findUnique({
+      where: {
+        organizationId_source: { organizationId, source: Provider.GITHUB },
+      },
+      include: { _count: { select: { repositories: true } } },
+    });
+    if (!integration) {
+      throw new NotFoundException(
+        'No GitHub integration found for this organization.',
+      );
+    }
+
+    const installationId = this.assertGithubInstallationId(integration);
+    await this.githubAppService.deleteInstallation(installationId);
+    await this.prisma.integration.delete({ where: { id: integration.id } });
+
+    // TODO(audit log model): persisted row once the table exists.
+    this.logger.info('audit.integration.github_disconnected', {
+      orgId: organizationId,
+      by: actorUserId,
+      installationId,
+      installationLogin: integration.installationLogin,
+      repositories: integration._count.repositories,
+    });
+  }
+
   // Revokes every connected repo's GitLab hook before the Integration row
   // (and its token) is deleted — otherwise the token needed to call
   // DELETE .../hooks/:id would already be gone. A single repo's revoke
@@ -397,6 +434,7 @@ export class IntegrationsService {
         message: 'github_not_connected',
       });
     }
+    assertGithubAccess(integration);
 
     const installationId = this.assertGithubInstallationId(integration);
     const repos = await this.githubAppService.listInstallationRepositories(
