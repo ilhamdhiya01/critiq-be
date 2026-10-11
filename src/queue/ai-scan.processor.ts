@@ -14,6 +14,7 @@ import {
   DiffMode,
   FindingSource,
   FindingStatus,
+  RuleTier,
 } from '../generated/prisma/enums';
 import { completeValidated } from '../modules/ai/ai-call';
 import { AiError, AiErrorCode, toAiError } from '../modules/ai/ai-error';
@@ -251,6 +252,7 @@ export class AiScanProcessor
         this.configService.getOrThrow<number>('ai.maxOutputTokens'),
       timeoutMs: this.configService.getOrThrow<number>('ai.timeoutMs'),
       mode: scan.diffMode === DiffMode.INCREMENTAL ? 'incremental' : 'full',
+      ruleTiers: scan.ruleTiers,
       lifecycle: {
         resolved: scanFindings.filter(
           (finding) =>
@@ -335,7 +337,11 @@ export class AiScanProcessor
 
     // 5. Validate against what was sent, dedupe against static, persist.
     const review = completion.toolInput as ReportReviewInput;
-    const validation = validateAiFindings(review.findings, prompt.sentFiles);
+    const validation = validateAiFindings(
+      review.findings,
+      prompt.sentFiles,
+      scan.ruleTiers,
+    );
     for (const rejected of validation.rejected) {
       this.logger.info('ai.reject', { ...log, reason: rejected.reason });
     }
@@ -428,6 +434,7 @@ export class AiScanProcessor
             diffMode: scan.diffMode,
             prevHeadSha: scan.prevHeadSha,
             locale: scan.organization.aiLocale,
+            ruleTiers: scan.ruleTiers,
           },
           scanId,
         );
@@ -571,6 +578,7 @@ export class AiScanProcessor
       baseScanId: string | null;
       headSha: string;
       aiModel: string | null;
+      ruleTiers: RuleTier[];
     },
     providerId: string,
     locale: string,
@@ -587,6 +595,7 @@ export class AiScanProcessor
         aiModel: true,
         aiPromptVersion: true,
         aiLocale: true,
+        ruleTiers: true,
       },
     });
     if (
@@ -598,12 +607,14 @@ export class AiScanProcessor
           model: base.aiModel,
           promptVersion: base.aiPromptVersion,
           locale: base.aiLocale,
+          ruleTiers: base.ruleTiers,
         },
         {
           provider: providerId,
           model: scan.aiModel,
           promptVersion: AI_PROMPT_VERSION,
           locale,
+          ruleTiers: scan.ruleTiers,
         },
       )
     ) {

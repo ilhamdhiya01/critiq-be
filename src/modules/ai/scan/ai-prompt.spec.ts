@@ -1,7 +1,11 @@
+import { RuleTier } from '../../../generated/prisma/enums';
+import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import {
   AI_PROMPT_VERSION,
   buildSystemPrompt,
+  categoriesFor,
   promptFingerprint,
+  reportReviewSchemaFor,
 } from './ai-prompt.constants';
 
 // Acceptance 20. The system prompt and the report_review schema are part of
@@ -20,6 +24,8 @@ const FINGERPRINT_BY_VERSION: Record<string, string> = {
     'fa3aff2fef9d58880d8f38e2116c4e3bbb3d568f903f921ad63535ebc65cc1db',
   'ai-2026.10.2':
     '33ee9ae58f4545deb7b62d4f6eae722bac5110f4c5417b3d007c75898a3059dc',
+  'ai-2026.10.3':
+    'ef41ba839bc2edc23fcd92a2fc2fe3faa1af6e2d2e3c82936385467aa02d1528',
 };
 
 describe('AI prompt', () => {
@@ -59,5 +65,37 @@ describe('AI prompt', () => {
 
   it('treats repository content as data, not instructions', () => {
     expect(buildSystemPrompt('en')).toMatch(/never instructions/i);
+  });
+});
+
+// Rules & Profiles: the model is asked only for the tiers that are on.
+describe('AI prompt — Critical tiers', () => {
+  it('lists every check when all tiers are on', () => {
+    const prompt = buildSystemPrompt('en');
+    expect(prompt).toContain('- Breaking changes (category "breaking_change")');
+    expect(prompt).toContain('- Performance killers (category "performance")');
+    expect(prompt).not.toContain('{{CHECKS}}');
+  });
+
+  it('leaves out the checks of disabled tiers', () => {
+    const tiers = ALL_RULE_TIERS.filter(
+      (tier) => tier !== RuleTier.PERFORMANCE,
+    );
+    const prompt = buildSystemPrompt('en', 'full', tiers);
+    expect(prompt).not.toContain('Performance killers');
+    expect(prompt).toContain('Security vulnerabilities');
+    expect(buildSystemPrompt('en', 'full', [])).toContain(
+      'turned on exactly these. Look for each one actively; report a problem that belongs to a check not listed here (it is turned off) not at all, not even as major or minor:\n- none',
+    );
+  });
+
+  it('narrows the category enum to the enabled tiers', () => {
+    expect(categoriesFor([])).toEqual(['logic', 'other']);
+    expect(categoriesFor([RuleTier.SECURITY])).toEqual(
+      expect.arrayContaining(['injection', 'insecure_tls', 'auth', 'config']),
+    );
+    const schema = JSON.stringify(reportReviewSchemaFor([RuleTier.CRASH]));
+    expect(schema).toContain('"crash"');
+    expect(schema).not.toContain('"performance"');
   });
 });

@@ -16,6 +16,7 @@ import {
   FindingSource,
   FindingStatus,
   ReviewPolicy,
+  RuleTier,
   ScanStatus,
   SuppressionReason,
 } from '../../../generated/prisma/enums';
@@ -25,6 +26,7 @@ import {
   AiJobPayload,
   buildAiJobId,
 } from '../../../queue/ai-queue.constants';
+import { tierKey } from '../../../queue/rules/rule-tiers';
 import { defaultModelFor, toProviderName } from '../ai-models.constants';
 import { AiProviderName } from '../ai-provider.interface';
 import { dedupeAiFindings } from './ai-deduper';
@@ -60,14 +62,17 @@ export interface AiCacheKeyParts {
   prevHeadSha: string | null;
   // A review written in another language is a different result.
   locale: string;
+  // So is a review that looked for another set of Critical tiers.
+  ruleTiers: readonly RuleTier[];
 }
 
 // Bump when what happens to a model's answer after the call changes —
 // validation above all: a cache hit copies the stored findings without
 // validating them again, so answers kept under older rules must not be
 // reused. (2: echoes_code, AI findings follow static suppression.
-// 3: severity calibration, confidence gate, near-duplicate merge.)
-export const AI_POSTPROCESS_VERSION = 'post-3';
+// 3: severity calibration, confidence gate, near-duplicate merge.
+// 4: Critical tiers — disabled categories rejected, untiered capped at major.)
+export const AI_POSTPROCESS_VERSION = 'post-4';
 
 export function aiCacheKey(parts: AiCacheKeyParts): string {
   const digest = createHash('sha256')
@@ -83,6 +88,7 @@ export function aiCacheKey(parts: AiCacheKeyParts): string {
         parts.diffMode,
         parts.prevHeadSha ?? '',
         parts.locale,
+        tierKey(parts.ruleTiers),
       ].join('|'),
     )
     .digest('hex');
@@ -224,6 +230,7 @@ export class AiScanService {
       diffMode: scan.diffMode,
       prevHeadSha: scan.prevHeadSha,
       locale,
+      ruleTiers: scan.ruleTiers,
     });
     // A regenerate of this scan by a comparable run keeps the earlier
     // run's findings (regenerate-merge.ts). Read before step 8 overwrites
@@ -234,8 +241,15 @@ export class AiScanService {
         model: scan.aiModel,
         promptVersion: scan.aiPromptVersion,
         locale: scan.aiLocale,
+        ruleTiers: scan.ruleTiers,
       },
-      { provider, model, promptVersion: AI_PROMPT_VERSION, locale },
+      {
+        provider,
+        model,
+        promptVersion: AI_PROMPT_VERSION,
+        locale,
+        ruleTiers: scan.ruleTiers,
+      },
     );
     if (!options.force) {
       const cached = await this.copyFromCache(scan, cacheKey, mergePrevious);

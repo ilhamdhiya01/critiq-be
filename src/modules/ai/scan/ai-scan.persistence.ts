@@ -7,6 +7,7 @@ import {
   FindingSeverity,
   FindingSource,
   FindingStatus,
+  RuleTier,
   SuppressionReason,
 } from '../../../generated/prisma/enums';
 import {
@@ -24,6 +25,7 @@ import {
   recomputeScanCounts,
   ScanCounts,
 } from '../../../queue/lifecycle/scan-counts';
+import { isFindingEnabled } from '../../../queue/rules/rule-tiers';
 import { KeptAiFinding } from './ai-deduper';
 import { MergeStats, mergeWithPreviousRun } from './regenerate-merge';
 
@@ -57,6 +59,8 @@ export interface ScanForAi {
   baseScanId: string | null;
   // Static active findings — for the suspicious_low_risk flag.
   findingsCount: number;
+  // The Critical tiers the scan ran under (Scan.ruleTiers).
+  ruleTiers: RuleTier[];
 }
 
 // What an AI result needs from the scan's lifecycle (v1.5.1 langkah 3).
@@ -79,8 +83,12 @@ export async function loadAiLifecycleContext(
 ): Promise<AiLifecycleContext> {
   const full = scan.diffMode === DiffMode.FULL;
   const [baseAi, persistedAi, recent] = await Promise.all([
+    // A base finding of a tier that is now off is not matched (and so not
+    // resolved): the profile changed, not the code.
     full && scan.baseScanId
-      ? loadBaseFindings(prisma, scan.baseScanId, FindingSource.AI)
+      ? loadBaseFindings(prisma, scan.baseScanId, FindingSource.AI).then(
+          (rows) => rows.filter((row) => isFindingEnabled(row, scan.ruleTiers)),
+        )
       : Promise.resolve([]),
     full
       ? Promise.resolve([])

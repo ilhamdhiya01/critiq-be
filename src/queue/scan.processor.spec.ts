@@ -13,11 +13,13 @@ import {
   FindingSource,
   FindingStatus,
   FullReason,
+  RuleTier,
   ScanErrorCode,
 } from '../generated/prisma/enums';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { StoredFinding } from './lifecycle/plan-findings';
+import { ALL_RULE_TIERS } from './rules/rule-tiers';
 import { ScanFailure } from './scan-errors';
 import { ScanJobPayload } from './scan-payload.dto';
 import { ScanProcessor } from './scan.processor';
@@ -132,6 +134,7 @@ function setup(options: {
   // Head file contents for the syntax check; files not listed are
   // unavailable (null), so it decides nothing about them.
   heads?: Record<string, string>;
+  ruleTiers?: RuleTier[];
 }) {
   const written: Row[] = [];
   const tx = {
@@ -206,6 +209,7 @@ function setup(options: {
         diffMode: options.compare ? DiffMode.INCREMENTAL : DiffMode.FULL,
         baseScanId: options.base ? 'scan_1' : null,
         prevHeadSha: options.compare ? 'aaa111' : null,
+        ruleTiers: options.ruleTiers ?? ALL_RULE_TIERS,
       }),
     },
     finding: {
@@ -507,7 +511,7 @@ describe('ScanProcessor — syntax check', () => {
   const brokenInBase = stored('s_syntax', PATH, 4, {
     ruleId: 'code.syntax_error',
     title: 'Syntax error',
-    category: FindingCategory.LOGIC,
+    category: FindingCategory.CRASH,
     fingerprint: SYNTAX_FINGERPRINT,
   });
 
@@ -543,7 +547,7 @@ describe('ScanProcessor — syntax check', () => {
         ruleId: 'code.syntax_error',
         source: FindingSource.STATIC,
         severity: FindingSeverity.CRITICAL,
-        category: FindingCategory.LOGIC,
+        category: FindingCategory.CRASH,
         status: FindingStatus.NEW,
         filePath: PATH,
         lineStart: 4,
@@ -562,6 +566,29 @@ describe('ScanProcessor — syntax check', () => {
       'notification.pull_critical_found',
       expect.objectContaining({ criticalCount: 1 }),
     );
+  });
+
+  it('does not run when the crash tier is off', async () => {
+    const { processor, pullsService, written } = setup({
+      heads: { [PATH]: BROKEN },
+      ruleTiers: ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.CRASH),
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [
+        {
+          path: PATH,
+          previousPath: null,
+          status: 'modified',
+          patch: '@@ -4 +4 @@\n-  }\n+  // }',
+        },
+      ],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([]);
+    expect(pullsService.getHeadFileContents).not.toHaveBeenCalled();
   });
 
   it('suppresses it in a data fixture', async () => {
@@ -693,5 +720,62 @@ describe('ScanProcessor — syntax check', () => {
         status: FindingStatus.PERSISTED,
       }),
     ]);
+  });
+});
+
+// Rules & Profiles: a tier that is off runs none of its rules, and the base
+// findings of that tier neither carry forward nor resolve.
+describe('ScanProcessor — Critical tiers', () => {
+  const TLS_PATCH = {
+    path: 'src/http.ts',
+    previousPath: null,
+    status: 'modified' as const,
+    patch:
+      '@@ -1 +1 @@\n-const agent = new Agent();\n+const agent = new Agent({ rejectUnauthorized: false });',
+  };
+
+  it('runs the rules of an enabled tier', async () => {
+    const { processor, pullsService, written } = setup({});
+    pullsService.getDiff.mockResolvedValue({
+      files: [TLS_PATCH],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({ ruleId: 'code.insecure_tls' }),
+    ]);
+  });
+
+  it('skips the rules of a disabled tier', async () => {
+    const { processor, pullsService, written } = setup({
+      ruleTiers: ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.SECURITY),
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [TLS_PATCH],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([]);
+  });
+
+  it('drops base findings of a disabled tier instead of resolving them', async () => {
+    const { processor, pullsService, written } = setup({
+      base: [
+        stored('s_tls', 'src/other.ts', 3, {
+          ruleId: 'code.insecure_tls',
+          category: FindingCategory.INSECURE_TLS,
+        }),
+      ],
+      ruleTiers: ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.SECURITY),
+    });
+    pullsService.getDiff.mockResolvedValue({ files: [], truncated: false });
+
+    await processor.process(job);
+
+    expect(written).toEqual([]);
   });
 });

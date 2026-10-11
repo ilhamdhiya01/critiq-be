@@ -3,8 +3,10 @@ import {
   DiffMode,
   FullReason,
   ReviewPolicy,
+  RuleTier,
 } from '../generated/prisma/enums';
 import { AI_PROMPT_VERSION } from '../modules/ai/scan/ai-prompt.constants';
+import { ALL_RULE_TIERS } from './rules/rule-tiers';
 import { RULESET_VERSION } from './rules/rules.constants';
 import { decideScanMode } from './scan-queue.service';
 
@@ -26,6 +28,7 @@ const base = {
   aiLocale: 'en' as string | null,
   aiStatus: AiScanStatus.DONE,
   aiReviewed: true,
+  ruleTiers: ALL_RULE_TIERS,
 };
 
 describe('decideScanMode', () => {
@@ -37,6 +40,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }),
     ).toEqual({
       diffMode: DiffMode.FULL,
@@ -54,6 +58,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }),
     ).toEqual({
       diffMode: DiffMode.INCREMENTAL,
@@ -72,6 +77,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }),
     ).toMatchObject({
       diffMode: DiffMode.FULL,
@@ -89,6 +95,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.MANUAL_ONLY,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }).fullReason,
     ).toBe(FullReason.RULESET_CHANGED);
   });
@@ -102,6 +109,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }).fullReason,
     ).toBe(FullReason.PROMPT_CHANGED);
     expect(
@@ -111,6 +119,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.MANUAL_ONLY,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }).diffMode,
     ).toBe(DiffMode.INCREMENTAL);
   });
@@ -127,6 +136,7 @@ describe('decideScanMode', () => {
         effectivePolicy,
         aiEnabled: true,
         locale: 'id',
+        ruleTiers: ALL_RULE_TIERS,
       });
     expect(decide('en')).toMatchObject({
       diffMode: DiffMode.FULL,
@@ -151,6 +161,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }),
     ).toMatchObject({
       diffMode: DiffMode.FULL,
@@ -168,6 +179,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: false,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }).diffMode,
     ).toBe(DiffMode.INCREMENTAL);
     expect(
@@ -177,6 +189,7 @@ describe('decideScanMode', () => {
         effectivePolicy: ReviewPolicy.MANUAL_ONLY,
         aiEnabled: true,
         locale: 'en',
+        ruleTiers: ALL_RULE_TIERS,
       }).diffMode,
     ).toBe(DiffMode.INCREMENTAL);
   });
@@ -192,8 +205,32 @@ describe('decideScanMode', () => {
           effectivePolicy: ReviewPolicy.ALLOW_AI,
           aiEnabled: true,
           locale: 'en',
+          ruleTiers: ALL_RULE_TIERS,
         }).diffMode,
       ).toBe(DiffMode.INCREMENTAL);
     },
   );
+
+  // A tier turned on must see the whole PR; one turned off must not leave
+  // its findings carried forward.
+  it('goes full when the enabled Critical tiers changed', () => {
+    const decide = (ruleTiers: RuleTier[]) =>
+      decideScanMode({
+        base,
+        full: false,
+        effectivePolicy: ReviewPolicy.MANUAL_ONLY,
+        aiEnabled: false,
+        locale: 'en',
+        ruleTiers,
+      });
+    expect(
+      decide(ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.SECURITY)),
+    ).toMatchObject({
+      diffMode: DiffMode.FULL,
+      fullReason: FullReason.RULES_CHANGED,
+    });
+    expect(decide([...ALL_RULE_TIERS].reverse()).diffMode).toBe(
+      DiffMode.INCREMENTAL,
+    );
+  });
 });

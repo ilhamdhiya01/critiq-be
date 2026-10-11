@@ -14,6 +14,7 @@ import {
   FindingSource,
   FindingStatus,
   FullReason,
+  RuleTier,
   ScanErrorCode,
   ScanStatus,
 } from '../generated/prisma/enums';
@@ -44,6 +45,8 @@ import {
 } from './scan-errors';
 import { cachedHeadFileContents } from './head-file-cache';
 import { detectLanguage } from './rules/language-detector';
+import { isFindingEnabled, tierForRule } from './rules/rule-tiers';
+import { RULES } from './rules/rules';
 import { SYNTAX_RULE_ID } from './rules/syntax/syntax-check';
 import {
   runSyntaxChecks,
@@ -55,6 +58,15 @@ import { SCAN_QUEUE_NAME } from './scan-queue.service';
 import { classifySuppression } from './suppression';
 
 const SCAN_FAILED_NOTIFY_THROTTLE_SECONDS = 3600;
+
+const noSyntaxResult = (): SyntaxStepResult & {
+  decidedOldPaths: Set<string>;
+} => ({
+  hits: [],
+  decidedPaths: new Set<string>(),
+  decidedOldPaths: new Set<string>(),
+  skipped: {},
+});
 
 type LogContext = Record<string, unknown>;
 
@@ -125,8 +137,10 @@ export class ScanProcessor
         diffMode: true,
         baseScanId: true,
         prevHeadSha: true,
+        ruleTiers: true,
       },
     });
+    const tiers = scanRow.ruleTiers;
     let diffMode = scanRow.diffMode;
     let diff: { files: PullRequestDiffDto['files']; truncated: boolean };
     if (diffMode === DiffMode.INCREMENTAL && scanRow.prevHeadSha) {
@@ -170,6 +184,11 @@ export class ScanProcessor
     await job.updateProgress({ step: 'rules', pct: 35 });
     const analysis = analyzeDiff(diff.files, {
       maxDiffBytes: this.configService.getOrThrow<number>('scan.maxDiffBytes'),
+      // Only the rules of the tiers the quality profile had on.
+      rules: RULES.filter((rule) => {
+        const tier = tierForRule(rule.id);
+        return tier !== null && tiers.includes(tier);
+      }),
       afterFile: () => this.assertWithinDeadline(deadline),
     });
     if (analysis.diffTooLarge) {
@@ -205,21 +224,27 @@ export class ScanProcessor
       );
     }
 
+    // A finding of a tier that is now off is neither carried nor resolved:
+    // the code did not change, the profile did. It just leaves the PR.
     const base = scanRow.baseScanId
-      ? await loadBaseFindings(this.prisma, scanRow.baseScanId)
+      ? (await loadBaseFindings(this.prisma, scanRow.baseScanId)).filter(
+          (finding) => isFindingEnabled(finding, tiers),
+        )
       : [];
 
     // 5b. Syntax (code.syntax_error): the changed files themselves, parsed
     // whole — a broken brace is invisible to line rules.
     await job.updateProgress({ step: 'syntax', pct: 60 });
-    const syntax = await this.checkChangedFilesSyntax(
-      job.data,
-      scanRow.headSha,
-      diff.files,
-      base,
-      deadline,
-      log,
-    );
+    const syntax = tiers.includes(RuleTier.CRASH)
+      ? await this.checkChangedFilesSyntax(
+          job.data,
+          scanRow.headSha,
+          diff.files,
+          base,
+          deadline,
+          log,
+        )
+      : noSyntaxResult();
     const syntaxFindings = syntax.hits.map((hit) => ({
       ...hit,
       suppressedReason: classifySuppression({
@@ -586,12 +611,7 @@ export class ScanProcessor
     deadline: number,
     log: LogContext,
   ): Promise<SyntaxStepResult & { decidedOldPaths: Set<string> }> {
-    const nothing = {
-      hits: [],
-      decidedPaths: new Set<string>(),
-      decidedOldPaths: new Set<string>(),
-      skipped: {},
-    };
+    const nothing = noSyntaxResult();
     const { files: selected, capped } = syntaxCheckFiles(
       files,
       this.configService.getOrThrow<number>('scan.syntaxMaxFiles'),

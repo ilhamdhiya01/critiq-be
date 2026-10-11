@@ -9,6 +9,7 @@ import {
   AiScanStatus,
   FindingCategory,
   FindingSource,
+  RuleTier,
   ScanStatus,
 } from '../generated/prisma/enums';
 import { AiError } from '../modules/ai/ai-error';
@@ -18,6 +19,7 @@ import { riskLevelFromCounts } from '../modules/ai/scan/ai-scan.persistence';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { AiJobPayload } from './ai-queue.constants';
+import { ALL_RULE_TIERS } from './rules/rule-tiers';
 import { AI_PROMPT_VERSION } from '../modules/ai/scan/ai-prompt.constants';
 import { AiJobFailure, AiScanProcessor } from './ai-scan.processor';
 
@@ -115,6 +117,7 @@ function setup(
     staticFindings?: unknown[];
     // This scan's AI rows from an earlier run (regenerate merge).
     earlierRun?: unknown[];
+    ruleTiers?: RuleTier[];
   } = {},
 ) {
   const tx = {
@@ -153,6 +156,7 @@ function setup(
         diffMode: 'FULL',
         baseScanId: null,
         prevHeadSha: null,
+        ruleTiers: options.ruleTiers ?? ALL_RULE_TIERS,
         pullRequest: {
           title: 'Rotate sessions',
           description: null,
@@ -828,6 +832,7 @@ describe('AiScanProcessor', () => {
                     aiModel: 'claude-sonnet-5',
                     aiPromptVersion: AI_PROMPT_VERSION,
                     aiLocale: baseLocale,
+                    ruleTiers: ALL_RULE_TIERS,
                   }
                 : { headSha: 'abc123', criticalCount: 0 },
             ),
