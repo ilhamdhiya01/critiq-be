@@ -23,6 +23,7 @@ const base = {
   headSha: 'aaa111',
   rulesetVersion: RULESET_VERSION,
   aiPromptVersion: AI_PROMPT_VERSION,
+  aiLocale: 'en' as string | null,
   aiStatus: AiScanStatus.DONE,
   aiReviewed: true,
 };
@@ -35,6 +36,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
+        locale: 'en',
       }),
     ).toEqual({
       diffMode: DiffMode.FULL,
@@ -51,6 +53,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
+        locale: 'en',
       }),
     ).toEqual({
       diffMode: DiffMode.INCREMENTAL,
@@ -68,6 +71,7 @@ describe('decideScanMode', () => {
         full: true,
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
+        locale: 'en',
       }),
     ).toMatchObject({
       diffMode: DiffMode.FULL,
@@ -84,6 +88,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.MANUAL_ONLY,
         aiEnabled: true,
+        locale: 'en',
       }).fullReason,
     ).toBe(FullReason.RULESET_CHANGED);
   });
@@ -96,6 +101,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
+        locale: 'en',
       }).fullReason,
     ).toBe(FullReason.PROMPT_CHANGED);
     expect(
@@ -104,8 +110,34 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.MANUAL_ONLY,
         aiEnabled: true,
+        locale: 'en',
       }).diffMode,
     ).toBe(DiffMode.INCREMENTAL);
+  });
+
+  // Carried-forward findings would stay in the old language.
+  it('goes full when the organization language changed', () => {
+    const decide = (
+      aiLocale: string | null,
+      effectivePolicy: ReviewPolicy = ReviewPolicy.ALLOW_AI,
+    ) =>
+      decideScanMode({
+        base: { ...base, aiLocale },
+        full: false,
+        effectivePolicy,
+        aiEnabled: true,
+        locale: 'id',
+      });
+    expect(decide('en')).toMatchObject({
+      diffMode: DiffMode.FULL,
+      fullReason: FullReason.PROMPT_CHANGED,
+    });
+    expect(decide('id').diffMode).toBe(DiffMode.INCREMENTAL);
+    // Recorded before the language was stored: no reason to rescan.
+    expect(decide(null).diffMode).toBe(DiffMode.INCREMENTAL);
+    expect(decide('en', ReviewPolicy.MANUAL_ONLY).diffMode).toBe(
+      DiffMode.INCREMENTAL,
+    );
   });
 
   // The base was scanned before the AI was set up (or its AI step failed):
@@ -118,6 +150,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: true,
+        locale: 'en',
       }),
     ).toMatchObject({
       diffMode: DiffMode.FULL,
@@ -134,6 +167,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.ALLOW_AI,
         aiEnabled: false,
+        locale: 'en',
       }).diffMode,
     ).toBe(DiffMode.INCREMENTAL);
     expect(
@@ -142,6 +176,7 @@ describe('decideScanMode', () => {
         full: false,
         effectivePolicy: ReviewPolicy.MANUAL_ONLY,
         aiEnabled: true,
+        locale: 'en',
       }).diffMode,
     ).toBe(DiffMode.INCREMENTAL);
   });
@@ -156,6 +191,7 @@ describe('decideScanMode', () => {
           full: false,
           effectivePolicy: ReviewPolicy.ALLOW_AI,
           aiEnabled: true,
+          locale: 'en',
         }).diffMode,
       ).toBe(DiffMode.INCREMENTAL);
     },

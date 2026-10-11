@@ -3,11 +3,12 @@
 // exact match is too strict; Jaro-Winkler weights a shared prefix, which is
 // how two phrasings of the same problem usually differ.
 
-// Lowercase, no punctuation or digits, single spaces.
+// Lowercase, no punctuation or digits, single spaces. Letters of any
+// script are kept, since titles follow the organization's language.
 export function normalizeTitle(title: string): string {
   return title
     .toLowerCase()
-    .replace(/[^a-z\s]+/g, ' ')
+    .replace(/[^\p{L}\s]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }

@@ -184,6 +184,7 @@ export interface AiResultToPersist {
   provider: string;
   model: string;
   promptVersion: string;
+  locale: string | null;
   tokensIn: number | null;
   tokensOut: number | null;
   // Extra aiFlags for this result (e.g. PARTIAL_RESPONSE).
@@ -229,6 +230,7 @@ export async function persistAiResult(
       aiProvider: result.provider,
       aiModel: result.model,
       aiPromptVersion: result.promptVersion,
+      aiLocale: result.locale,
       aiTokensIn: result.tokensIn,
       aiTokensOut: result.tokensOut,
       aiCached: result.status === AiScanStatus.CACHED,
