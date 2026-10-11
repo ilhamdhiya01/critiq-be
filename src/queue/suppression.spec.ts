@@ -84,13 +84,30 @@ describe('classifySuppression — regex literals (§1b)', () => {
     ).toBeNull();
   });
 
-  it('cannot suppress as REGEX_LITERAL without a match position', () => {
+  // An AI finding points at a line, never a column. Falling back to
+  // path-only suppression there let the model report a rule definition's own
+  // detection pattern as the thing it detects, so with no match position the
+  // question becomes "is this line a regex literal" instead.
+  it('suppresses a regex-literal line when no match position is given', () => {
     expect(
       classifySuppression({
         ruleId: 'code.insecure_tls',
         filePath: 'src/lint.ts',
         language: 'js',
         lineText: line,
+      }),
+    ).toBe(REGEX_LITERAL);
+  });
+
+  // The line-level fallback must stay narrow: a statement that merely
+  // contains a small regex is still real code.
+  it('leaves a line that only contains a small regex active', () => {
+    expect(
+      classifySuppression({
+        ruleId: 'code.insecure_tls',
+        filePath: 'src/lint.ts',
+        language: 'js',
+        lineText: 'const opts = { rejectUnauthorized: false, re: /x/ };',
       }),
     ).toBeNull();
   });
