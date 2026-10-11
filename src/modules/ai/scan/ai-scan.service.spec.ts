@@ -485,11 +485,28 @@ describe('aiCacheKey', () => {
       promptVersion: 'ai-2026.09.3',
       provider: 'anthropic' as const,
       model: 'claude-sonnet-5',
+      locale: 'en',
     };
     expect(
       aiCacheKey({ ...parts, diffMode: 'FULL', prevHeadSha: null }),
     ).not.toBe(
       aiCacheKey({ ...parts, diffMode: 'INCREMENTAL', prevHeadSha: 'aaa111' }),
+    );
+  });
+
+  it('differs between languages', () => {
+    const parts = {
+      repositoryId: 'repo_1',
+      headSha: 'abc123',
+      rulesetVersion: '2026.09.5',
+      promptVersion: 'ai-2026.10.2',
+      provider: 'anthropic' as const,
+      model: 'claude-sonnet-5',
+      diffMode: 'FULL',
+      prevHeadSha: null,
+    };
+    expect(aiCacheKey({ ...parts, locale: 'en' })).not.toBe(
+      aiCacheKey({ ...parts, locale: 'id' }),
     );
   });
 });

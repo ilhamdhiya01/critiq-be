@@ -21,7 +21,8 @@ const SIMILAR_TITLE = 0.85;
 const MAX_MERGED_RANGE = 40;
 // Stripped before fingerprinting: "Potential missing X" and "Missing X"
 // are the same finding.
-const HEDGE_PREFIX = /^(potential|possible|may|might)\s+/i;
+const HEDGE_PREFIX =
+  /^(potential|possible|may|might|mungkin|kemungkinan|berpotensi|potensi|bisa jadi)\s+/i;
 
 export interface StaticForDedupe {
   id: string;
@@ -63,7 +64,7 @@ function normalizeTitle(title: string): string {
     .trim()
     .replace(HEDGE_PREFIX, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
 

@@ -71,6 +71,7 @@ export function decideScanMode(input: {
     headSha: string;
     rulesetVersion: string;
     aiPromptVersion: string | null;
+    aiLocale: string | null;
     aiStatus: AiScanStatus | null;
     // The base scan has an AI summary (a completed or cached review).
     aiReviewed: boolean;
@@ -79,6 +80,8 @@ export function decideScanMode(input: {
   effectivePolicy: ReviewPolicy | null;
   // Provider selected and consent given — the AI will review this scan.
   aiEnabled: boolean;
+  // The organization's AI language now.
+  locale: string | null;
 }): ScanModeDecision {
   const full = (fullReason: FullReason): ScanModeDecision => ({
     diffMode: DiffMode.FULL,
@@ -97,9 +100,17 @@ export function decideScanMode(input: {
   }
   // Only when the AI runs on this PR: a Manual-only branch never sent a
   // prompt, so a prompt change is irrelevant to it.
-  if (
+  // The language is part of the prompt: after a switch, a delta review
+  // would leave the carried-forward findings in the old language.
+  const promptVersionChanged =
     input.base.aiPromptVersion !== null &&
-    input.base.aiPromptVersion !== AI_PROMPT_VERSION &&
+    input.base.aiPromptVersion !== AI_PROMPT_VERSION;
+  const localeChanged =
+    input.base.aiLocale !== null &&
+    input.locale !== null &&
+    input.base.aiLocale !== input.locale;
+  if (
+    (promptVersionChanged || localeChanged) &&
     input.effectivePolicy !== ReviewPolicy.MANUAL_ONLY
   ) {
     return full(FullReason.PROMPT_CHANGED);
@@ -217,6 +228,7 @@ export class ScanQueueService {
           headSha: true,
           rulesetVersion: true,
           aiPromptVersion: true,
+          aiLocale: true,
           aiStatus: true,
           aiSummary: { select: { id: true } },
         },
@@ -225,7 +237,9 @@ export class ScanQueueService {
         where: { id: input.pullId },
         select: {
           effectivePolicy: true,
-          organization: { select: { aiProvider: true, aiConsentAt: true } },
+          organization: {
+            select: { aiProvider: true, aiConsentAt: true, aiLocale: true },
+          },
         },
       }),
     ]);
@@ -236,6 +250,7 @@ export class ScanQueueService {
       aiEnabled: Boolean(
         pull?.organization.aiProvider && pull.organization.aiConsentAt,
       ),
+      locale: pull?.organization.aiLocale ?? null,
     });
 
     let scanId: string;

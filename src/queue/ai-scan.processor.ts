@@ -361,6 +361,7 @@ export class AiScanProcessor
     const earlierRun = await this.comparableBaseRun(
       scan,
       provider.id,
+      scan.organization.aiLocale,
       lifecycleContext.baseAi,
     );
     const baseMerge = earlierRun
@@ -388,6 +389,7 @@ export class AiScanProcessor
           provider: aiProvider,
           model: aiModel,
           promptVersion: AI_PROMPT_VERSION,
+          locale: scan.organization.aiLocale,
           tokensIn: completion.usage.inputTokens,
           tokensOut: completion.usage.outputTokens,
           flags: partial ? [PARTIAL_RESPONSE] : [],
@@ -425,6 +427,7 @@ export class AiScanProcessor
             model: scan.aiModel ?? aiModel,
             diffMode: scan.diffMode,
             prevHeadSha: scan.prevHeadSha,
+            locale: scan.organization.aiLocale,
           },
           scanId,
         );
@@ -570,6 +573,7 @@ export class AiScanProcessor
       aiModel: string | null;
     },
     providerId: string,
+    locale: string,
     baseAi: StoredFinding[],
   ): Promise<StoredFinding[] | null> {
     if (scan.diffMode !== DiffMode.FULL || !scan.baseScanId) {
@@ -582,6 +586,7 @@ export class AiScanProcessor
         aiProvider: true,
         aiModel: true,
         aiPromptVersion: true,
+        aiLocale: true,
       },
     });
     if (
@@ -592,11 +597,13 @@ export class AiScanProcessor
           provider: base.aiProvider,
           model: base.aiModel,
           promptVersion: base.aiPromptVersion,
+          locale: base.aiLocale,
         },
         {
           provider: providerId,
           model: scan.aiModel,
           promptVersion: AI_PROMPT_VERSION,
+          locale,
         },
       )
     ) {

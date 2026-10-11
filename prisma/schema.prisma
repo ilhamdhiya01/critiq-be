@@ -221,6 +221,13 @@ model Repository {
   path           String
   defaultBranch  String
 
+  // Main language as the provider reports it — display only. Read at
+  // connect; repos connected before the column existed are filled once by
+  // the worker on their next scan (languageCheckedAt null). Null language
+  // with a languageCheckedAt = the provider did not know.
+  language          String?
+  languageCheckedAt DateTime?
+
   // GitLab-only — a hook is registered per-repo via the GitLab API when the
   // repo is connected (see ReposService.createRepos). Null until that call
   // succeeds, and always null for provider = GITHUB: GitHub App webhooks are
@@ -470,6 +477,9 @@ model Scan {
   aiProvider          String?
   aiModel             String?
   aiPromptVersion     String?
+  // The organization language the review was written in. Null = the scan
+  // ran before this was recorded.
+  aiLocale            String?
   aiTokensIn          Int?
   aiTokensOut         Int?
   aiCached            Boolean       @default(false)
