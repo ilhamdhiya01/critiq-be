@@ -22,7 +22,8 @@ const DROP_BELOW = 0.5;
 const DOWNGRADE_BELOW = 0.7;
 // A hedged title ("Potential …", "May …") is the model guessing: one level
 // down, not dropped — it may still be right.
-const HEDGED_TITLE = /^(potential|possible|may|might)\b/i;
+const HEDGED_TITLE =
+  /^(potential|possible|may|might|mungkin|kemungkinan|berpotensi|potensi|bisa jadi)\b/i;
 const SEVERITY_ORDER: FindingSeverity[] = [
   FindingSeverity.MINOR,
   FindingSeverity.MAJOR,
@@ -77,7 +78,7 @@ function isReviewable(line: number, added: Set<number>): boolean {
 function normalizeText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
 

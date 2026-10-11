@@ -477,6 +477,9 @@ model Scan {
   aiProvider          String?
   aiModel             String?
   aiPromptVersion     String?
+  // The organization language the review was written in. Null = the scan
+  // ran before this was recorded.
+  aiLocale            String?
   aiTokensIn          Int?
   aiTokensOut         Int?
   aiCached            Boolean       @default(false)

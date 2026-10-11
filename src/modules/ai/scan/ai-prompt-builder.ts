@@ -7,6 +7,7 @@ import {
 import { AiRequest } from '../ai-provider.interface';
 import {
   buildSystemPrompt,
+  languageName,
   REPORT_REVIEW_SCHEMA,
   REPORT_REVIEW_TOOL,
   ReviewMode,
@@ -369,13 +370,20 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
     (input.systemSuffix ?? '');
   const diffIntro =
     'DIFF (new-side line numbers; "+" marks added lines — the only lines a finding may point at):';
+  // Repeated at the very end: smaller models drift back to English when
+  // the only language instruction sits far above a long English diff.
+  const languageReminder = `Reply in ${languageName(input.locale)}: the summary, every title and every message.`;
 
   // Drop files from the end until the prompt fits the input budget.
   const kept = [...rendered];
   const omittedForSize: string[] = [];
   const size = () =>
     estimateTokens(
-      system + header + diffIntro + kept.map((f) => f.text).join('\n\n'),
+      system +
+        header +
+        diffIntro +
+        kept.map((f) => f.text).join('\n\n') +
+        languageReminder,
     );
   while (kept.length > 0 && size() > input.maxInputTokens) {
     omittedForSize.unshift(kept.pop()!.path);
@@ -401,6 +409,8 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
     diffIntro,
     '',
     kept.map((f) => f.text).join('\n\n'),
+    '',
+    languageReminder,
   ].join('\n');
 
   const sentFiles = new Map<string, SentFile>(

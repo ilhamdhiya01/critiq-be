@@ -43,6 +43,9 @@ export interface RunIdentity {
   provider: string | null;
   model: string | null;
   promptVersion: string | null;
+  // Findings written in another language are not merged in: the review
+  // would show two languages side by side.
+  locale: string | null;
 }
 
 // A provider answers with the model it actually ran — OpenAI a dated
@@ -61,6 +64,8 @@ export function isComparableRun(
     earlier.provider === current.provider &&
     earlier.promptVersion !== null &&
     earlier.promptVersion === current.promptVersion &&
+    earlier.locale !== null &&
+    earlier.locale === current.locale &&
     earlier.model !== null &&
     current.model !== null &&
     modelFamily(earlier.model) === modelFamily(current.model)

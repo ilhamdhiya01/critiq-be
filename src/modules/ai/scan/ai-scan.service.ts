@@ -58,6 +58,8 @@ export interface AiCacheKeyParts {
   // result from a full review of the same head.
   diffMode: string;
   prevHeadSha: string | null;
+  // A review written in another language is a different result.
+  locale: string;
 }
 
 // Bump when what happens to a model's answer after the call changes —
@@ -80,6 +82,7 @@ export function aiCacheKey(parts: AiCacheKeyParts): string {
         parts.model,
         parts.diffMode,
         parts.prevHeadSha ?? '',
+        parts.locale,
       ].join('|'),
     )
     .digest('hex');
@@ -152,6 +155,7 @@ export class AiScanService {
             aiModel: true,
             aiConsentAt: true,
             aiDailyTokenBudget: true,
+            aiLocale: true,
           },
         },
       },
@@ -177,6 +181,7 @@ export class AiScanService {
       return settle(configuration.blockedBy);
     }
     const { provider, model } = configuration;
+    const locale = organization.aiLocale;
 
     // 4. Nothing changed since the base scan (a rescan of the same head):
     // every finding was carried forward, so the previous summary still
@@ -187,7 +192,10 @@ export class AiScanService {
       (scan.diffBytes ?? 0) === 0 &&
       scan.filesChanged === 0
     ) {
-      return this.copySummaryFromBase(scan);
+      const copied = await this.copySummaryFromBase(scan, locale);
+      if (copied) {
+        return copied;
+      }
     }
 
     // 5. Size — the scannable patch bytes the static scan measured, which
@@ -215,6 +223,7 @@ export class AiScanService {
       model,
       diffMode: scan.diffMode,
       prevHeadSha: scan.prevHeadSha,
+      locale,
     });
     // A regenerate of this scan by a comparable run keeps the earlier
     // run's findings (regenerate-merge.ts). Read before step 8 overwrites
@@ -224,8 +233,9 @@ export class AiScanService {
         provider: scan.aiProvider,
         model: scan.aiModel,
         promptVersion: scan.aiPromptVersion,
+        locale: scan.aiLocale,
       },
-      { provider, model, promptVersion: AI_PROMPT_VERSION },
+      { provider, model, promptVersion: AI_PROMPT_VERSION, locale },
     );
     if (!options.force) {
       const cached = await this.copyFromCache(scan, cacheKey, mergePrevious);
@@ -250,6 +260,7 @@ export class AiScanService {
         aiProvider: provider,
         aiModel: model,
         aiPromptVersion: AI_PROMPT_VERSION,
+        aiLocale: locale,
       },
     });
     if (claimed.count === 0) {
@@ -407,13 +418,18 @@ export class AiScanService {
   }
 
   // A rescan with no new commits: copy the base scan's summary. The
-  // findings are already here (carried forward by the static step).
-  private async copySummaryFromBase(scan: {
-    id: string;
-    organizationId: string;
-    pullId: string;
-    baseScanId: string | null;
-  }): Promise<AiScanStatus> {
+  // findings are already here (carried forward by the static step). Null
+  // when the base summary is in another language than the organization's
+  // now: the caller then asks the model again.
+  private async copySummaryFromBase(
+    scan: {
+      id: string;
+      organizationId: string;
+      pullId: string;
+      baseScanId: string | null;
+    },
+    locale: string,
+  ): Promise<AiScanStatus | null> {
     const base = await this.prisma.scan.findUnique({
       where: { id: scan.baseScanId! },
       select: {
@@ -421,9 +437,13 @@ export class AiScanService {
         aiProvider: true,
         aiModel: true,
         aiPromptVersion: true,
+        aiLocale: true,
         aiSummary: true,
       },
     });
+    if (base?.aiSummary && base.aiLocale !== null && base.aiLocale !== locale) {
+      return null;
+    }
     // No review to copy (the base was skipped as too large or over budget):
     // report the same reason rather than an empty CACHED.
     if (!base?.aiSummary) {
@@ -442,6 +462,7 @@ export class AiScanService {
           aiProvider: base?.aiProvider ?? null,
           aiModel: base?.aiModel ?? null,
           aiPromptVersion: base?.aiPromptVersion ?? null,
+          aiLocale: base?.aiLocale ?? null,
           aiTokensIn: null,
           aiTokensOut: null,
         },
@@ -566,6 +587,7 @@ export class AiScanService {
           provider: source.aiProvider ?? '',
           model: source.aiModel ?? '',
           promptVersion: source.aiPromptVersion ?? AI_PROMPT_VERSION,
+          locale: source.aiLocale,
           tokensIn: null,
           tokensOut: null,
           mergeWithPrevious: mergePrevious,

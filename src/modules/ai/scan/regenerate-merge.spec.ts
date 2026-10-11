@@ -256,10 +256,15 @@ describe('mergeWithPreviousRun', () => {
 });
 
 describe('isComparableRun', () => {
-  const run = (model: string | null, promptVersion = 'ai-2026.10.1') => ({
+  const run = (
+    model: string | null,
+    promptVersion = 'ai-2026.10.1',
+    locale: string | null = 'id',
+  ) => ({
     provider: 'openai',
     model,
     promptVersion,
+    locale,
   });
 
   it.each([
@@ -284,6 +289,16 @@ describe('isComparableRun', () => {
         run('gpt-4o'),
       ),
     ).toBe(false);
+  });
+
+  it('needs the same language', () => {
+    const current = run('gpt-4o');
+    expect(isComparableRun(run('gpt-4o', undefined, 'en'), current)).toBe(
+      false,
+    );
+    expect(isComparableRun(run('gpt-4o', undefined, null), current)).toBe(
+      false,
+    );
   });
 
   it('never matches a scan with no earlier run', () => {
