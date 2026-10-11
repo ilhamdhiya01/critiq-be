@@ -5,7 +5,7 @@ import { JsonSchema } from '../ai-provider.interface';
 // part of the AI cache key and stored on every scan, so a result is always
 // attributable to the exact prompt that produced it. ai-prompt.spec.ts pins
 // a hash of both — changing either without bumping this fails the suite.
-export const AI_PROMPT_VERSION = 'ai-2026.10.1';
+export const AI_PROMPT_VERSION = 'ai-2026.10.2';
 
 export const REPORT_REVIEW_TOOL = 'report_review';
 
@@ -86,6 +86,8 @@ export interface ReportReviewInput {
 // is constant, and the fingerprint below covers both mode texts too.
 const SYSTEM_PROMPT_TEMPLATE = `You are a senior code reviewer working for Critiq. You review the diff of one pull request.
 
+Language: write "summary", every "title" and every "message" in {{LANGUAGE}}. This applies even though these instructions, the diff, the file names and the PR title are in English. Do not switch language anywhere in your answer. Code identifiers, file paths and technical terms stay as they are.
+
 Rules:
 - Report only problems that are certain from the code shown. Do not speculate about code you cannot see.
 - Do not comment on style, formatting, naming or personal preference.
@@ -98,11 +100,11 @@ Rules:
 - Missing user feedback (no toast, no message, silent return), UX polish, or "the user may be confused" is never higher than "minor". A guard clause that returns early on invalid input is correct code, not a finding.
 - One root cause = one finding. If the same problem appears on several lines of the same file, report it once with line_start..line_end covering the range. Never report the same problem twice with different wording.
 - Do not report a finding that contradicts another finding you make (e.g. "validation is missing" when you also describe that validation).
-- Titles are assertions, not guesses: never start a title with "Potential", "Possible", "May", or "Might". If you are not certain, omit the finding or set confidence below 0.5.
+- Titles are assertions, not guesses: never start a title with "Potential", "Possible", "May", or "Might", or the equivalent hedge in {{LANGUAGE}}. If you are not certain, omit the finding or set confidence below 0.5.
 - confidence: your probability, from 0 to 1, that the finding is a real problem.
 - confidence below 0.5 means you would not raise this in a human code review; prefer omitting it.
 - risk_level reflects the worst finding you report: "high" only if there is at least one critical; "medium" if there is at least one major; otherwise "low". A PR with only minor findings is "low".
-- Write "summary" and every "message" in {{LANGUAGE}}. Write every "title" in short English (at most 80 characters). Each "message" is at most 600 characters.
+- Each "title" is short (at most 80 characters). Each "message" is at most 600 characters.
 - "summary" is light markdown of at most 1500 characters (about 200 words) — stay well under it. {{MODE}} Mention omitted files only when the input lists them under "OMITTED FOR SIZE" or "NOT SENT"; never claim a file was omitted otherwise.
 - Reply only by calling the ${REPORT_REVIEW_TOOL} tool.
 
@@ -123,16 +125,19 @@ const MODE_TEXT: Record<ReviewMode, string> = {
     'This diff is only what the latest push changed. Summarize what this push changes relative to the previous review: what was resolved, what remains, what is new. Do not restate the original PR summary.',
 };
 
+export function languageName(locale: string): string {
+  const base = locale.split('-')[0];
+  return LANGUAGE_NAMES[base] ?? `the language with code "${locale}"`;
+}
+
 export function buildSystemPrompt(
   locale: string,
   mode: ReviewMode = 'full',
 ): string {
-  const base = locale.split('-')[0];
-  const language = LANGUAGE_NAMES[base] ?? `the language with code "${locale}"`;
-  return SYSTEM_PROMPT_TEMPLATE.replace('{{LANGUAGE}}', language).replace(
-    '{{MODE}}',
-    MODE_TEXT[mode],
-  );
+  return SYSTEM_PROMPT_TEMPLATE.replaceAll(
+    '{{LANGUAGE}}',
+    languageName(locale),
+  ).replace('{{MODE}}', MODE_TEXT[mode]);
 }
 
 // Appended to the system prompt on the one retry after an invalid answer.

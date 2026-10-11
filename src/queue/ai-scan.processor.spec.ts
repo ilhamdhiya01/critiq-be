@@ -801,52 +801,60 @@ describe('AiScanProcessor', () => {
 
     // A rescan / forced regenerate makes a new scan whose base is the same
     // commit: the lifecycle would mark what the model dropped RESOLVED.
-    it('carries a base finding of the same commit instead of resolving it', async () => {
-      const { processor, provider, prisma, tx } = setup();
-      const scanFields = (await prisma.scan.findUniqueOrThrow()) as Record<
-        string,
-        unknown
-      >;
-      prisma.scan.findUniqueOrThrow.mockResolvedValue({
-        ...scanFields,
-        baseScanId: 'scan_1',
-      });
-      prisma.scan.findUnique.mockImplementation(
-        (args: { where: { id: string } }) =>
-          Promise.resolve(
-            args.where.id === 'scan_1'
-              ? {
-                  headSha: 'abc123',
-                  aiProvider: 'anthropic',
-                  aiModel: 'claude-sonnet-5',
-                  aiPromptVersion: AI_PROMPT_VERSION,
-                }
-              : { headSha: 'abc123', criticalCount: 0 },
-          ),
-      );
-      const original = prisma.finding.findMany.getMockImplementation()!;
-      prisma.finding.findMany.mockImplementation(
-        (args: { where?: Record<string, unknown>; distinct?: unknown }) =>
-          args.where?.scanId === 'scan_1' &&
-          args.where?.source === FindingSource.AI
-            ? Promise.resolve([leakedTimer])
-            : original(args),
-      );
-      provider.complete.mockResolvedValue(
-        result({ summary: 'Fine.', risk_level: 'low', findings: [] }),
-      );
+    // A base in another language is not carried: the review would mix
+    // two languages, so the lifecycle resolves it as usual.
+    it.each([
+      ['carries', 'en', 'PERSISTED'],
+      ['resolves (other language)', 'id', 'RESOLVED'],
+    ])(
+      '%s a base finding of the same commit',
+      async (_label, baseLocale, status) => {
+        const { processor, provider, prisma, tx } = setup();
+        const scanFields = (await prisma.scan.findUniqueOrThrow()) as Record<
+          string,
+          unknown
+        >;
+        prisma.scan.findUniqueOrThrow.mockResolvedValue({
+          ...scanFields,
+          baseScanId: 'scan_1',
+        });
+        prisma.scan.findUnique.mockImplementation(
+          (args: { where: { id: string } }) =>
+            Promise.resolve(
+              args.where.id === 'scan_1'
+                ? {
+                    headSha: 'abc123',
+                    aiProvider: 'anthropic',
+                    aiModel: 'claude-sonnet-5',
+                    aiPromptVersion: AI_PROMPT_VERSION,
+                    aiLocale: baseLocale,
+                  }
+                : { headSha: 'abc123', criticalCount: 0 },
+            ),
+        );
+        const original = prisma.finding.findMany.getMockImplementation()!;
+        prisma.finding.findMany.mockImplementation(
+          (args: { where?: Record<string, unknown>; distinct?: unknown }) =>
+            args.where?.scanId === 'scan_1' &&
+            args.where?.source === FindingSource.AI
+              ? Promise.resolve([leakedTimer])
+              : original(args),
+        );
+        provider.complete.mockResolvedValue(
+          result({ summary: 'Fine.', risk_level: 'low', findings: [] }),
+        );
 
-      await processor.process(job);
+        await processor.process(job);
 
-      expect(createdFindings(tx)).toEqual([
-        expect.objectContaining({
-          title: 'Timer never cleared',
-          notReproduced: true,
-          status: 'PERSISTED',
-          originFindingId: 'old_2',
-        }),
-      ]);
-    });
+        expect(createdFindings(tx)).toEqual([
+          expect.objectContaining({
+            title: 'Timer never cleared',
+            status,
+            originFindingId: 'old_2',
+          }),
+        ]);
+      },
+    );
   });
 
   it('settles as not_configured when settings changed after queueing', async () => {

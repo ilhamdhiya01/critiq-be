@@ -18,6 +18,8 @@ const FINGERPRINT_BY_VERSION: Record<string, string> = {
     '05b7cfb140b5af975a4ca502f5112ea2ce7f38349df2ee34c95091a13fbad069',
   'ai-2026.10.1':
     'fa3aff2fef9d58880d8f38e2116c4e3bbb3d568f903f921ad63535ebc65cc1db',
+  'ai-2026.10.2':
+    '33ee9ae58f4545deb7b62d4f6eae722bac5110f4c5417b3d007c75898a3059dc',
 };
 
 describe('AI prompt', () => {
@@ -25,12 +27,16 @@ describe('AI prompt', () => {
     expect(promptFingerprint()).toBe(FINGERPRINT_BY_VERSION[AI_PROMPT_VERSION]);
   });
 
-  // Acceptance 15: message/summary in the org locale, titles in English.
-  it('asks for the org language and English titles', () => {
+  // Acceptance 15 (revised): summary, titles and messages all follow the
+  // org locale — titles used to be English-only.
+  it('asks for the org language in summary, titles and messages', () => {
     const prompt = buildSystemPrompt('id');
-    expect(prompt).toContain('Indonesian (Bahasa Indonesia)');
-    expect(prompt).toContain('every "title" in short English');
-    expect(buildSystemPrompt('en')).toContain('in English');
+    expect(prompt).toContain(
+      'write "summary", every "title" and every "message" in Indonesian (Bahasa Indonesia)',
+    );
+    expect(prompt).not.toContain('short English');
+    expect(prompt).not.toContain('{{LANGUAGE}}');
+    expect(buildSystemPrompt('en')).toContain('"message" in English');
   });
 
   // The model used to report "files omitted" on PRs where nothing was.

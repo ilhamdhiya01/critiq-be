@@ -126,6 +126,10 @@ describe('validateAiFindings', () => {
     ['May leak the refresh token', 'critical', 0.6, 'MINOR'],
     ['possible null dereference', 'major', 0.8, 'MINOR'],
     ['Maybe-typed response is never checked', 'major', 0.8, 'MAJOR'],
+    // Titles follow the org language, so Indonesian hedges count too.
+    ['Kemungkinan race pada cache sesi', 'critical', 0.9, 'MAJOR'],
+    ['Berpotensi membocorkan refresh token', 'major', 0.8, 'MINOR'],
+    ['Potongan string tidak divalidasi', 'major', 0.8, 'MAJOR'],
   ] as const)('"%s" (%s, %f) → %s', (title, severity, confidence, expected) => {
     const { accepted } = validateAiFindings(
       [finding({ title, severity, confidence })],
