@@ -348,6 +348,7 @@ export class AiScanProcessor
     const { kept, merged, duplicates } = dedupeAiFindings(
       validation.accepted,
       staticFindings,
+      prompt.sentFiles,
     );
 
     // Lifecycle: matched to the base AI findings (FULL), minus what the

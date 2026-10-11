@@ -297,3 +297,26 @@ export function isInsideRegexLiteral(
     ([start, end]) => matchStart >= start && matchEnd <= end,
   );
 }
+
+// Whether a line is mostly one or more regex literals — the question to ask
+// about a finding that carries no column.
+//
+// `isInsideRegexLiteral` needs an exact span: it answers "is this match
+// inside a regex". An AI finding only points at a line, so the honest
+// question is "is this line a regex". Requiring the literals to cover most
+// of the line keeps `const re = /x/` (a definition) apart from a real
+// statement that merely contains a small regex, e.g.
+// `const token = cfg.secret.replace(/\s/g, '')`.
+const REGEX_LINE_COVERAGE = 0.6;
+
+export function isRegexLiteralLine(line: string, language: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  const covered = findRegexLiteralSpans(line, language).reduce(
+    (sum, [start, end]) => sum + (end - start),
+    0,
+  );
+  return covered / trimmed.length >= REGEX_LINE_COVERAGE;
+}
