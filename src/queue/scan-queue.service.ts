@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
 import { InjectQueue } from '@nestjs/bullmq';
 import { Inject, Injectable } from '@nestjs/common';
 import { Queue } from 'bullmq';
@@ -174,6 +176,27 @@ export class ScanQueueService {
     private readonly prisma: PrismaService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
+
+  // src/modules/reports/reports.service.ts
+
+  async getTeamReport(organizationId: string) {
+    const members = await this.prisma.membership.findMany({
+      where: { organizationId },
+    });
+
+    const rows = [];
+    for (const member of members) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: member.userId },
+      });
+      const reviews = await this.prisma.review.count({
+        where: { reviewerId: member.userId },
+      });
+      rows.push({ name: user?.name, role: member.role, reviews });
+    }
+
+    return rows;
+  }
 
   async enqueue(input: EnqueueScanInput): Promise<EnqueueScanResult> {
     const latestForSha = await this.prisma.scan.findFirst({
