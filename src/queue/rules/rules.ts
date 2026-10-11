@@ -16,6 +16,8 @@ import { codeSqlStringConcatRule } from './definitions/code.sql-string-concat.ru
 import { codeShellInjectionRule } from './definitions/code.shell-injection.rule';
 import { codeInsecureTlsRule } from './definitions/code.insecure-tls.rule';
 import { codeDebuggerLeftRule } from './definitions/code.debugger-left.rule';
+import { codeEmptyCatchRule } from './definitions/code.empty-catch.rule';
+import { secretEnvFallbackRule } from './definitions/secret.env-fallback.rule';
 import { configDockerfileRootSecretRule } from './definitions/config.dockerfile-root-secret.rule';
 import { configCorsWildcardCredentialsRule } from './definitions/config.cors-wildcard-credentials.rule';
 
@@ -33,6 +35,7 @@ export const RULES: Rule[] = [
   secretSlackWebhookRule,
   secretJwtLiteralRule,
   secretDbUrlWithPasswordRule,
+  secretEnvFallbackRule,
   // Fixed-prefix provider credentials, built from one factory — see
   // provider-token.rules.ts for why they are not fourteen separate files.
   ...providerTokenRules,
@@ -44,6 +47,7 @@ export const RULES: Rule[] = [
   codeShellInjectionRule,
   codeInsecureTlsRule,
   codeDebuggerLeftRule,
+  codeEmptyCatchRule,
   configDockerfileRootSecretRule,
   configCorsWildcardCredentialsRule,
 ];

@@ -1,4 +1,5 @@
 import safeRegex from 'safe-regex2';
+import { tierForRule } from './rule-tiers';
 import { FILE_RULE_IDS, RULES } from './rules';
 
 describe('RULES', () => {
@@ -22,6 +23,7 @@ describe('RULES', () => {
     expect(RULES.map((rule) => rule.id).sort()).toEqual(
       [
         'code.debugger_left',
+        'code.empty_catch',
         'code.eval_dynamic',
         'code.insecure_tls',
         'code.shell_injection',
@@ -34,6 +36,7 @@ describe('RULES', () => {
         'secret.azure_storage_key',
         'secret.db_url_with_password',
         'secret.discord_webhook',
+        'secret.env_fallback',
         'secret.github_fine_grained',
         'secret.github_token',
         'secret.gitlab_runner_token',
@@ -59,6 +62,17 @@ describe('RULES', () => {
   it('registers exactly the expected whole-file checks', () => {
     expect(FILE_RULE_IDS).toEqual(['code.syntax_error']);
     expect(RULES.map((rule) => rule.id)).not.toContain('code.syntax_error');
+  });
+
+  // Every check must be switchable from the quality profile; a rule with no
+  // tier would run no matter what the organization turned off.
+  it('puts every rule and whole-file check in a Critical tier', () => {
+    for (const id of [...RULES.map((rule) => rule.id), ...FILE_RULE_IDS]) {
+      expect({ id, hasTier: tierForRule(id) !== null }).toEqual({
+        id,
+        hasTier: true,
+      });
+    }
   });
 
   // Acceptance 26. MAX_LINE_LENGTH caps the input a regex ever sees, but a

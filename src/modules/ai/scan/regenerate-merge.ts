@@ -3,12 +3,14 @@ import {
   FindingSeverity,
   FindingSource,
   FindingStatus,
+  RuleTier,
 } from '../../../generated/prisma/enums';
 import {
   FindingRow,
   StoredFinding,
 } from '../../../queue/lifecycle/plan-findings';
 import { isSameFinding } from '../../../queue/lifecycle/status-matcher';
+import { sameTiers } from '../../../queue/rules/rule-tiers';
 
 // A model is not deterministic: regenerating the same commit can rate a
 // finding critical once and major the next time, or not report it at all.
@@ -46,6 +48,9 @@ export interface RunIdentity {
   // Findings written in another language are not merged in: the review
   // would show two languages side by side.
   locale: string | null;
+  // A run under another quality profile looked for other things: a finding
+  // missing from it is not "not reproduced".
+  ruleTiers: readonly RuleTier[];
 }
 
 // A provider answers with the model it actually ran — OpenAI a dated
@@ -66,6 +71,7 @@ export function isComparableRun(
     earlier.promptVersion === current.promptVersion &&
     earlier.locale !== null &&
     earlier.locale === current.locale &&
+    sameTiers(earlier.ruleTiers, current.ruleTiers) &&
     earlier.model !== null &&
     current.model !== null &&
     modelFamily(earlier.model) === modelFamily(current.model)

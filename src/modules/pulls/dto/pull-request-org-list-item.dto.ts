@@ -4,6 +4,7 @@ import {
   ReviewPolicy,
 } from '../../../generated/prisma/enums';
 import { ActiveScanDto, LatestScanDto } from '../../scans/dto/scan.dto';
+import { QualityGateDto } from '../quality-gate';
 
 // Same shape as PullRequestListItemDto plus repository identifiers — used
 // only by the org-wide list (GET orgs/:orgId/pulls), where results span
@@ -26,6 +27,7 @@ export class PullRequestOrgListItemDto {
   // both null for a PR that was never scanned.
   latestScan!: LatestScanDto | null;
   activeScan!: ActiveScanDto | null;
+  qualityGate!: QualityGateDto;
   createdAt!: Date;
   updatedAt!: Date;
 
@@ -44,6 +46,7 @@ export class PullRequestOrgListItemDto {
     effectivePolicy: ReviewPolicy;
     latestScan: LatestScanDto | null;
     activeScan: ActiveScanDto | null;
+    qualityGate: QualityGateDto;
     createdAt: Date;
     updatedAt: Date;
   }) {

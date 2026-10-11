@@ -212,6 +212,111 @@ export function isGithubPingEvent(value: unknown): boolean {
   return isRecord(value) && typeof value.zen === 'string';
 }
 
+// --- CI results (Failing CI tier) -------------------------------------
+
+// GitHub `check_run` (Checks: read delivers created + completed). GitHub
+// Actions reports each job as one.
+export interface GithubCheckRunPayload {
+  action: string;
+  repository: { id: number };
+  check_run: {
+    name: string;
+    head_sha: string;
+    status: string; // queued | in_progress | completed | waiting | requested | pending
+    conclusion: string | null; // success | failure | neutral | cancelled | skipped | timed_out | action_required | stale | startup_failure
+    html_url?: string | null;
+    app?: { slug?: string } | null;
+  };
+}
+
+export function isGithubCheckRunPayload(
+  value: unknown,
+): value is GithubCheckRunPayload {
+  if (
+    !isRecord(value) ||
+    typeof value.action !== 'string' ||
+    !isRecord(value.repository) ||
+    typeof value.repository.id !== 'number'
+  ) {
+    return false;
+  }
+  const run = value.check_run;
+  return (
+    isRecord(run) &&
+    typeof run.name === 'string' &&
+    typeof run.head_sha === 'string' &&
+    typeof run.status === 'string' &&
+    (run.conclusion === null ||
+      run.conclusion === undefined ||
+      typeof run.conclusion === 'string')
+  );
+}
+
+// GitHub `status` (commit statuses API) — CI systems that predate checks.
+export interface GithubStatusPayload {
+  sha: string;
+  state: string; // pending | success | failure | error
+  context: string;
+  target_url?: string | null;
+  repository: { id: number };
+}
+
+export function isGithubStatusPayload(
+  value: unknown,
+): value is GithubStatusPayload {
+  return (
+    isRecord(value) &&
+    typeof value.sha === 'string' &&
+    typeof value.state === 'string' &&
+    typeof value.context === 'string' &&
+    isRecord(value.repository) &&
+    typeof value.repository.id === 'number'
+  );
+}
+
+// Every GitLab webhook body: enough to find (and authenticate) the repo
+// before deciding what kind of event it is.
+export interface GitlabEventEnvelope {
+  object_kind: string;
+  project: { id: number };
+}
+
+export function isGitlabEventEnvelope(
+  value: unknown,
+): value is GitlabEventEnvelope {
+  return (
+    isRecord(value) &&
+    typeof value.object_kind === 'string' &&
+    isRecord(value.project) &&
+    typeof value.project.id === 'number'
+  );
+}
+
+// GitLab Pipeline Hook.
+export interface GitlabPipelinePayload extends GitlabEventEnvelope {
+  object_attributes: {
+    id: number;
+    sha: string;
+    status: string; // created | waiting_for_resource | preparing | pending | running | success | failed | canceled | skipped | manual | scheduled
+    url?: string | null;
+  };
+}
+
+export function isGitlabPipelinePayload(
+  value: unknown,
+): value is GitlabPipelinePayload {
+  if (!isGitlabEventEnvelope(value) || value.object_kind !== 'pipeline') {
+    return false;
+  }
+  const attrs = (value as { object_attributes?: unknown }).object_attributes;
+  return (
+    isRecord(attrs) &&
+    typeof attrs.id === 'number' &&
+    typeof attrs.sha === 'string' &&
+    typeof attrs.status === 'string'
+  );
+}
+
 // JSON.parse throws on malformed bytes; callers get `null` instead so a junk
 // body is logged and dropped like any other rejected payload rather than
 // unwinding to the controller's catch-all.
