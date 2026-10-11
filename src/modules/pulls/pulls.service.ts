@@ -9,6 +9,7 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import {
+  CiState,
   FindingSeverity,
   FindingSource,
   FindingStatus,
@@ -53,12 +54,14 @@ import {
   toApiLifecycleFields,
 } from '../scans/dto/lifecycle-fields';
 import { ScansService } from '../scans/scans.service';
+import { aggregateCi, CiAggregate, qualityGate } from './quality-gate';
 
 // What PR lists show of the latest scan — selected, not included, so a list
 // never drags each scan's full row along.
 const LATEST_SCAN_LIST_SELECT = {
   id: true,
   status: true,
+  headSha: true,
   criticalCount: true,
   suppressedCount: true,
   finishedAt: true,
@@ -67,6 +70,9 @@ const LATEST_SCAN_LIST_SELECT = {
 } as const;
 
 const HEAD_FILE_FETCH_CONCURRENCY = 5;
+
+const ciKey = (pull: { repositoryId: string; headSha: string | null }) =>
+  `${pull.repositoryId}:${pull.headSha ?? ''}`;
 // Larger files are skipped for AI context: generated or vendored content,
 // and too big to be worth the tokens around a small hunk.
 const MAX_HEAD_FILE_CHARS = 512 * 1024;
@@ -170,9 +176,10 @@ export class PullsService {
       include: { latestScan: { select: LATEST_SCAN_LIST_SELECT } },
       orderBy: { updatedAt: 'desc' },
     });
-    const activeScans = await this.scansService.findActiveScans(
-      pulls.map((pull) => pull.id),
-    );
+    const [activeScans, ci] = await Promise.all([
+      this.scansService.findActiveScans(pulls.map((pull) => pull.id)),
+      this.ciByHead(organizationId, pulls),
+    ]);
     return pulls.map(
       (pull) =>
         new PullRequestListItemDto({
@@ -187,6 +194,12 @@ export class PullsService {
           effectivePolicy: pull.effectivePolicy,
           latestScan: this.toLatestScanDto(pull.latestScan),
           activeScan: activeScans.get(pull.id) ?? null,
+          qualityGate: qualityGate({
+            pullHeadSha: pull.headSha,
+            scan: pull.latestScan,
+            scanInFlight: activeScans.has(pull.id),
+            ci: ci.get(ciKey(pull)) ?? 'NONE',
+          }),
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -216,9 +229,10 @@ export class PullsService {
       },
       orderBy: { updatedAt: 'desc' },
     });
-    const activeScans = await this.scansService.findActiveScans(
-      pulls.map((pull) => pull.id),
-    );
+    const [activeScans, ci] = await Promise.all([
+      this.scansService.findActiveScans(pulls.map((pull) => pull.id)),
+      this.ciByHead(organizationId, pulls),
+    ]);
     return pulls.map(
       (pull) =>
         new PullRequestOrgListItemDto({
@@ -240,6 +254,12 @@ export class PullsService {
           effectivePolicy: pull.effectivePolicy,
           latestScan: this.toLatestScanDto(pull.latestScan),
           activeScan: activeScans.get(pull.id) ?? null,
+          qualityGate: qualityGate({
+            pullHeadSha: pull.headSha,
+            scan: pull.latestScan,
+            scanInFlight: activeScans.has(pull.id),
+            ci: ci.get(ciKey(pull)) ?? 'NONE',
+          }),
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -293,6 +313,10 @@ export class PullsService {
     ) {
       throw new NotFoundException('Pull request not found.');
     }
+    const [activeScans, ci] = await Promise.all([
+      this.scansService.findActiveScans([pull.id]),
+      this.ciByHead(organizationId, [pull]),
+    ]);
 
     return new PullRequestDetailDto({
       id: pull.id,
@@ -307,6 +331,12 @@ export class PullsService {
       headSha: pull.headSha,
       state: pull.state,
       effectivePolicy: pull.effectivePolicy,
+      qualityGate: qualityGate({
+        pullHeadSha: pull.headSha,
+        scan: pull.latestScan,
+        scanInFlight: activeScans.has(pull.id),
+        ci: ci.get(ciKey(pull)) ?? 'NONE',
+      }),
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
             ...toApiAiScanFields(pull.latestScan),
@@ -682,6 +712,38 @@ export class PullsService {
       annotationsScanId: latestScan.id,
       annotationsHeadSha: latestScan.headSha,
     };
+  }
+
+  // Aggregated CI state of each PR's head commit, in one query.
+  private async ciByHead(
+    organizationId: string,
+    pulls: { repositoryId: string; headSha: string | null }[],
+  ): Promise<Map<string, CiAggregate>> {
+    const heads = pulls.filter(
+      (pull): pull is { repositoryId: string; headSha: string } =>
+        pull.headSha !== null,
+    );
+    if (heads.length === 0) {
+      return new Map();
+    }
+    const checks = await this.prisma.ciCheck.findMany({
+      where: {
+        organizationId,
+        OR: heads.map((pull) => ({
+          repositoryId: pull.repositoryId,
+          headSha: pull.headSha,
+        })),
+      },
+      select: { repositoryId: true, headSha: true, state: true },
+    });
+    const states = new Map<string, CiState[]>();
+    for (const check of checks) {
+      const key = ciKey(check);
+      states.set(key, [...(states.get(key) ?? []), check.state]);
+    }
+    return new Map(
+      [...states].map(([key, list]) => [key, aggregateCi(list)] as const),
+    );
   }
 
   private toLatestScanDto(

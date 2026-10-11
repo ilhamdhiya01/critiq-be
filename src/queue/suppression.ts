@@ -19,12 +19,15 @@ export interface SuppressionInput {
 }
 
 // code.* rules that ARE suppressed in test files: disabling TLS against a
-// mock server and a leftover `debugger;` are routine and harmless in tests.
+// mock server, a leftover `debugger;` and an ignored error are routine and
+// harmless in tests.
 // eval / SQL concat / shell injection are not on this list — that code runs
 // in CI, and dynamic input there can still hurt.
 const TEST_SUPPRESSED_CODE_RULES = new Set([
   'code.insecure_tls',
   'code.debugger_left',
+  // A test asserting that a failure is tolerated swallows it on purpose.
+  'code.empty_catch',
 ]);
 
 // code.* rules checked for regex literals. The others (eval, SQL, shell) are

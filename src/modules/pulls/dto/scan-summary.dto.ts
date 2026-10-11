@@ -40,6 +40,9 @@ export class ScanSummaryDto {
   persistedCount!: number;
   reopenedCount!: number;
   resolvedCount!: number;
+  // Quality profile snapshot, and the enabled tiers no review looked at.
+  ruleTiers!: ApiAiScanFields['ruleTiers'];
+  uncheckedTiers!: ApiAiScanFields['uncheckedTiers'];
   filesChanged!: number | null;
   diffBytes!: number | null;
   rulesetVersion!: string;

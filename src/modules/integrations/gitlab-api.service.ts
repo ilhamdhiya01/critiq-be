@@ -366,6 +366,8 @@ export class GitlabApiService {
             url: opts.url,
             token: opts.secretToken,
             merge_requests_events: true,
+            // CI results for the Failing CI tier of the quality profile.
+            pipeline_events: true,
             push_events: false,
             enable_ssl_verification: true,
           },
@@ -373,6 +375,34 @@ export class GitlabApiService {
         ),
       );
       return response.data;
+    } catch (error) {
+      throw this.mapGitlabRequestError(error);
+    }
+  }
+
+  // Brings a hook created before pipeline events existed up to date, keeping
+  // its secret token (omitted fields are left as they are). GitLab requires
+  // `url` on every edit.
+  async enablePipelineEvents(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    hookId: number,
+    url: string,
+  ): Promise<void> {
+    try {
+      await firstValueFrom(
+        this.http.put(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/hooks/${hookId}`,
+          {
+            url,
+            merge_requests_events: true,
+            pipeline_events: true,
+            push_events: false,
+          },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
     } catch (error) {
       throw this.mapGitlabRequestError(error);
     }

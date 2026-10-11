@@ -23,9 +23,13 @@ export function categoryForRule(ruleId: string): FindingCategory {
   if (ruleId.startsWith('config.')) {
     return FindingCategory.CONFIG;
   }
-  // What an AI review files a broken brace under — so the two dedupe.
-  if (ruleId === SYNTAX_RULE_ID) {
-    return FindingCategory.LOGIC;
+  // What an AI review files a broken brace or a left-in breakpoint under —
+  // so the two dedupe. Backfilled by `backfill_crash_category`.
+  if (ruleId === SYNTAX_RULE_ID || ruleId === 'code.debugger_left') {
+    return FindingCategory.CRASH;
+  }
+  if (ruleId === 'code.empty_catch') {
+    return FindingCategory.ERROR_HANDLING;
   }
   return FindingCategory.OTHER;
 }

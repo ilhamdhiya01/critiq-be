@@ -10,7 +10,8 @@ describe('categoryForRule', () => {
     ['code.shell_injection', FindingCategory.INJECTION],
     ['code.eval_dynamic', FindingCategory.INJECTION],
     ['code.insecure_tls', FindingCategory.INSECURE_TLS],
-    ['code.debugger_left', FindingCategory.OTHER],
+    ['code.debugger_left', FindingCategory.CRASH],
+    ['code.syntax_error', FindingCategory.CRASH],
     ['config.cors_wildcard_credentials', FindingCategory.CONFIG],
   ])('%s → %s', (ruleId, category) => {
     expect(categoryForRule(ruleId)).toBe(category);

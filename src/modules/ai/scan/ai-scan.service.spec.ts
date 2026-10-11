@@ -14,6 +14,7 @@ import {
   ScanStatus,
 } from '../../../generated/prisma/enums';
 import { AiJobPayload } from '../../../queue/ai-queue.constants';
+import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import { AI_PROMPT_VERSION } from './ai-prompt.constants';
 import { aiCacheKey, AiScanService } from './ai-scan.service';
 
@@ -46,6 +47,7 @@ function scanRow(overrides: Record<string, unknown> = {}) {
     diffMode: 'FULL',
     baseScanId: null,
     prevHeadSha: null,
+    ruleTiers: ALL_RULE_TIERS,
     pullRequest: { effectivePolicy: ReviewPolicy.ALLOW_AI },
     organization: {
       aiProvider: AiProviderId.ANTHROPIC,
@@ -486,6 +488,7 @@ describe('aiCacheKey', () => {
       provider: 'anthropic' as const,
       model: 'claude-sonnet-5',
       locale: 'en',
+      ruleTiers: ALL_RULE_TIERS,
     };
     expect(
       aiCacheKey({ ...parts, diffMode: 'FULL', prevHeadSha: null }),
@@ -504,9 +507,31 @@ describe('aiCacheKey', () => {
       model: 'claude-sonnet-5',
       diffMode: 'FULL',
       prevHeadSha: null,
+      ruleTiers: ALL_RULE_TIERS,
     };
     expect(aiCacheKey({ ...parts, locale: 'en' })).not.toBe(
       aiCacheKey({ ...parts, locale: 'id' }),
     );
+  });
+
+  it('differs between quality profiles, not between tier orders', () => {
+    const parts = {
+      repositoryId: 'repo_1',
+      headSha: 'abc123',
+      rulesetVersion: '2026.09.5',
+      promptVersion: 'ai-2026.10.3',
+      provider: 'anthropic' as const,
+      model: 'claude-sonnet-5',
+      diffMode: 'FULL',
+      prevHeadSha: null,
+      locale: 'en',
+    };
+    const all = aiCacheKey({ ...parts, ruleTiers: ALL_RULE_TIERS });
+    expect(
+      aiCacheKey({ ...parts, ruleTiers: [...ALL_RULE_TIERS].reverse() }),
+    ).toBe(all);
+    expect(
+      aiCacheKey({ ...parts, ruleTiers: ALL_RULE_TIERS.slice(1) }),
+    ).not.toBe(all);
   });
 });

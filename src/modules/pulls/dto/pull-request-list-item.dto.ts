@@ -4,6 +4,7 @@ import {
   ReviewPolicy,
 } from '../../../generated/prisma/enums';
 import { ActiveScanDto, LatestScanDto } from '../../scans/dto/scan.dto';
+import { QualityGateDto } from '../quality-gate';
 
 export class PullRequestListItemDto {
   id!: string;
@@ -19,6 +20,7 @@ export class PullRequestListItemDto {
   // both null for a PR that was never scanned.
   latestScan!: LatestScanDto | null;
   activeScan!: ActiveScanDto | null;
+  qualityGate!: QualityGateDto;
   createdAt!: Date;
   updatedAt!: Date;
 
@@ -34,6 +36,7 @@ export class PullRequestListItemDto {
     effectivePolicy: ReviewPolicy;
     latestScan: LatestScanDto | null;
     activeScan: ActiveScanDto | null;
+    qualityGate: QualityGateDto;
     createdAt: Date;
     updatedAt: Date;
   }) {

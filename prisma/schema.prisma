@@ -50,6 +50,7 @@ model Organization {
   aiCredentials      AiCredential[]
   aiUsageDaily       AiUsageDaily[]
   aiSummaries        AiSummary[]
+  ciChecks           CiCheck[]
 
   // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
   // live per provider in ai_credentials so switching back and forth never
@@ -64,10 +65,30 @@ model Organization {
   // Result of the last "Test connection" — shown back in GET settings/ai.
   aiLastTest         Json?
 
+  // Quality profile: the Critical tiers this organization turned off. The
+  // disabled ones are stored rather than the enabled ones, so every
+  // organization starts with all tiers on, and a tier added later is on too.
+  disabledRuleTiers  RuleTier[] @default([])
+  ruleTiersUpdatedAt DateTime?
+  ruleTiersUpdatedBy String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("organizations")
+}
+
+// The Critical tiers of the quality profile (Rules & Profiles). Each tier
+// groups static rules, AI categories or the CI check — see
+// src/queue/rules/rule-tiers.ts for what belongs to which.
+enum RuleTier {
+  SECRETS
+  CRASH
+  BREAKING_CHANGE
+  ERROR_HANDLING
+  PERFORMANCE
+  SECURITY
+  CI
 }
 
 model Membership {
@@ -242,6 +263,7 @@ model Repository {
   branchPolicies BranchScanPolicy[]
   pullRequests   PullRequest[]
   scans          Scan[]
+  ciChecks       CiCheck[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -456,6 +478,11 @@ model Scan {
   // ruleset change doesn't leave old scans looking like they used rules
   // that didn't exist yet when they actually ran.
   rulesetVersion String
+
+  // The organization's enabled Critical tiers when the scan was created —
+  // what the static rules and the AI review were allowed to check. A scan
+  // keeps the profile it ran under even after the profile changes.
+  ruleTiers RuleTier[] @default([SECRETS, CRASH, BREAKING_CHANGE, ERROR_HANDLING, PERFORMANCE, SECURITY, CI])
 
   // True once findings for this scan hit the 500-per-scan cap (see
   // ScansModule) — the first 500 are still persisted, this just tells the
@@ -679,6 +706,8 @@ enum FindingCategory {
   DATA_LOSS
   CONFIG
   OTHER
+  CRASH
+  BREAKING_CHANGE
 }
 
 enum AiScanStatus {
@@ -730,6 +759,8 @@ enum FullReason {
   RULESET_CHANGED
   PROMPT_CHANGED
   MANUAL
+  // The organization's enabled Critical tiers changed since the base scan.
+  RULES_CHANGED
 }
 
 enum FindingStatus {
@@ -737,4 +768,41 @@ enum FindingStatus {
   PERSISTED
   REOPENED
   RESOLVED
+}
+
+// The CI result a code host reported for one commit (Failing CI tier of the
+// quality profile). One row per check: a GitHub check run or commit status
+// (by context), a GitLab pipeline. Keyed by repository + sha, not by PR, so
+// a status that arrives before the PR row exists is not lost.
+model CiCheck {
+  id             String   @id @default(cuid())
+  organizationId String
+  repositoryId   String
+  headSha        String
+  source         CiSource
+  // Check run name, status context or pipeline id — unique per source.
+  name           String
+  state          CiState
+  url            String?  @db.Text
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, headSha, source, name])
+  @@index([organizationId, repositoryId, headSha])
+  @@map("ci_checks")
+}
+
+enum CiSource {
+  GITHUB_CHECK_RUN
+  GITHUB_STATUS
+  GITLAB_PIPELINE
+}
+
+enum CiState {
+  PENDING
+  SUCCESS
+  FAILURE
 }

@@ -55,6 +55,9 @@ export class ScanDto {
   persistedCount!: number;
   reopenedCount!: number;
   resolvedCount!: number;
+  // Quality profile snapshot, and the enabled tiers no review looked at.
+  ruleTiers!: ApiAiScanFields['ruleTiers'];
+  uncheckedTiers!: ApiAiScanFields['uncheckedTiers'];
 
   constructor(partial: ScanDto) {
     Object.assign(this, partial);
