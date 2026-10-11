@@ -6,6 +6,7 @@ import {
   SuppressionReason,
 } from '../../../generated/prisma/enums';
 import { FindingRow } from '../../../queue/lifecycle/plan-findings';
+import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import {
   isComparableRun,
   mergeWithPreviousRun,
@@ -265,6 +266,7 @@ describe('isComparableRun', () => {
     model,
     promptVersion,
     locale,
+    ruleTiers: ALL_RULE_TIERS,
   });
 
   it.each([
@@ -299,6 +301,15 @@ describe('isComparableRun', () => {
     expect(isComparableRun(run('gpt-4o', undefined, null), current)).toBe(
       false,
     );
+  });
+
+  it('needs the same Critical tiers', () => {
+    expect(
+      isComparableRun(
+        { ...run('gpt-4o'), ruleTiers: ALL_RULE_TIERS.slice(1) },
+        run('gpt-4o'),
+      ),
+    ).toBe(false);
   });
 
   it('never matches a scan with no earlier run', () => {

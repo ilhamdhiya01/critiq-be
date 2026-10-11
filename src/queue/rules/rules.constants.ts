@@ -2,7 +2,7 @@
 // ScanQueueService compares a PR's last scan against this and re-scans when
 // they differ, so a bump makes every open PR's next webhook produce fresh
 // results instead of serving a verdict the old rules reached.
-export const RULESET_VERSION = '2026.10.1';
+export const RULESET_VERSION = '2026.10.2';
 
 // Paths matching any of these are skipped entirely before any rule runs:
 // generated/vendored/binary content a rule could never meaningfully flag.
@@ -121,3 +121,9 @@ export const MUST_SCAN_GLOBS = [
 // not meaningful diff content, and exactly the input shape that triggers
 // catastrophic regex backtracking. See rule-runner.ts.
 export const MAX_LINE_LENGTH = 2000;
+
+// Paths where a swallowed error is Critical (code.empty_catch): auth,
+// sessions and tokens, payments and billing, webhooks. Matched against the
+// whole repo path, case-insensitively.
+export const CRITICAL_PATH_PATTERN =
+  /(?:auth|login|session|token|oauth|password|credential|payment|billing|checkout|invoice|wallet|webhook)/i;
