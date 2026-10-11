@@ -5,7 +5,10 @@ import {
   isMustScanPath,
   isTestLikePath,
 } from './rules/path-filter';
-import { isInsideRegexLiteral } from './rules/regex-literal';
+import {
+  isInsideRegexLiteral,
+  isRegexLiteralLine,
+} from './rules/regex-literal';
 
 export interface SuppressionInput {
   ruleId: string;
@@ -78,18 +81,22 @@ export function classifySuppression(
   ) {
     return SuppressionReason.COMMENT;
   }
-  if (
-    isRegexAware(input.ruleId) &&
-    input.match &&
-    input.lineText !== undefined &&
-    isInsideRegexLiteral(
-      input.lineText,
-      input.match.start,
-      input.match.length,
-      input.language,
-    )
-  ) {
-    return SuppressionReason.REGEX_LITERAL;
+  if (isRegexAware(input.ruleId) && input.lineText !== undefined) {
+    // With a column, ask whether the match itself sits inside a regex. An
+    // AI finding has no column (it points at a line), so instead ask
+    // whether the line *is* a regex literal — which is what a rule
+    // definition's own detection pattern looks like.
+    const inRegex = input.match
+      ? isInsideRegexLiteral(
+          input.lineText,
+          input.match.start,
+          input.match.length,
+          input.language,
+        )
+      : isRegexLiteralLine(input.lineText, input.language);
+    if (inRegex) {
+      return SuppressionReason.REGEX_LITERAL;
+    }
   }
   return null;
 }
