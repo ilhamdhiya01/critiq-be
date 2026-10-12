@@ -14,15 +14,27 @@ import {
   ScanTrigger,
 } from '../../generated/prisma/enums';
 import { ScanQueueService } from '../../queue/scan-queue.service';
+import {
+  CommentIngestService,
+  InboundComment,
+} from '../comments/comment-ingest.service';
 import { PullsService } from '../pulls/pulls.service';
+import {
+  fromGithubIssueComment,
+  fromGithubReviewComment,
+  fromGitlabNote,
+} from './comment-events';
 import {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
   isGithubInstallationPayload,
+  isGithubIssueCommentPayload,
   isGithubPingEvent,
   isGithubPullRequestPayload,
+  isGithubReviewCommentPayload,
   isGitlabEventEnvelope,
   isGitlabMergeRequestPayload,
+  isGitlabNotePayload,
   parseJsonBody,
 } from './webhook-payload';
 
@@ -32,6 +44,7 @@ export type WebhookSkipReason =
   | 'unsupported_event'
   | 'unknown_installation'
   | 'unknown_repo'
+  | 'untracked_pull'
   | 'out_of_scope'
   | 'not_scan_trigger'
   | 'no_head_sha';
@@ -44,6 +57,7 @@ export type WebhookOutcome =
   | { kind: 'skipped'; reason: WebhookSkipReason }
   | { kind: 'pull_closed' }
   | { kind: 'installation_updated' }
+  | { kind: 'comment_recorded' }
   | { kind: 'scan_enqueued'; scanId: string; deduplicated: boolean };
 
 const DELIVERY_DEDUPE_TTL_SECONDS = 86_400;
@@ -102,6 +116,7 @@ export class WebhooksService {
     private readonly configService: ConfigService,
     private readonly pullsService: PullsService,
     private readonly scanQueueService: ScanQueueService,
+    private readonly commentIngestService: CommentIngestService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
@@ -159,6 +174,13 @@ export class WebhooksService {
       return { kind: 'rejected' };
     }
 
+    if (payload.object_kind === 'note') {
+      return this.recordComment(
+        Provider.GITLAB,
+        isGitlabNotePayload(parsed) ? fromGitlabNote(parsed) : undefined,
+        this.headerString(headers, 'x-gitlab-event-uuid'),
+      );
+    }
     if (payload.object_kind !== 'merge_request') {
       this.logger.info('webhook.gitlab.ignored_event', {
         repositoryId: repository.id,
@@ -236,6 +258,24 @@ export class WebhooksService {
     if (eventName === 'installation') {
       return this.handleGithubInstallationEvent(parsed);
     }
+    if (
+      eventName === 'issue_comment' ||
+      eventName === 'pull_request_review_comment'
+    ) {
+      const comment =
+        eventName === 'issue_comment'
+          ? isGithubIssueCommentPayload(parsed)
+            ? fromGithubIssueComment(parsed)
+            : undefined
+          : isGithubReviewCommentPayload(parsed)
+            ? fromGithubReviewComment(parsed)
+            : undefined;
+      return this.recordComment(
+        Provider.GITHUB,
+        comment,
+        this.headerString(headers, 'x-github-delivery'),
+      );
+    }
     if (eventName !== undefined && eventName !== 'pull_request') {
       this.logger.info('webhook.github.ignored_event', { eventName });
       return { kind: 'skipped', reason: 'unsupported_event' };
@@ -276,6 +316,44 @@ export class WebhooksService {
         payload.action === undefined || GITHUB_SCAN_ACTIONS.has(payload.action),
       baseSha: payload.pull_request?.base.sha ?? null,
     });
+  }
+
+  // A comment written on the provider (v1.5.2, two-way sync), already
+  // authenticated. `undefined` = the body did not have a comment's shape;
+  // `null` = a comment with nothing to record (not on a PR, a system note).
+  private async recordComment(
+    provider: Provider,
+    comment: InboundComment | null | undefined,
+    deliveryId: string | undefined,
+  ): Promise<WebhookOutcome> {
+    if (comment === undefined) {
+      this.logger.warn(`webhook.${provider.toLowerCase()}.rejected`, {
+        reason: 'malformed_payload',
+        event: 'comment',
+      });
+      return { kind: 'skipped', reason: 'malformed' };
+    }
+    if (comment === null) {
+      return { kind: 'skipped', reason: 'unsupported_event' };
+    }
+    const dedupeKey = deliveryId
+      ? `webhook:delivery:${provider}:${deliveryId}`
+      : null;
+    if (dedupeKey && !(await this.claimDelivery(dedupeKey))) {
+      return { kind: 'duplicate' };
+    }
+    try {
+      const outcome = await this.commentIngestService.ingest(comment);
+      return outcome === 'ignored'
+        ? { kind: 'skipped', reason: 'untracked_pull' }
+        : { kind: 'comment_recorded' };
+    } catch (error) {
+      // As in processVerifiedEvent: a redelivery must not be swallowed.
+      if (dedupeKey) {
+        await this.redis.del(dedupeKey).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   // The App was uninstalled or (un)suspended on GitHub. Only the state

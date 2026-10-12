@@ -10,6 +10,7 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { HealthModule } from './modules/health/health.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
+import { CommentsModule } from './modules/comments/comments.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
 import { RedisModule } from './common/redis/redis.module';
@@ -29,6 +30,7 @@ import { RedisModule } from './common/redis/redis.module';
     WebhooksModule,
     HealthModule,
     ReviewsModule,
+    CommentsModule,
     QueueModule,
   ],
   controllers: [],

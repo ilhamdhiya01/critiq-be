@@ -73,6 +73,20 @@ export class ReviewsService {
       dto.decision === 'approve'
         ? ReviewDecision.APPROVE
         : ReviewDecision.REQUEST_CHANGES;
+    // Repeating one's own latest decision on the same commit adds nothing
+    // — and would post a second bot review on the provider. Changing one's
+    // mind, a newer commit or another reviewer are all fine.
+    const mine = await this.prisma.pullReview.findFirst({
+      where: { pullId, reviewerId: actorUserId, headSha: pull.headSha },
+      orderBy: { createdAt: 'desc' },
+      select: { decision: true },
+    });
+    if (mine?.decision === decision) {
+      throw new ConflictException({
+        field: 'decision',
+        message: 'already_reviewed',
+      });
+    }
     const body = dto.body?.trim() || null;
     if (decision === ReviewDecision.REQUEST_CHANGES && !body) {
       throw new UnprocessableEntityException({
