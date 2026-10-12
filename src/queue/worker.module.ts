@@ -3,9 +3,11 @@ import { CommonModule } from '../common/common.module';
 import { RedisModule } from '../common/redis/redis.module';
 import { AiModule } from '../modules/ai/ai.module';
 import { AiScanModule } from '../modules/ai/scan/ai-scan.module';
+import { IntegrationsModule } from '../modules/integrations/integrations.module';
 import { PullsModule } from '../modules/pulls/pulls.module';
 import { AiScanProcessor } from './ai-scan.processor';
 import { QueueModule } from './queue.module';
+import { ReviewSyncProcessor } from './review-sync.processor';
 import { ScanProcessor } from './scan.processor';
 
 // Root of the worker process (src/worker.ts). createApplicationContext
@@ -24,9 +26,10 @@ import { ScanProcessor } from './scan.processor';
     RedisModule,
     QueueModule,
     PullsModule,
+    IntegrationsModule,
     AiModule,
     AiScanModule,
   ],
-  providers: [ScanProcessor, AiScanProcessor],
+  providers: [ScanProcessor, AiScanProcessor, ReviewSyncProcessor],
 })
 export class WorkerModule {}

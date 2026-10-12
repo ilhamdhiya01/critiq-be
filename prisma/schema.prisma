@@ -24,6 +24,7 @@ model User {
   connectedIntegrations Integration[]  @relation("IntegrationConnectedBy")
   aiConsentOrgs         Organization[] @relation("OrganizationAiConsentBy")
   updatedAiCredentials  AiCredential[] @relation("AiCredentialUpdatedBy")
+  pullReviews           PullReview[]   @relation("PullReviewReviewer")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -50,7 +51,7 @@ model Organization {
   aiCredentials      AiCredential[]
   aiUsageDaily       AiUsageDaily[]
   aiSummaries        AiSummary[]
-  ciChecks           CiCheck[]
+  pullReviews        PullReview[]
 
   // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
   // live per provider in ai_credentials so switching back and forth never
@@ -79,7 +80,7 @@ model Organization {
 }
 
 // The Critical tiers of the quality profile (Rules & Profiles). Each tier
-// groups static rules, AI categories or the CI check — see
+// groups static rules and AI categories — see
 // src/queue/rules/rule-tiers.ts for what belongs to which.
 enum RuleTier {
   SECRETS
@@ -88,7 +89,6 @@ enum RuleTier {
   ERROR_HANDLING
   PERFORMANCE
   SECURITY
-  CI
 }
 
 model Membership {
@@ -263,7 +263,6 @@ model Repository {
   branchPolicies BranchScanPolicy[]
   pullRequests   PullRequest[]
   scans          Scan[]
-  ciChecks       CiCheck[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -444,6 +443,7 @@ model PullRequest {
   // Repeated webhook events (opened, then synchronize, then closed) for
   // the same PR/MR must upsert the same row, never duplicate it.
   findings Finding[]
+  reviews  PullReview[]
 
   @@unique([repositoryId, externalId])
   @@index([organizationId])
@@ -482,7 +482,7 @@ model Scan {
   // The organization's enabled Critical tiers when the scan was created —
   // what the static rules and the AI review were allowed to check. A scan
   // keeps the profile it ran under even after the profile changes.
-  ruleTiers RuleTier[] @default([SECRETS, CRASH, BREAKING_CHANGE, ERROR_HANDLING, PERFORMANCE, SECURITY, CI])
+  ruleTiers RuleTier[] @default([SECRETS, CRASH, BREAKING_CHANGE, ERROR_HANDLING, PERFORMANCE, SECURITY])
 
   // True once findings for this scan hit the 500-per-scan cap (see
   // ScansModule) — the first 500 are still persisted, this just tells the
@@ -770,39 +770,43 @@ enum FindingStatus {
   RESOLVED
 }
 
-// The CI result a code host reported for one commit (Failing CI tier of the
-// quality profile). One row per check: a GitHub check run or commit status
-// (by context), a GitLab pipeline. Keyed by repository + sha, not by PR, so
-// a status that arrives before the PR row exists is not lost.
-model CiCheck {
-  id             String   @id @default(cuid())
-  organizationId String
-  repositoryId   String
-  headSha        String
-  source         CiSource
-  // Check run name, status context or pipeline id — unique per source.
-  name           String
-  state          CiState
-  url            String?  @db.Text
-  updatedAt      DateTime @updatedAt
-  createdAt      DateTime @default(now())
+// A human's decision on a PR (v1.5.2): approve or request changes, for one
+// commit. The record in Critiq is the source of truth; syncStatus tracks the
+// copy sent to GitHub/GitLab (as Critiq's App / the org token, never as the
+// reviewer — see CLAUDE.md "Review & sinkronisasi ke provider"). Policy,
+// role and confirmation are snapshots, for the audit trail.
+model PullReview {
+  id                 String           @id @default(cuid())
+  organizationId     String
+  pullId             String
+  headSha            String
+  decision           ReviewDecision
+  body               String?          @db.Text
+  reviewerId         String?
+  reviewerRole       Role
+  effectivePolicy    ReviewPolicy
+  manualConfirmation Boolean          @default(false)
+  syncStatus         ReviewSyncStatus @default(PENDING)
+  // Why the provider copy failed (ReviewSyncError), null otherwise.
+  syncError          String?
+  syncedAt           DateTime?
+  createdAt          DateTime         @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  pullRequest  PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  reviewer     User?        @relation("PullReviewReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
 
-  @@unique([repositoryId, headSha, source, name])
-  @@index([organizationId, repositoryId, headSha])
-  @@map("ci_checks")
+  @@index([organizationId, pullId, createdAt(sort: Desc)])
+  @@map("pull_reviews")
 }
 
-enum CiSource {
-  GITHUB_CHECK_RUN
-  GITHUB_STATUS
-  GITLAB_PIPELINE
+enum ReviewDecision {
+  APPROVE
+  REQUEST_CHANGES
 }
 
-enum CiState {
+enum ReviewSyncStatus {
   PENDING
-  SUCCESS
-  FAILURE
+  SYNCED
+  FAILED
 }

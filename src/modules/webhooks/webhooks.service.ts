@@ -16,22 +16,13 @@ import {
 import { ScanQueueService } from '../../queue/scan-queue.service';
 import { PullsService } from '../pulls/pulls.service';
 import {
-  CiCheckInput,
-  fromGithubCheckRun,
-  fromGithubStatus,
-  fromGitlabPipeline,
-} from './ci-status';
-import {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
-  isGithubCheckRunPayload,
   isGithubInstallationPayload,
   isGithubPingEvent,
   isGithubPullRequestPayload,
-  isGithubStatusPayload,
   isGitlabEventEnvelope,
   isGitlabMergeRequestPayload,
-  isGitlabPipelinePayload,
   parseJsonBody,
 } from './webhook-payload';
 
@@ -53,7 +44,6 @@ export type WebhookOutcome =
   | { kind: 'skipped'; reason: WebhookSkipReason }
   | { kind: 'pull_closed' }
   | { kind: 'installation_updated' }
-  | { kind: 'ci_recorded' }
   | { kind: 'scan_enqueued'; scanId: string; deduplicated: boolean };
 
 const DELIVERY_DEDUPE_TTL_SECONDS = 86_400;
@@ -121,11 +111,10 @@ export class WebhooksService {
     headers: Record<string, unknown>,
   ): Promise<WebhookOutcome> {
     const parsed = parseJsonBody(rawBody);
-    // A pipeline body has no merge-request fields: only the envelope is
-    // checked before the sender is authenticated.
-    const isPipeline =
-      isGitlabEventEnvelope(parsed) && parsed.object_kind === 'pipeline';
-    if (!isPipeline && !isGitlabMergeRequestPayload(parsed)) {
+    // Only the envelope is checked before the sender is authenticated: a
+    // hook still subscribed to other events (pipelines, from when CI was
+    // tracked) is acknowledged and ignored below, not called malformed.
+    if (!isGitlabEventEnvelope(parsed)) {
       this.logger.warn('webhook.gitlab.rejected', {
         reason: 'malformed_payload',
       });
@@ -170,18 +159,6 @@ export class WebhooksService {
       return { kind: 'rejected' };
     }
 
-    if (isPipeline) {
-      if (!isGitlabPipelinePayload(parsed)) {
-        this.logger.warn('webhook.gitlab.rejected', {
-          repositoryId: repository.id,
-          reason: 'malformed_payload',
-          objectKind: 'pipeline',
-        });
-        return { kind: 'skipped', reason: 'malformed' };
-      }
-      return this.recordCi(repository, fromGitlabPipeline(parsed));
-    }
-
     if (payload.object_kind !== 'merge_request') {
       this.logger.info('webhook.gitlab.ignored_event', {
         repositoryId: repository.id,
@@ -189,8 +166,15 @@ export class WebhooksService {
       });
       return { kind: 'skipped', reason: 'unsupported_event' };
     }
+    if (!isGitlabMergeRequestPayload(parsed)) {
+      this.logger.warn('webhook.gitlab.rejected', {
+        repositoryId: repository.id,
+        reason: 'malformed_payload',
+      });
+      return { kind: 'skipped', reason: 'malformed' };
+    }
 
-    const mergeRequest = parsed as GitlabMergeRequestPayload;
+    const mergeRequest = parsed;
     const attrs = mergeRequest.object_attributes;
     const action = attrs?.action;
     return this.processVerifiedEvent({
@@ -252,9 +236,6 @@ export class WebhooksService {
     if (eventName === 'installation') {
       return this.handleGithubInstallationEvent(parsed);
     }
-    if (eventName === 'check_run' || eventName === 'status') {
-      return this.handleGithubCiEvent(eventName, parsed);
-    }
     if (eventName !== undefined && eventName !== 'pull_request') {
       this.logger.info('webhook.github.ignored_event', { eventName });
       return { kind: 'skipped', reason: 'unsupported_event' };
@@ -295,70 +276,6 @@ export class WebhooksService {
         payload.action === undefined || GITHUB_SCAN_ACTIONS.has(payload.action),
       baseSha: payload.pull_request?.base.sha ?? null,
     });
-  }
-
-  // A check run or commit status for some commit (Failing CI tier). The
-  // signature was already checked; an unknown repo is a normal delivery.
-  private async handleGithubCiEvent(
-    eventName: 'check_run' | 'status',
-    parsed: unknown,
-  ): Promise<WebhookOutcome> {
-    const check =
-      eventName === 'check_run'
-        ? isGithubCheckRunPayload(parsed)
-          ? { repoId: parsed.repository.id, input: fromGithubCheckRun(parsed) }
-          : null
-        : isGithubStatusPayload(parsed)
-          ? { repoId: parsed.repository.id, input: fromGithubStatus(parsed) }
-          : null;
-    if (!check) {
-      this.logger.warn('webhook.github.rejected', {
-        reason: 'malformed_payload',
-        eventName,
-      });
-      return { kind: 'skipped', reason: 'malformed' };
-    }
-    const repository = await this.prisma.repository.findFirst({
-      where: { provider: Provider.GITHUB, externalId: String(check.repoId) },
-      select: { id: true, organizationId: true },
-    });
-    if (!repository) {
-      return { kind: 'skipped', reason: 'unknown_repo' };
-    }
-    return this.recordCi(repository, check.input);
-  }
-
-  // Latest delivery wins per check: a re-run replaces the earlier result.
-  private async recordCi(
-    repository: { id: string; organizationId: string },
-    input: CiCheckInput | null,
-  ): Promise<WebhookOutcome> {
-    if (!input) {
-      return { kind: 'skipped', reason: 'unsupported_event' };
-    }
-    await this.prisma.ciCheck.upsert({
-      where: {
-        repositoryId_headSha_source_name: {
-          repositoryId: repository.id,
-          headSha: input.headSha,
-          source: input.source,
-          name: input.name,
-        },
-      },
-      create: {
-        organizationId: repository.organizationId,
-        repositoryId: repository.id,
-        ...input,
-      },
-      update: { state: input.state, url: input.url },
-    });
-    this.logger.info('webhook.ci_recorded', {
-      orgId: repository.organizationId,
-      repoId: repository.id,
-      source: input.source,
-      state: input.state,
-    });
-    return { kind: 'ci_recorded' };
   }
 
   // The App was uninstalled or (un)suspended on GitHub. Only the state

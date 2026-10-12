@@ -24,8 +24,11 @@ const FINGERPRINT_BY_VERSION: Record<string, string> = {
     'fa3aff2fef9d58880d8f38e2116c4e3bbb3d568f903f921ad63535ebc65cc1db',
   'ai-2026.10.2':
     '33ee9ae58f4545deb7b62d4f6eae722bac5110f4c5417b3d007c75898a3059dc',
+  // Re-pinned without a version bump when the CI tier was removed: its
+  // TIER_CHECKS entry was null (no prompt block), so the text the model sees
+  // is unchanged — the old hash (ef41ba83…) only differed by `"CI":null`.
   'ai-2026.10.3':
-    'ef41ba839bc2edc23fcd92a2fc2fe3faa1af6e2d2e3c82936385467aa02d1528',
+    'fa551e659b54f7ac3a815ea1b7b2f70a7f7f0d691e478312e448e71581f2dae8',
 };
 
 describe('AI prompt', () => {

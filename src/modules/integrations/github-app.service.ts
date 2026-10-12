@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { createAppAuth } from '@octokit/auth-app';
 import { request } from '@octokit/request';
 import { RequestError } from '@octokit/request-error';
+import { ProviderReviewError } from './provider-review-error';
 
 export interface GithubInstallationAccount {
   login: string;
@@ -129,6 +130,37 @@ export class GithubAppService {
         );
       }
       throw error;
+    }
+  }
+
+  // A review on a pull request as the App (v1.5.2) — shown as the App's
+  // bot, with the Critiq reviewer named in `body`. `commitId` pins it to
+  // the head the reviewer saw. Needs the App's "Pull requests: write".
+  async submitPullReview(
+    installationId: string,
+    owner: string,
+    repo: string,
+    pullNumber: string,
+    review: {
+      commitId: string;
+      event: 'APPROVE' | 'REQUEST_CHANGES';
+      body: string;
+    },
+  ): Promise<void> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      await request('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+        owner,
+        repo,
+        pull_number: Number(pullNumber),
+        commit_id: review.commitId,
+        event: review.event,
+        body: review.body,
+        headers: { authorization: `bearer ${token}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      });
+    } catch (error) {
+      throw toReviewError(error);
     }
   }
 
@@ -448,4 +480,39 @@ export class GithubAppService {
     }
     throw error as Error;
   }
+}
+
+// GitHub's answer to a review submission, as a ProviderReviewError: what
+// failed decides whether the review-sync queue retries.
+function toReviewError(error: unknown): ProviderReviewError {
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return new ProviderReviewError('provider_unreachable', true);
+  }
+  if (error instanceof RequestError) {
+    const detail = error.message.slice(0, 200);
+    // 404 too: GitHub hides a repository the App cannot see.
+    if ([401, 403, 404].includes(error.status)) {
+      return new ProviderReviewError('insufficient_permission', false, detail);
+    }
+    // e.g. "Can not approve your own pull request".
+    if (error.status === 422) {
+      return new ProviderReviewError('not_allowed', false, detail);
+    }
+    if (error.status === 429 || error.status >= 500) {
+      return new ProviderReviewError('provider_unreachable', true, detail);
+    }
+    return new ProviderReviewError('unknown', false, detail);
+  }
+  // getInstallationToken already mapped its own failure.
+  if (error instanceof HttpException) {
+    const response = error.getResponse() as { message?: unknown };
+    return response.message === 'installation_invalid'
+      ? new ProviderReviewError('insufficient_permission', false)
+      : new ProviderReviewError('provider_unreachable', true);
+  }
+  return new ProviderReviewError(
+    'unknown',
+    true,
+    error instanceof Error ? error.message.slice(0, 200) : undefined,
+  );
 }

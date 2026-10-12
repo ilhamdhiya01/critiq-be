@@ -18,7 +18,7 @@ function axiosError(status: number, data: unknown = {}): AxiosError {
 }
 
 function setup() {
-  const http = { get: jest.fn() };
+  const http = { get: jest.fn(), post: jest.fn() };
   const service = new GitlabApiService(http as unknown as HttpService);
   const lastParams = () =>
     (
@@ -229,5 +229,56 @@ describe('GitlabApiService.fetchMainLanguage', () => {
     await expect(
       service.fetchMainLanguage('https://gitlab.com', 'token', '42'),
     ).resolves.toBeNull();
+  });
+});
+
+// v1.5.2: a review decision copied to GitLab as the org token's user.
+describe('GitlabApiService review calls', () => {
+  const approve = (service: GitlabApiService) =>
+    service.approveMergeRequest(
+      'https://gitlab.com',
+      'token',
+      '42',
+      '7',
+      'abc123',
+    );
+
+  it('approves pinned to the sha', async () => {
+    const { http, service } = setup();
+    http.post.mockReturnValue(of({ data: {} }));
+    await approve(service);
+    expect(http.post).toHaveBeenCalledWith(
+      'https://gitlab.com/api/v4/projects/42/merge_requests/7/approve',
+      { sha: 'abc123' },
+      expect.anything(),
+    );
+  });
+
+  // Two Critiq reviewers approving in turn: the token already approved.
+  it('treats an approval that is already there as done', async () => {
+    const { http, service } = setup();
+    http.post.mockReturnValue(throwError(() => axiosError(401)));
+    http.get.mockReturnValue(of({ data: { user_has_approved: true } }));
+    await expect(approve(service)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [401, 'not_allowed', false],
+    [409, 'head_changed', false],
+    [403, 'insufficient_permission', false],
+    [502, 'provider_unreachable', true],
+  ])('maps %i to %s', async (status, code, retryable) => {
+    const { http, service } = setup();
+    http.post.mockReturnValue(throwError(() => axiosError(status)));
+    http.get.mockReturnValue(of({ data: { user_has_approved: false } }));
+    await expect(approve(service)).rejects.toMatchObject({ code, retryable });
+  });
+
+  it('treats unapproving an MR it had not approved as done', async () => {
+    const { http, service } = setup();
+    http.post.mockReturnValue(throwError(() => axiosError(404)));
+    await expect(
+      service.unapproveMergeRequest('https://gitlab.com', 'token', '42', '7'),
+    ).resolves.toBeUndefined();
   });
 });

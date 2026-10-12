@@ -30,11 +30,11 @@ function setup(disabledRuleTiers: RuleTier[] | null) {
 }
 
 describe('RulesService', () => {
-  it('lists all seven tiers, on by default, with how each is checked', async () => {
+  it('lists all six tiers, on by default, with how each is checked', async () => {
     const { service } = setup([]);
     const rules = await service.get('org_1');
 
-    expect(rules.enabledCount).toBe(7);
+    expect(rules.enabledCount).toBe(6);
     expect(rules.tiers.map((tier) => [tier.id, tier.engine])).toEqual([
       ['secrets', 'static+ai'],
       ['crash', 'static+ai'],
@@ -42,7 +42,6 @@ describe('RulesService', () => {
       ['error_handling', 'static+ai'],
       ['performance', 'ai'],
       ['security', 'static+ai'],
-      ['ci', 'ci'],
     ]);
     const security = rules.tiers.find((tier) => tier.id === 'security')!;
     expect(security.staticRules).toContain('code.insecure_tls');
@@ -76,11 +75,11 @@ describe('RulesService', () => {
   });
 
   it('writes nothing when the tier is already in that state', async () => {
-    const { service, prisma, logger } = setup([RuleTier.CI]);
+    const { service, prisma, logger } = setup([RuleTier.SECURITY]);
     await service.setTier(
       'org_1',
       { userId: 'user_1', role: Role.ADMIN },
-      RuleTier.CI,
+      RuleTier.SECURITY,
       false,
     );
 

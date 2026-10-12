@@ -75,3 +75,38 @@ describe('GithubAppService.deleteInstallation', () => {
     });
   });
 });
+
+// v1.5.2: a review decision as the App's bot.
+describe('GithubAppService.submitPullReview', () => {
+  beforeEach(() => requestMock.mockReset());
+
+  const submit = () =>
+    setup().submitPullReview('1', 'acme', 'web', '12', {
+      commitId: 'abc123',
+      event: 'APPROVE',
+      body: 'Approved by Ilham via Critiq.',
+    });
+
+  it('posts the review on the commit', async () => {
+    requestMock.mockResolvedValue({ status: 200 });
+    await submit();
+    expect(requestMock).toHaveBeenCalledWith(
+      'POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews',
+      expect.objectContaining({
+        pull_number: 12,
+        commit_id: 'abc123',
+        event: 'APPROVE',
+      }),
+    );
+  });
+
+  it.each([
+    [403, 'insufficient_permission', false],
+    [404, 'insufficient_permission', false],
+    [422, 'not_allowed', false],
+    [503, 'provider_unreachable', true],
+  ])('maps %i to %s', async (status, code, retryable) => {
+    requestMock.mockRejectedValue(new GithubRequestError('boom', status));
+    await expect(submit()).rejects.toMatchObject({ code, retryable });
+  });
+});

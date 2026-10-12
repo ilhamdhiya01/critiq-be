@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AI_QUEUE_NAME } from './ai-queue.constants';
+import { REVIEW_SYNC_QUEUE_NAME } from './review-sync-queue.constants';
 import { SCAN_QUEUE_NAME, ScanQueueService } from './scan-queue.service';
 
 @Global()
@@ -15,6 +16,7 @@ import { SCAN_QUEUE_NAME, ScanQueueService } from './scan-queue.service';
     }),
     BullModule.registerQueue({ name: SCAN_QUEUE_NAME }),
     BullModule.registerQueue({ name: AI_QUEUE_NAME }),
+    BullModule.registerQueue({ name: REVIEW_SYNC_QUEUE_NAME }),
   ],
   providers: [ScanQueueService],
   exports: [BullModule, ScanQueueService],
