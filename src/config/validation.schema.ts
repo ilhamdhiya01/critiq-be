@@ -47,4 +47,7 @@ export const validationSchema = Joi.object({
   AI_CONTEXT_LINES: Joi.number().integer().min(0).default(30),
   AI_MAX_DIFF_BYTES: Joi.number().integer().min(1024).default(204800),
   AI_KEEP_DEDUPED: Joi.boolean().default(false),
+  // Unlocks the detailed GET /health (queue counts, workers, AI orgs).
+  // Empty: only the overall status is ever shown.
+  HEALTH_TOKEN: Joi.string().allow('').optional(),
 });

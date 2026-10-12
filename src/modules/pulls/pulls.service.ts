@@ -9,7 +9,6 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import {
-  CiState,
   FindingSeverity,
   FindingSource,
   FindingStatus,
@@ -54,14 +53,17 @@ import {
   toApiLifecycleFields,
 } from '../scans/dto/lifecycle-fields';
 import { ScansService } from '../scans/scans.service';
-import { aggregateCi, CiAggregate, qualityGate } from './quality-gate';
+import {
+  REVIEW_INCLUDE,
+  ReviewDto,
+  toReviewDto,
+} from '../reviews/dto/review.dto';
 
 // What PR lists show of the latest scan — selected, not included, so a list
 // never drags each scan's full row along.
 const LATEST_SCAN_LIST_SELECT = {
   id: true,
   status: true,
-  headSha: true,
   criticalCount: true,
   suppressedCount: true,
   finishedAt: true,
@@ -71,8 +73,12 @@ const LATEST_SCAN_LIST_SELECT = {
 
 const HEAD_FILE_FETCH_CONCURRENCY = 5;
 
-const ciKey = (pull: { repositoryId: string; headSha: string | null }) =>
-  `${pull.repositoryId}:${pull.headSha ?? ''}`;
+// The PR's most recent review decision (v1.5.2), with its reviewer.
+const LATEST_REVIEW = {
+  orderBy: { createdAt: 'desc' },
+  take: 1,
+  include: REVIEW_INCLUDE,
+} as const;
 // Larger files are skipped for AI context: generated or vendored content,
 // and too big to be worth the tokens around a small hunk.
 const MAX_HEAD_FILE_CHARS = 512 * 1024;
@@ -173,13 +179,15 @@ export class PullsService {
     await this.assertRepositoryInOrg(organizationId, repositoryId);
     const pulls = await this.prisma.pullRequest.findMany({
       where: { repositoryId },
-      include: { latestScan: { select: LATEST_SCAN_LIST_SELECT } },
+      include: {
+        latestScan: { select: LATEST_SCAN_LIST_SELECT },
+        reviews: LATEST_REVIEW,
+      },
       orderBy: { updatedAt: 'desc' },
     });
-    const [activeScans, ci] = await Promise.all([
-      this.scansService.findActiveScans(pulls.map((pull) => pull.id)),
-      this.ciByHead(organizationId, pulls),
-    ]);
+    const activeScans = await this.scansService.findActiveScans(
+      pulls.map((pull) => pull.id),
+    );
     return pulls.map(
       (pull) =>
         new PullRequestListItemDto({
@@ -194,12 +202,7 @@ export class PullsService {
           effectivePolicy: pull.effectivePolicy,
           latestScan: this.toLatestScanDto(pull.latestScan),
           activeScan: activeScans.get(pull.id) ?? null,
-          qualityGate: qualityGate({
-            pullHeadSha: pull.headSha,
-            scan: pull.latestScan,
-            scanInFlight: activeScans.has(pull.id),
-            ci: ci.get(ciKey(pull)) ?? 'NONE',
-          }),
+          latestReview: this.toLatestReviewDto(pull),
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -226,13 +229,13 @@ export class PullsService {
         // the last valid result and never a count from an in-flight or
         // discarded scan. See PullRequest.latestScanId in schema.prisma.
         latestScan: { select: LATEST_SCAN_LIST_SELECT },
+        reviews: LATEST_REVIEW,
       },
       orderBy: { updatedAt: 'desc' },
     });
-    const [activeScans, ci] = await Promise.all([
-      this.scansService.findActiveScans(pulls.map((pull) => pull.id)),
-      this.ciByHead(organizationId, pulls),
-    ]);
+    const activeScans = await this.scansService.findActiveScans(
+      pulls.map((pull) => pull.id),
+    );
     return pulls.map(
       (pull) =>
         new PullRequestOrgListItemDto({
@@ -254,12 +257,7 @@ export class PullsService {
           effectivePolicy: pull.effectivePolicy,
           latestScan: this.toLatestScanDto(pull.latestScan),
           activeScan: activeScans.get(pull.id) ?? null,
-          qualityGate: qualityGate({
-            pullHeadSha: pull.headSha,
-            scan: pull.latestScan,
-            scanInFlight: activeScans.has(pull.id),
-            ci: ci.get(ciKey(pull)) ?? 'NONE',
-          }),
+          latestReview: this.toLatestReviewDto(pull),
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -275,6 +273,7 @@ export class PullsService {
       where: { id: pullRequestId },
       include: {
         repository: { select: { path: true } },
+        reviews: LATEST_REVIEW,
         // `latestScan`, not `scans`: the latter is every attempt ever made
         // for this PR (FAILED and SUPERSEDED included). This pointer only
         // moves on a terminal transition, so the review page shows one
@@ -313,10 +312,6 @@ export class PullsService {
     ) {
       throw new NotFoundException('Pull request not found.');
     }
-    const [activeScans, ci] = await Promise.all([
-      this.scansService.findActiveScans([pull.id]),
-      this.ciByHead(organizationId, [pull]),
-    ]);
 
     return new PullRequestDetailDto({
       id: pull.id,
@@ -331,12 +326,7 @@ export class PullsService {
       headSha: pull.headSha,
       state: pull.state,
       effectivePolicy: pull.effectivePolicy,
-      qualityGate: qualityGate({
-        pullHeadSha: pull.headSha,
-        scan: pull.latestScan,
-        scanInFlight: activeScans.has(pull.id),
-        ci: ci.get(ciKey(pull)) ?? 'NONE',
-      }),
+      latestReview: this.toLatestReviewDto(pull),
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
             ...toApiAiScanFields(pull.latestScan),
@@ -714,36 +704,12 @@ export class PullsService {
     };
   }
 
-  // Aggregated CI state of each PR's head commit, in one query.
-  private async ciByHead(
-    organizationId: string,
-    pulls: { repositoryId: string; headSha: string | null }[],
-  ): Promise<Map<string, CiAggregate>> {
-    const heads = pulls.filter(
-      (pull): pull is { repositoryId: string; headSha: string } =>
-        pull.headSha !== null,
-    );
-    if (heads.length === 0) {
-      return new Map();
-    }
-    const checks = await this.prisma.ciCheck.findMany({
-      where: {
-        organizationId,
-        OR: heads.map((pull) => ({
-          repositoryId: pull.repositoryId,
-          headSha: pull.headSha,
-        })),
-      },
-      select: { repositoryId: true, headSha: true, state: true },
-    });
-    const states = new Map<string, CiState[]>();
-    for (const check of checks) {
-      const key = ciKey(check);
-      states.set(key, [...(states.get(key) ?? []), check.state]);
-    }
-    return new Map(
-      [...states].map(([key, list]) => [key, aggregateCi(list)] as const),
-    );
+  private toLatestReviewDto(pull: {
+    headSha: string | null;
+    reviews: Parameters<typeof toReviewDto>[0][];
+  }): ReviewDto | null {
+    const [review] = pull.reviews;
+    return review ? toReviewDto(review, pull.headSha) : null;
   }
 
   private toLatestScanDto(

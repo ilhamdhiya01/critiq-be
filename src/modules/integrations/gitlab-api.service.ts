@@ -8,6 +8,7 @@ import {
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import axios from 'axios';
+import { ProviderReviewError } from './provider-review-error';
 
 export interface GitlabUser {
   id: number;
@@ -366,8 +367,6 @@ export class GitlabApiService {
             url: opts.url,
             token: opts.secretToken,
             merge_requests_events: true,
-            // CI results for the Failing CI tier of the quality profile.
-            pipeline_events: true,
             push_events: false,
             enable_ssl_verification: true,
           },
@@ -380,32 +379,106 @@ export class GitlabApiService {
     }
   }
 
-  // Brings a hook created before pipeline events existed up to date, keeping
-  // its secret token (omitted fields are left as they are). GitLab requires
-  // `url` on every edit.
-  async enablePipelineEvents(
+  // Approves an MR as the org token's user (v1.5.2), pinned to `sha` — GitLab
+  // answers 409 when it is no longer the head. 401 means this user may not
+  // approve, or already did: an approval that is already there is the
+  // outcome asked for, so that case succeeds.
+  async approveMergeRequest(
     instanceUrl: string,
     token: string,
     projectId: string,
-    hookId: number,
-    url: string,
+    mergeRequestIid: string,
+    sha: string,
   ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
     try {
       await firstValueFrom(
-        this.http.put(
-          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/hooks/${hookId}`,
-          {
-            url,
-            merge_requests_events: true,
-            pipeline_events: true,
-            push_events: false,
-          },
+        this.http.post(
+          `${base}/approve`,
+          { sha },
           { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
         ),
       );
     } catch (error) {
-      throw this.mapGitlabRequestError(error);
+      if (
+        axios.isAxiosError(error) &&
+        error.response?.status === 401 &&
+        (await this.hasApproved(base, token))
+      ) {
+        return;
+      }
+      throw toReviewError(error);
     }
+  }
+
+  // Withdraws the org token user's approval — how "request changes" lands
+  // on GitLab, with a note giving the reason. 404: it had not approved.
+  async unapproveMergeRequest(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+  ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      await firstValueFrom(
+        this.http.post(
+          `${base}/unapprove`,
+          {},
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return;
+      }
+      throw toReviewError(error);
+    }
+  }
+
+  async createMergeRequestNote(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+    body: string,
+  ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      await firstValueFrom(
+        this.http.post(
+          `${base}/notes`,
+          { body },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      throw toReviewError(error);
+    }
+  }
+
+  // Whether the token's user has approved the MR. Unknown (the approvals
+  // state cannot be read) counts as no.
+  private async hasApproved(base: string, token: string): Promise<boolean> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get<{ user_has_approved?: boolean }>(`${base}/approvals`, {
+          headers: { 'Private-Token': token },
+          timeout: REQUEST_TIMEOUT_MS,
+        }),
+      );
+      return response.data.user_has_approved === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private mergeRequestUrl(
+    instanceUrl: string,
+    projectId: string,
+    mergeRequestIid: string,
+  ): string {
+    return `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/merge_requests/${encodeURIComponent(mergeRequestIid)}`;
   }
 
   // Called from IntegrationsService.disconnectGitlab when revoking every
@@ -485,4 +558,34 @@ export class GitlabApiService {
   normalizeInstanceUrl(url: string): string {
     return url.trim().replace(/\/+$/, '');
   }
+}
+
+// GitLab's answer to a review call, as a ProviderReviewError: what failed
+// decides whether the review-sync queue retries.
+function toReviewError(error: unknown): ProviderReviewError {
+  if (!axios.isAxiosError(error)) {
+    return new ProviderReviewError(
+      'unknown',
+      true,
+      error instanceof Error ? error.message.slice(0, 200) : undefined,
+    );
+  }
+  const status = error.response?.status;
+  const data = error.response?.data as { message?: unknown } | undefined;
+  const detail = JSON.stringify(data?.message ?? '').slice(0, 200);
+  if (status === undefined || status === 429 || status >= 500) {
+    return new ProviderReviewError('provider_unreachable', true, detail);
+  }
+  // The pinned sha is no longer the MR's head.
+  if (status === 409) {
+    return new ProviderReviewError('head_changed', false, detail);
+  }
+  // The token's user may not approve (author, not an eligible approver).
+  if (status === 401) {
+    return new ProviderReviewError('not_allowed', false, detail);
+  }
+  if (status === 403 || status === 404) {
+    return new ProviderReviewError('insufficient_permission', false, detail);
+  }
+  return new ProviderReviewError('unknown', false, detail);
 }

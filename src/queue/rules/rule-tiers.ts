@@ -15,7 +15,6 @@ export const ALL_RULE_TIERS: RuleTier[] = [
   RuleTier.ERROR_HANDLING,
   RuleTier.PERFORMANCE,
   RuleTier.SECURITY,
-  RuleTier.CI,
 ];
 
 // Tiers only the AI review checks: with no AI review on a scan they were

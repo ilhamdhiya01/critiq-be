@@ -5,8 +5,6 @@ import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import {
-  CiSource,
-  CiState,
   IntegrationState,
   Provider,
   PullRequestState,
@@ -48,7 +46,6 @@ function setup() {
   const prisma = {
     repository: { findFirst: jest.fn() },
     integration: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-    ciCheck: { upsert: jest.fn() },
   };
   const encryptionService = { decrypt: jest.fn(() => GITLAB_SECRET) };
   const configService = { getOrThrow: jest.fn(() => GITHUB_SECRET) };
@@ -450,115 +447,49 @@ describe('WebhooksService — GitLab', () => {
   });
 });
 
-// Failing CI tier: CI results are stored per repo + commit.
-describe('WebhooksService — CI results', () => {
-  const ciUpsert = (prisma: ReturnType<typeof setup>['prisma']) =>
-    (
-      prisma.ciCheck.upsert.mock.calls[0] as [
-        { create: Record<string, unknown> },
-      ]
-    )[0].create;
-
-  it.each([
-    ['in_progress', null, CiState.PENDING],
-    ['completed', 'success', CiState.SUCCESS],
-    ['completed', 'skipped', CiState.SUCCESS],
-    ['completed', 'failure', CiState.FAILURE],
-    ['completed', 'timed_out', CiState.FAILURE],
-  ])(
-    'records a GitHub check run %s/%s as %s',
-    async (status, conclusion, state) => {
-      const { service, prisma } = setup();
-      const { rawBody, headers } = signedGithub(
-        {
-          action: status === 'completed' ? 'completed' : 'created',
-          repository: { id: 42 },
-          check_run: {
-            name: 'test',
-            head_sha: 'abc123',
-            status,
-            conclusion,
-            html_url: 'https://github.com/acme/api/runs/1',
-            app: { slug: 'github-actions' },
-          },
-        },
-        { 'x-github-event': 'check_run' },
-      );
-
-      await expect(
-        service.handleGithubEvent(rawBody, headers),
-      ).resolves.toEqual({
-        kind: 'ci_recorded',
-      });
-      expect(ciUpsert(prisma)).toMatchObject({
-        organizationId: 'org_1',
-        repositoryId: 'repo_1',
-        headSha: 'abc123',
-        source: CiSource.GITHUB_CHECK_RUN,
-        name: 'github-actions/test',
-        state,
-      });
-    },
-  );
-
-  it('records a commit status', async () => {
-    const { service, prisma } = setup();
-    const { rawBody, headers } = signedGithub(
-      {
-        sha: 'abc123',
-        state: 'error',
-        context: 'ci/jenkins',
-        repository: { id: 42 },
-      },
-      { 'x-github-event': 'status' },
-    );
-
-    await service.handleGithubEvent(rawBody, headers);
-
-    expect(ciUpsert(prisma)).toMatchObject({
-      source: CiSource.GITHUB_STATUS,
-      name: 'ci/jenkins',
-      state: CiState.FAILURE,
-    });
-  });
-
-  it('records a GitLab pipeline once the token checks out', async () => {
-    const { service, prisma } = setup();
-    const body = {
-      object_kind: 'pipeline',
-      project: { id: 99 },
-      object_attributes: { id: 5, sha: 'abc123', status: 'failed' },
-    };
-
-    const forged = gitlabRequest(body, 'wrong');
-    await expect(
-      service.handleGitlabEvent(forged.rawBody, forged.headers),
-    ).resolves.toEqual({ kind: 'rejected' });
-    expect(prisma.ciCheck.upsert).not.toHaveBeenCalled();
-
-    const { rawBody, headers } = gitlabRequest(body);
-    await expect(service.handleGitlabEvent(rawBody, headers)).resolves.toEqual({
-      kind: 'ci_recorded',
-    });
-    expect(ciUpsert(prisma)).toMatchObject({
-      source: CiSource.GITLAB_PIPELINE,
-      name: 'pipeline',
-      state: CiState.FAILURE,
-    });
-  });
-
-  it('ignores a skipped pipeline', async () => {
-    const { service, prisma } = setup();
+// CI tracking was withdrawn: hooks still subscribed to CI events (GitLab
+// pipelines from older hooks, GitHub check runs and statuses) are
+// acknowledged and ignored — not malformed, never stored.
+describe('WebhooksService — CI events', () => {
+  it('ignores a GitLab pipeline event once the token checks out', async () => {
+    const { service, pullsService } = setup();
     const { rawBody, headers } = gitlabRequest({
       object_kind: 'pipeline',
       project: { id: 99 },
-      object_attributes: { id: 5, sha: 'abc123', status: 'skipped' },
+      object_attributes: { id: 7, sha: 'abc123', status: 'success' },
     });
 
-    await expect(service.handleGitlabEvent(rawBody, headers)).resolves.toEqual({
-      kind: 'skipped',
-      reason: 'unsupported_event',
-    });
-    expect(prisma.ciCheck.upsert).not.toHaveBeenCalled();
+    const outcome = await service.handleGitlabEvent(rawBody, headers);
+
+    expect(outcome).toEqual({ kind: 'skipped', reason: 'unsupported_event' });
+    expect(pullsService.upsertFromWebhook).not.toHaveBeenCalled();
   });
+
+  it('still rejects a GitLab pipeline event with a wrong token', async () => {
+    const { service } = setup();
+    const { rawBody, headers } = gitlabRequest(
+      { object_kind: 'pipeline', project: { id: 99 } },
+      'wrong-token',
+    );
+
+    await expect(service.handleGitlabEvent(rawBody, headers)).resolves.toEqual({
+      kind: 'rejected',
+    });
+  });
+
+  it.each(['check_run', 'status'])(
+    'ignores a GitHub %s event',
+    async (eventName) => {
+      const { service, prisma } = setup();
+      const { rawBody, headers } = signedGithub(
+        { action: 'completed', repository: { id: 42 } },
+        { 'x-github-event': eventName },
+      );
+
+      const outcome = await service.handleGithubEvent(rawBody, headers);
+
+      expect(outcome).toEqual({ kind: 'skipped', reason: 'unsupported_event' });
+      expect(prisma.repository.findFirst).not.toHaveBeenCalled();
+    },
+  );
 });

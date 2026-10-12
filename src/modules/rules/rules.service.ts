@@ -17,9 +17,6 @@ import { RulesDto, RuleTierDto, RuleTierEngine } from './dto/rules.dto';
 const STATIC_RULE_IDS = [...RULES.map((rule) => rule.id), ...FILE_RULE_IDS];
 
 function engineOf(tier: RuleTier, hasStatic: boolean): RuleTierEngine {
-  if (tier === RuleTier.CI) {
-    return 'ci';
-  }
   const hasAi = TIER_CHECKS[tier] !== null;
   return hasStatic && hasAi ? 'static+ai' : hasStatic ? 'static' : 'ai';
 }

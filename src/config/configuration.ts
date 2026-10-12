@@ -53,6 +53,9 @@ export default () => ({
   redis: {
     url: process.env.REDIS_URL,
   },
+  health: {
+    token: process.env.HEALTH_TOKEN ?? '',
+  },
   scan: {
     concurrency: Number(process.env.SCAN_CONCURRENCY ?? 3),
     jobTimeoutMs: Number(process.env.SCAN_JOB_TIMEOUT_MS ?? 120000),

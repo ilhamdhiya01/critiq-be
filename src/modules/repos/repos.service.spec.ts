@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import type Redis from 'ioredis';
 import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -106,6 +107,11 @@ function setup() {
     branchExists: jest.fn().mockResolvedValue(true),
   };
   const logger = { warn: jest.fn(), info: jest.fn() };
+  // An empty cache by default: every branch list goes to the provider.
+  const redis = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue('OK'),
+  };
   const service = new ReposService(
     prisma as unknown as PrismaService,
     { decrypt: () => 'token' } as unknown as EncryptionService,
@@ -113,6 +119,7 @@ function setup() {
     gitlab as unknown as GitlabApiService,
     {} as ConfigService,
     {} as ScanQueueService,
+    redis as unknown as Redis,
     logger as unknown as Logger,
   );
   jest
@@ -121,7 +128,7 @@ function setup() {
       'installWebhook',
     )
     .mockResolvedValue({ status: 'installed' });
-  return { service, gitlab, tx, prisma, logger };
+  return { service, gitlab, tx, prisma, logger, redis };
 }
 
 const branches = (...list: string[]) => list.map((name) => ({ name }));
@@ -570,5 +577,78 @@ describe('ReposService repository stats', () => {
         languageCheckedAt: expect.any(Date) as Date,
       }) as unknown,
     });
+  });
+});
+
+// Checkpoint G: the picker reads the provider once per window, per org,
+// repository and search.
+describe('ReposService branch list cache', () => {
+  const listed = {
+    branches: [{ name: 'master' }, { name: 'dev' }],
+    truncated: false,
+  };
+
+  it('stores a list fetched from the provider for two minutes', async () => {
+    const { service, gitlab, redis } = setup();
+    gitlab.fetchBranches.mockResolvedValue(listed);
+
+    await service.getBranchesForCandidate(ORG, Provider.GITLAB, '42', ' dev ');
+
+    expect(gitlab.fetchBranches).toHaveBeenCalledTimes(1);
+    const [key, value, mode, ttl] = redis.set.mock.calls[0] as [
+      string,
+      string,
+      string,
+      number,
+    ];
+    // Organization in the key: another org's token never fills this entry.
+    expect(key).toBe(`branches:${ORG}:GITLAB:42:dev`);
+    expect(JSON.parse(value)).toMatchObject({ defaultBranch: 'master' });
+    expect([mode, ttl]).toEqual(['EX', 120]);
+  });
+
+  it('answers from the cache without asking the provider', async () => {
+    const { service, gitlab, redis } = setup();
+    redis.get.mockResolvedValue(
+      JSON.stringify({
+        defaultBranch: 'master',
+        branches: ['master', 'dev'],
+        total: 2,
+        truncated: false,
+        fetchedAt: '2026-10-12T04:00:00.000Z',
+      }),
+    );
+
+    const result = await service.getBranchesForCandidate(
+      ORG,
+      Provider.GITLAB,
+      '42',
+    );
+
+    expect(gitlab.fetchBranches).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      branches: ['master', 'dev'],
+      fetchedAt: new Date('2026-10-12T04:00:00.000Z'),
+    });
+  });
+
+  it('falls back to the provider when Redis fails', async () => {
+    const { service, gitlab, redis } = setup();
+    redis.get.mockRejectedValue(new Error('ECONNREFUSED'));
+    redis.set.mockRejectedValue(new Error('ECONNREFUSED'));
+    gitlab.fetchBranches.mockResolvedValue(listed);
+
+    await expect(
+      service.getBranchesForCandidate(ORG, Provider.GITLAB, '42'),
+    ).resolves.toMatchObject({ branches: ['master', 'dev'] });
+  });
+
+  // Validation must see the provider as it is now, not a cached list.
+  it('never uses the cache to validate a branch being added', async () => {
+    const { service, redis } = setup();
+    await service.updateScanConfig(ORG, 'repo_1', 'u_1', {
+      branches: ['main', 'develop', 'staging'],
+    });
+    expect(redis.get).not.toHaveBeenCalled();
   });
 });

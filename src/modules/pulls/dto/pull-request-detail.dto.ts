@@ -1,9 +1,9 @@
+import type { ReviewDto } from '../../reviews/dto/review.dto';
 import {
   Provider,
   PullRequestState,
   ReviewPolicy,
 } from '../../../generated/prisma/enums';
-import { QualityGateDto } from '../quality-gate';
 import { ScanSummaryDto } from './scan-summary.dto';
 
 export class PullRequestDetailDto {
@@ -19,7 +19,8 @@ export class PullRequestDetailDto {
   headSha!: string | null;
   state!: PullRequestState;
   effectivePolicy!: ReviewPolicy;
-  qualityGate!: QualityGateDto;
+  // The most recent review decision (v1.5.2); null before any.
+  latestReview!: ReviewDto | null;
   // null when no scan has reached a terminal state yet — a PR that was only
   // just opened, or whose every attempt so far is still running. The review
   // page renders its "not scanned yet" state from this, not from a zeroed
@@ -41,7 +42,7 @@ export class PullRequestDetailDto {
     headSha: string | null;
     state: PullRequestState;
     effectivePolicy: ReviewPolicy;
-    qualityGate: QualityGateDto;
+    latestReview: ReviewDto | null;
     latestScan: ScanSummaryDto | null;
     createdAt: Date;
     updatedAt: Date;

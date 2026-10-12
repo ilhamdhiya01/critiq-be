@@ -7,9 +7,11 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { REDIS_CLIENT } from '../../common/redis/redis.constants';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Prisma } from '../../generated/prisma/client';
 import {
@@ -62,6 +64,8 @@ const INVALID_BRANCH_NAME_PATTERN = /[\s*?[\]]/;
 // the unfiltered list is a starting point — the most recently updated on
 // GitLab — and anything else is reached with `?search=`.
 const BRANCH_LIST_LIMIT = 50;
+// How long a provider branch list is served from Redis.
+const BRANCH_CACHE_TTL_SECONDS = 120;
 
 interface ProviderIntegration {
   source: Provider;
@@ -94,6 +98,14 @@ interface CheckedProviderRepo {
   missingBranches: string[];
 }
 
+interface CachedBranchList {
+  defaultBranch: string;
+  branches: string[];
+  total: number;
+  truncated: boolean;
+  fetchedAt: string;
+}
+
 interface ProviderBranches {
   path: string;
   defaultBranch: string;
@@ -111,6 +123,7 @@ export class ReposService {
     private readonly gitlabApiService: GitlabApiService,
     private readonly configService: ConfigService,
     private readonly scanQueue: ScanQueueService,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
   ) {}
 
@@ -124,18 +137,13 @@ export class ReposService {
       organizationId,
       source,
     );
-    const result = await this.fetchProviderBranches(
-      integration,
+    return this.cachedBranchList(
+      organizationId,
+      source,
       providerRepoId,
-      { search },
+      search,
+      () => this.fetchProviderBranches(integration, providerRepoId, { search }),
     );
-    return new BranchListResponseDto({
-      defaultBranch: result.defaultBranch,
-      branches: result.branches,
-      total: result.total,
-      truncated: result.truncated,
-      fetchedAt: new Date(),
-    });
   }
 
   async getBranchesForRepo(
@@ -156,17 +164,53 @@ export class ReposService {
     }
     assertGithubAccess(repository.integration);
 
-    const result = await this.fetchProviderBranches(
-      repository.integration,
+    return this.cachedBranchList(
+      organizationId,
+      repository.integration.source,
       repository.externalId,
-      { knownPath: repository.path, search },
+      search,
+      () =>
+        this.fetchProviderBranches(
+          repository.integration,
+          repository.externalId,
+          { knownPath: repository.path, search },
+        ),
     );
+  }
+
+  // Checkpoint G: the branch picker asks the provider once per BRANCH_CACHE
+  // window per repository and search, not on every keystroke or reopen.
+  // Keyed by organization too — another org on the same GitLab instance
+  // must never read a list fetched with this org's token. Display only:
+  // connect and PUT scan-config check each branch live. Redis down = fetch
+  // from the provider, as before.
+  private async cachedBranchList(
+    organizationId: string,
+    source: Provider,
+    providerRepoId: string,
+    search: string | undefined,
+    fetch: () => Promise<ProviderBranches>,
+  ): Promise<BranchListResponseDto> {
+    const key = `branches:${organizationId}:${source}:${providerRepoId}:${encodeURIComponent(search?.trim() ?? '')}`;
+    const cached = await this.redis.get(key).catch(() => null);
+    let list = cached ? (JSON.parse(cached) as CachedBranchList) : null;
+    if (!list) {
+      const result = await fetch();
+      list = {
+        defaultBranch: result.defaultBranch,
+        branches: result.branches,
+        total: result.total,
+        truncated: result.truncated,
+        fetchedAt: new Date().toISOString(),
+      };
+      await this.redis
+        .set(key, JSON.stringify(list), 'EX', BRANCH_CACHE_TTL_SECONDS)
+        .catch(() => undefined);
+    }
+    const { fetchedAt, ...rest } = list;
     return new BranchListResponseDto({
-      defaultBranch: result.defaultBranch,
-      branches: result.branches,
-      total: result.total,
-      truncated: result.truncated,
-      fetchedAt: new Date(),
+      ...rest,
+      fetchedAt: new Date(fetchedAt),
     });
   }
 

@@ -8,6 +8,8 @@ import { ScansModule } from './modules/scans/scans.module';
 import { RulesModule } from './modules/rules/rules.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { HealthModule } from './modules/health/health.module';
+import { ReviewsModule } from './modules/reviews/reviews.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
 import { RedisModule } from './common/redis/redis.module';
@@ -25,6 +27,8 @@ import { RedisModule } from './common/redis/redis.module';
     SettingsModule,
     RulesModule,
     WebhooksModule,
+    HealthModule,
+    ReviewsModule,
     QueueModule,
   ],
   controllers: [],

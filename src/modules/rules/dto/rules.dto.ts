@@ -5,9 +5,8 @@ import {
   toApiRuleTier,
 } from '../../scans/dto/ai-scan-fields';
 
-// How a tier is checked: by static rules, by the AI review, both, or by the
-// CI status the code host reports.
-export type RuleTierEngine = 'static' | 'ai' | 'static+ai' | 'ci';
+// How a tier is checked: by static rules, by the AI review, or both.
+export type RuleTierEngine = 'static' | 'ai' | 'static+ai';
 
 export interface RuleTierDto {
   id: ApiRuleTier;
