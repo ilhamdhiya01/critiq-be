@@ -110,3 +110,88 @@ describe('GithubAppService.submitPullReview', () => {
     await expect(submit()).rejects.toMatchObject({ code, retryable });
   });
 });
+
+// v1.5.2: merging from Critiq as the App.
+describe('GithubAppService.mergePullRequest', () => {
+  beforeEach(() => requestMock.mockReset());
+
+  const merge = () =>
+    setup().mergePullRequest('1', 'acme', 'web', '12', {
+      sha: 'abc123',
+      method: 'squash',
+    });
+
+  it('merges pinned to the head with the chosen method', async () => {
+    requestMock.mockResolvedValue({ status: 200 });
+    await merge();
+    expect(requestMock).toHaveBeenCalledWith(
+      'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge',
+      expect.objectContaining({
+        pull_number: 12,
+        sha: 'abc123',
+        merge_method: 'squash',
+      }),
+    );
+  });
+
+  it.each([
+    [409, 'head_changed'],
+    [405, 'not_mergeable'],
+    [422, 'not_mergeable'],
+    [403, 'insufficient_permission'],
+    [502, 'provider_unreachable'],
+  ])('maps %i to %s', async (status, code) => {
+    requestMock.mockRejectedValue(
+      new GithubRequestError('Pull Request is not mergeable', status),
+    );
+    await expect(merge()).rejects.toMatchObject({ code });
+  });
+
+  // The merge already happened; a branch that cannot go stays.
+  it('reports a branch it could not delete without throwing', async () => {
+    requestMock.mockRejectedValue(
+      new GithubRequestError('Reference does not exist', 422),
+    );
+    await expect(
+      setup().deleteBranch('1', 'acme', 'web', 'feature'),
+    ).resolves.toBe(false);
+  });
+});
+
+// v1.5.2: comments as the App.
+describe('GithubAppService comments', () => {
+  beforeEach(() => requestMock.mockReset());
+
+  it('places a review comment on the line and side', async () => {
+    requestMock.mockResolvedValue({ data: { id: 800 } });
+    await expect(
+      setup().createReviewComment('1', 'acme', 'web', '12', {
+        body: 'nit',
+        commitId: 'abc',
+        path: 'a.ts',
+        line: 9,
+        side: 'RIGHT',
+      }),
+    ).resolves.toEqual({ id: 800 });
+    expect(requestMock).toHaveBeenCalledWith(
+      'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments',
+      expect.objectContaining({
+        commit_id: 'abc',
+        path: 'a.ts',
+        line: 9,
+        side: 'RIGHT',
+      }),
+    );
+  });
+
+  it.each([
+    [422, 'invalid_position', false],
+    [403, 'insufficient_permission', false],
+    [500, 'provider_unreachable', true],
+  ])('maps %i to %s', async (status, code, retryable) => {
+    requestMock.mockRejectedValue(new GithubRequestError('boom', status));
+    await expect(
+      setup().createIssueComment('1', 'acme', 'web', '12', 'hi'),
+    ).rejects.toMatchObject({ code, retryable });
+  });
+});

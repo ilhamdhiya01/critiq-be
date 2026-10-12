@@ -13,6 +13,7 @@ import {
 } from '../../generated/prisma/enums';
 import { ScanQueueService } from '../../queue/scan-queue.service';
 import { PullsService } from '../pulls/pulls.service';
+import { CommentIngestService } from '../comments/comment-ingest.service';
 import { WebhooksService } from './webhooks.service';
 
 // @nestjs/config v12 — and the provider SDKs reachable through
@@ -31,6 +32,9 @@ jest.mock('../../queue/scan-queue.service', () => ({
   ScanQueueService: class {},
 }));
 jest.mock('../pulls/pulls.service', () => ({ PullsService: class {} }));
+jest.mock('../comments/comment-ingest.service', () => ({
+  CommentIngestService: class {},
+}));
 
 const GITHUB_SECRET = 'github-app-webhook-secret';
 const GITLAB_SECRET = 'per-repo-gitlab-secret';
@@ -69,6 +73,7 @@ function setup() {
     del: jest.fn().mockResolvedValue(1),
   };
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const commentIngest = { ingest: jest.fn().mockResolvedValue('created') };
 
   prisma.repository.findFirst.mockResolvedValue(repository);
 
@@ -78,10 +83,18 @@ function setup() {
     configService as unknown as ConfigService,
     pullsService as unknown as PullsService,
     scanQueueService as unknown as ScanQueueService,
+    commentIngest as unknown as CommentIngestService,
     redis as unknown as Redis,
     logger as unknown as Logger,
   );
-  return { service, prisma, pullsService, scanQueueService, redis };
+  return {
+    service,
+    prisma,
+    pullsService,
+    scanQueueService,
+    redis,
+    commentIngest,
+  };
 }
 
 function githubPayload(overrides: { action?: string; baseRef?: string } = {}) {
@@ -492,4 +505,148 @@ describe('WebhooksService — CI events', () => {
       expect(prisma.repository.findFirst).not.toHaveBeenCalled();
     },
   );
+});
+
+// v1.5.2: comments written on the provider arrive as webhooks.
+describe('WebhooksService — comments', () => {
+  const issueComment = (overrides: Record<string, unknown> = {}) => ({
+    action: 'created',
+    repository: { id: 42 },
+    issue: { number: 7, pull_request: { url: 'x' } },
+    comment: {
+      id: 900,
+      body: 'Looks good',
+      user: { login: 'octo', avatar_url: 'https://a' },
+      created_at: '2026-10-12T05:00:00Z',
+    },
+    ...overrides,
+  });
+
+  it('records a GitHub PR conversation comment', async () => {
+    const { service, commentIngest } = setup();
+    const { rawBody, headers } = signedGithub(issueComment(), {
+      'x-github-event': 'issue_comment',
+    });
+
+    const outcome = await service.handleGithubEvent(rawBody, headers);
+
+    expect(outcome).toEqual({ kind: 'comment_recorded' });
+    expect(commentIngest.ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositoryExternalId: '42',
+        pullExternalId: '7',
+        providerCommentId: 'github-issue:900',
+        author: 'octo',
+      }),
+    );
+  });
+
+  it('ignores a comment on an issue that is not a PR', async () => {
+    const { service, commentIngest } = setup();
+    const { rawBody, headers } = signedGithub(
+      issueComment({ issue: { number: 7 } }),
+      { 'x-github-event': 'issue_comment' },
+    );
+    await expect(service.handleGithubEvent(rawBody, headers)).resolves.toEqual({
+      kind: 'skipped',
+      reason: 'unsupported_event',
+    });
+    expect(commentIngest.ingest).not.toHaveBeenCalled();
+  });
+
+  it('records a GitHub review comment reply in its thread', async () => {
+    const { service, commentIngest } = setup();
+    const { rawBody, headers } = signedGithub(
+      {
+        action: 'created',
+        repository: { id: 42 },
+        pull_request: { number: 7 },
+        comment: {
+          id: 901,
+          body: 'Fixed',
+          path: 'src/a.ts',
+          line: 12,
+          side: 'RIGHT',
+          commit_id: 'abc123',
+          in_reply_to_id: 800,
+          user: { login: 'octo' },
+          created_at: '2026-10-12T05:00:00Z',
+        },
+      },
+      { 'x-github-event': 'pull_request_review_comment' },
+    );
+    await service.handleGithubEvent(rawBody, headers);
+    expect(commentIngest.ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerCommentId: 'github-review:901',
+        providerThreadKey: 'github-review:800',
+        path: 'src/a.ts',
+        line: 12,
+      }),
+    );
+  });
+
+  it('answers a redelivered comment as a duplicate', async () => {
+    const { service, redis, commentIngest } = setup();
+    redis.set.mockResolvedValue(null);
+    const { rawBody, headers } = signedGithub(issueComment(), {
+      'x-github-event': 'issue_comment',
+    });
+    await expect(service.handleGithubEvent(rawBody, headers)).resolves.toEqual({
+      kind: 'duplicate',
+    });
+    expect(commentIngest.ingest).not.toHaveBeenCalled();
+  });
+
+  it('skips a comment on a PR Critiq does not track', async () => {
+    const { service, commentIngest } = setup();
+    commentIngest.ingest.mockResolvedValue('ignored');
+    const { rawBody, headers } = signedGithub(issueComment(), {
+      'x-github-event': 'issue_comment',
+    });
+    await expect(service.handleGithubEvent(rawBody, headers)).resolves.toEqual({
+      kind: 'skipped',
+      reason: 'untracked_pull',
+    });
+  });
+
+  it('records a GitLab note once the token checks out', async () => {
+    const { service, commentIngest } = setup();
+    const { rawBody, headers } = gitlabRequest({
+      object_kind: 'note',
+      project: { id: 99 },
+      user: { username: 'gitty' },
+      merge_request: { iid: 3 },
+      object_attributes: {
+        id: 55,
+        note: 'nit',
+        noteable_type: 'MergeRequest',
+        discussion_id: 'd1',
+        created_at: '2026-10-12T05:00:00Z',
+      },
+    });
+
+    await expect(service.handleGitlabEvent(rawBody, headers)).resolves.toEqual({
+      kind: 'comment_recorded',
+    });
+    expect(commentIngest.ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerCommentId: 'gitlab-note:55',
+        providerThreadKey: 'gitlab-discussion:d1',
+        pullExternalId: '3',
+      }),
+    );
+  });
+
+  it('rejects a GitLab note with a wrong token', async () => {
+    const { service, commentIngest } = setup();
+    const { rawBody, headers } = gitlabRequest(
+      { object_kind: 'note', project: { id: 99 } },
+      'wrong-token',
+    );
+    await expect(service.handleGitlabEvent(rawBody, headers)).resolves.toEqual({
+      kind: 'rejected',
+    });
+    expect(commentIngest.ingest).not.toHaveBeenCalled();
+  });
 });

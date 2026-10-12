@@ -18,7 +18,7 @@ function axiosError(status: number, data: unknown = {}): AxiosError {
 }
 
 function setup() {
-  const http = { get: jest.fn(), post: jest.fn() };
+  const http = { get: jest.fn(), post: jest.fn(), put: jest.fn() };
   const service = new GitlabApiService(http as unknown as HttpService);
   const lastParams = () =>
     (
@@ -280,5 +280,103 @@ describe('GitlabApiService review calls', () => {
     await expect(
       service.unapproveMergeRequest('https://gitlab.com', 'token', '42', '7'),
     ).resolves.toBeUndefined();
+  });
+});
+
+// v1.5.2: merging from Critiq as the org token's user.
+describe('GitlabApiService.mergeMergeRequest', () => {
+  const merge = (service: GitlabApiService) =>
+    service.mergeMergeRequest('https://gitlab.com', 'token', '42', '7', {
+      sha: 'abc123',
+      squash: true,
+      removeSourceBranch: true,
+    });
+
+  it('merges pinned to the sha with the chosen flags', async () => {
+    const { http, service } = setup();
+    http.put.mockReturnValue(of({ data: {} }));
+    await merge(service);
+    expect(http.put).toHaveBeenCalledWith(
+      'https://gitlab.com/api/v4/projects/42/merge_requests/7/merge',
+      { sha: 'abc123', squash: true, should_remove_source_branch: true },
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    [409, 'head_changed'],
+    [405, 'not_mergeable'],
+    [406, 'not_mergeable'],
+    [401, 'insufficient_permission'],
+    [500, 'provider_unreachable'],
+  ])('maps %i to %s', async (status, code) => {
+    const { http, service } = setup();
+    http.put.mockReturnValue(throwError(() => axiosError(status)));
+    await expect(merge(service)).rejects.toMatchObject({ code });
+  });
+});
+
+// v1.5.2: comments as the org token's user.
+describe('GitlabApiService comments', () => {
+  const position = {
+    base_sha: 'b',
+    start_sha: 's',
+    head_sha: 'h',
+    position_type: 'text' as const,
+    old_path: 'a.ts',
+    new_path: 'a.ts',
+    new_line: 9,
+  };
+
+  it('starts an inline discussion with its position', async () => {
+    const { http, service } = setup();
+    http.post.mockReturnValue(of({ data: { id: 'd1', notes: [{ id: 55 }] } }));
+    await expect(
+      service.createDiscussion(
+        'https://gitlab.com',
+        'token',
+        '42',
+        '7',
+        'nit',
+        position,
+      ),
+    ).resolves.toEqual({ discussionId: 'd1', noteId: 55 });
+    expect(http.post).toHaveBeenCalledWith(
+      'https://gitlab.com/api/v4/projects/42/merge_requests/7/discussions',
+      { body: 'nit', position },
+      expect.anything(),
+    );
+  });
+
+  it('maps a position GitLab cannot place to invalid_position', async () => {
+    const { http, service } = setup();
+    http.post.mockReturnValue(throwError(() => axiosError(400)));
+    await expect(
+      service.createDiscussion(
+        'https://gitlab.com',
+        'token',
+        '42',
+        '7',
+        'nit',
+        position,
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_position', retryable: false });
+  });
+
+  it('turns on note events for an existing hook', async () => {
+    const { http, service } = setup();
+    http.put.mockReturnValue(of({ data: {} }));
+    await service.enableNoteEvents(
+      'https://gitlab.com',
+      'token',
+      '42',
+      5,
+      'https://be/hook',
+    );
+    expect(http.put).toHaveBeenCalledWith(
+      'https://gitlab.com/api/v4/projects/42/hooks/5',
+      expect.objectContaining({ note_events: true, url: 'https://be/hook' }),
+      expect.anything(),
+    );
   });
 });

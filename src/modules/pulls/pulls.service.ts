@@ -58,6 +58,7 @@ import {
   ReviewDto,
   toReviewDto,
 } from '../reviews/dto/review.dto';
+import { loadMergeBlockers } from '../reviews/merge-blockers';
 
 // What PR lists show of the latest scan — selected, not included, so a list
 // never drags each scan's full row along.
@@ -312,6 +313,7 @@ export class PullsService {
     ) {
       throw new NotFoundException('Pull request not found.');
     }
+    const mergeBlockers = await loadMergeBlockers(this.prisma, pull);
 
     return new PullRequestDetailDto({
       id: pull.id,
@@ -327,6 +329,7 @@ export class PullsService {
       state: pull.state,
       effectivePolicy: pull.effectivePolicy,
       latestReview: this.toLatestReviewDto(pull),
+      merge: { allowed: mergeBlockers.length === 0, blockers: mergeBlockers },
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
             ...toApiAiScanFields(pull.latestScan),

@@ -25,6 +25,7 @@ model User {
   aiConsentOrgs         Organization[] @relation("OrganizationAiConsentBy")
   updatedAiCredentials  AiCredential[] @relation("AiCredentialUpdatedBy")
   pullReviews           PullReview[]   @relation("PullReviewReviewer")
+  pullComments          PullComment[]  @relation("PullCommentAuthor")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -52,6 +53,7 @@ model Organization {
   aiUsageDaily       AiUsageDaily[]
   aiSummaries        AiSummary[]
   pullReviews        PullReview[]
+  pullComments       PullComment[]
 
   // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
   // live per provider in ai_credentials so switching back and forth never
@@ -444,6 +446,7 @@ model PullRequest {
   // the same PR/MR must upsert the same row, never duplicate it.
   findings Finding[]
   reviews  PullReview[]
+  comments PullComment[]
 
   @@unique([repositoryId, externalId])
   @@index([organizationId])
@@ -806,6 +809,75 @@ enum ReviewDecision {
 }
 
 enum ReviewSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+}
+
+// A comment on a PR (v1.5.2), synced both ways with GitHub/GitLab. A thread
+// is a root comment (parentId null) and its replies (parentId = the root).
+// Written in Critiq → sent by the comment-sync queue (syncStatus); written on
+// the provider → arrives by webhook (origin GITHUB/GITLAB, no syncStatus).
+model PullComment {
+  id                      String             @id @default(cuid())
+  organizationId          String
+  pullId                  String
+  origin                  CommentOrigin
+  kind                    CommentKind
+  parentId                String?
+  // A Critiq user (origin CRITIQ); null once that account is deleted.
+  authorId                String?
+  // The provider's own author (origin GITHUB/GITLAB).
+  providerAuthor          String?
+  providerAuthorAvatarUrl String?
+  body                    String             @db.Text
+  // INLINE only: where in the diff, and on which commit.
+  path                    String?
+  line                    Int?
+  side                    DiffSide?
+  headSha                 String?
+  // The provider's ids, prefixed by kind (`github-issue:`, `github-review:`,
+  // `gitlab-note:`) — GitHub's issue and review comment ids are separate
+  // sequences. Unique per PR: a webhook for a comment already here updates it.
+  providerCommentId       String?
+  // GitHub: the root review comment; GitLab: the discussion.
+  providerThreadId        String?
+  syncStatus              CommentSyncStatus?
+  syncError               String?
+  editedAt                DateTime?
+  deletedAt               DateTime?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pullRequest  PullRequest   @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  author       User?         @relation("PullCommentAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  parent       PullComment?  @relation("PullCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies      PullComment[] @relation("PullCommentThread")
+
+  @@unique([pullId, providerCommentId])
+  @@index([organizationId, pullId, createdAt])
+  @@index([pullId, providerThreadId])
+  @@map("pull_comments")
+}
+
+enum CommentOrigin {
+  CRITIQ
+  GITHUB
+  GITLAB
+}
+
+enum CommentKind {
+  GENERAL
+  INLINE
+}
+
+enum DiffSide {
+  NEW
+  OLD
+}
+
+enum CommentSyncStatus {
   PENDING
   SYNCED
   FAILED

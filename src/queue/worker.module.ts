@@ -7,6 +7,7 @@ import { IntegrationsModule } from '../modules/integrations/integrations.module'
 import { PullsModule } from '../modules/pulls/pulls.module';
 import { AiScanProcessor } from './ai-scan.processor';
 import { QueueModule } from './queue.module';
+import { CommentSyncProcessor } from './comment-sync.processor';
 import { ReviewSyncProcessor } from './review-sync.processor';
 import { ScanProcessor } from './scan.processor';
 
@@ -30,6 +31,11 @@ import { ScanProcessor } from './scan.processor';
     AiModule,
     AiScanModule,
   ],
-  providers: [ScanProcessor, AiScanProcessor, ReviewSyncProcessor],
+  providers: [
+    ScanProcessor,
+    AiScanProcessor,
+    ReviewSyncProcessor,
+    CommentSyncProcessor,
+  ],
 })
 export class WorkerModule {}

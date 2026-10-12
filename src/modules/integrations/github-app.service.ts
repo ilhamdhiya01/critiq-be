@@ -9,6 +9,8 @@ import { ConfigService } from '@nestjs/config';
 import { createAppAuth } from '@octokit/auth-app';
 import { request } from '@octokit/request';
 import { RequestError } from '@octokit/request-error';
+import { ProviderCommentError } from './provider-comment-error';
+import { ProviderMergeError } from './provider-merge-error';
 import { ProviderReviewError } from './provider-review-error';
 
 export interface GithubInstallationAccount {
@@ -53,6 +55,8 @@ const BRANCH_HARD_CAP = 500;
 const PR_FILES_PAGE_SIZE = 100;
 const PR_FILES_HARD_CAP = 500;
 const REQUEST_TIMEOUT_MS = 8000;
+// A merge can take GitHub a while on a large repository.
+const MERGE_TIMEOUT_MS = 15_000;
 
 // Mints and caches GitHub App installation access tokens, and wraps the
 // small set of GitHub API calls this integration needs. Deliberately
@@ -161,6 +165,150 @@ export class GithubAppService {
       });
     } catch (error) {
       throw toReviewError(error);
+    }
+  }
+
+  // Merges a pull request as the App (v1.5.2), pinned to `sha`. Needs the
+  // App's "Contents: write". GitHub answers 405 when it is not mergeable
+  // (conflicts, required checks or reviews, a method the repo forbids) and
+  // 409 when `sha` is no longer the head.
+  async mergePullRequest(
+    installationId: string,
+    owner: string,
+    repo: string,
+    pullNumber: string,
+    merge: { sha: string; method: 'merge' | 'squash' },
+  ): Promise<void> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      await request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge', {
+        owner,
+        repo,
+        pull_number: Number(pullNumber),
+        sha: merge.sha,
+        merge_method: merge.method,
+        headers: { authorization: `bearer ${token}` },
+        request: { signal: AbortSignal.timeout(MERGE_TIMEOUT_MS) },
+      });
+    } catch (error) {
+      throw toMergeError(error);
+    }
+  }
+
+  // Best effort after a merge: a branch from a fork, a protected one or one
+  // already deleted is left alone — the merge itself has succeeded.
+  async deleteBranch(
+    installationId: string,
+    owner: string,
+    repo: string,
+    branch: string,
+  ): Promise<boolean> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      await request('DELETE /repos/{owner}/{repo}/git/refs/{ref}', {
+        owner,
+        repo,
+        ref: `heads/${branch}`,
+        headers: { authorization: `bearer ${token}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // A comment in the PR's conversation (v1.5.2), as the App.
+  async createIssueComment(
+    installationId: string,
+    owner: string,
+    repo: string,
+    pullNumber: string,
+    body: string,
+  ): Promise<{ id: number }> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      const response = await request(
+        'POST /repos/{owner}/{repo}/issues/{issue_number}/comments',
+        {
+          owner,
+          repo,
+          issue_number: Number(pullNumber),
+          body,
+          headers: { authorization: `bearer ${token}` },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        },
+      );
+      return { id: (response.data as { id: number }).id };
+    } catch (error) {
+      throw toCommentError(error);
+    }
+  }
+
+  // A comment on a line of the diff, starting a thread. `side` RIGHT is the
+  // new file, LEFT the old one; GitHub answers 422 for a line outside the
+  // diff of `commitId`.
+  async createReviewComment(
+    installationId: string,
+    owner: string,
+    repo: string,
+    pullNumber: string,
+    comment: {
+      body: string;
+      commitId: string;
+      path: string;
+      line: number;
+      side: 'LEFT' | 'RIGHT';
+    },
+  ): Promise<{ id: number }> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      const response = await request(
+        'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments',
+        {
+          owner,
+          repo,
+          pull_number: Number(pullNumber),
+          body: comment.body,
+          commit_id: comment.commitId,
+          path: comment.path,
+          line: comment.line,
+          side: comment.side,
+          headers: { authorization: `bearer ${token}` },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        },
+      );
+      return { id: (response.data as { id: number }).id };
+    } catch (error) {
+      throw toCommentError(error);
+    }
+  }
+
+  async replyToReviewComment(
+    installationId: string,
+    owner: string,
+    repo: string,
+    pullNumber: string,
+    rootCommentId: number,
+    body: string,
+  ): Promise<{ id: number }> {
+    try {
+      const token = await this.getInstallationToken(installationId);
+      const response = await request(
+        'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+        {
+          owner,
+          repo,
+          pull_number: Number(pullNumber),
+          comment_id: rootCommentId,
+          body,
+          headers: { authorization: `bearer ${token}` },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        },
+      );
+      return { id: (response.data as { id: number }).id };
+    } catch (error) {
+      throw toCommentError(error);
     }
   }
 
@@ -511,6 +659,70 @@ function toReviewError(error: unknown): ProviderReviewError {
       : new ProviderReviewError('provider_unreachable', true);
   }
   return new ProviderReviewError(
+    'unknown',
+    true,
+    error instanceof Error ? error.message.slice(0, 200) : undefined,
+  );
+}
+
+// GitHub's answer to a merge, as a ProviderMergeError.
+function toMergeError(error: unknown): ProviderMergeError {
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return new ProviderMergeError('provider_unreachable');
+  }
+  if (error instanceof RequestError) {
+    const detail = error.message.slice(0, 300);
+    if (error.status === 409) {
+      return new ProviderMergeError('head_changed', detail);
+    }
+    if (error.status === 405 || error.status === 422) {
+      return new ProviderMergeError('not_mergeable', detail);
+    }
+    if ([401, 403, 404].includes(error.status)) {
+      return new ProviderMergeError('insufficient_permission', detail);
+    }
+    return new ProviderMergeError('provider_unreachable', detail);
+  }
+  if (error instanceof HttpException) {
+    const response = error.getResponse() as { message?: unknown };
+    return new ProviderMergeError(
+      response.message === 'installation_invalid'
+        ? 'insufficient_permission'
+        : 'provider_unreachable',
+    );
+  }
+  return new ProviderMergeError(
+    'provider_unreachable',
+    error instanceof Error ? error.message.slice(0, 300) : undefined,
+  );
+}
+
+// GitHub's answer to a comment, as a ProviderCommentError.
+function toCommentError(error: unknown): ProviderCommentError {
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return new ProviderCommentError('provider_unreachable', true);
+  }
+  if (error instanceof RequestError) {
+    const detail = error.message.slice(0, 200);
+    if ([401, 403, 404].includes(error.status)) {
+      return new ProviderCommentError('insufficient_permission', false, detail);
+    }
+    // e.g. "pull_request_review_thread.line must be part of the diff".
+    if (error.status === 422) {
+      return new ProviderCommentError('invalid_position', false, detail);
+    }
+    if (error.status === 429 || error.status >= 500) {
+      return new ProviderCommentError('provider_unreachable', true, detail);
+    }
+    return new ProviderCommentError('unknown', false, detail);
+  }
+  if (error instanceof HttpException) {
+    const response = error.getResponse() as { message?: unknown };
+    return response.message === 'installation_invalid'
+      ? new ProviderCommentError('insufficient_permission', false)
+      : new ProviderCommentError('provider_unreachable', true);
+  }
+  return new ProviderCommentError(
     'unknown',
     true,
     error instanceof Error ? error.message.slice(0, 200) : undefined,

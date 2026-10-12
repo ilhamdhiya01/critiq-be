@@ -73,6 +73,8 @@ function setup(pull: Record<string, unknown> | null = pullRow()) {
           Promise.resolve(reviewRow(args.data)),
       ),
       findMany: jest.fn().mockResolvedValue([]),
+      // The reviewer's own latest decision on this commit: none by default.
+      findFirst: jest.fn().mockResolvedValue(null),
       findUnique: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -264,6 +266,39 @@ describe('ReviewsService.submit', () => {
         }),
       ).resolves.toMatchObject({ decision: 'request_changes' });
     });
+  });
+
+  // A second identical approval would only add a duplicate bot review.
+  it('409s repeating my latest decision on the same commit', async () => {
+    const { service, prisma, queue } = setup();
+    prisma.pullReview.findFirst.mockResolvedValue({
+      decision: ReviewDecision.APPROVE,
+    });
+    await expect(
+      service.submit(ORG, REPO, 'pull_1', 'u_1', approve()),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { message: 'already_reviewed' },
+    });
+    expect(prisma.pullReview.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { pullId: 'pull_1', reviewerId: 'u_1', headSha: HEAD },
+        orderBy: { createdAt: 'desc' },
+      }),
+    );
+    expect(prisma.pullReview.create).not.toHaveBeenCalled();
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  // Changing one's mind on the same commit stays possible.
+  it('accepts the other decision after mine', async () => {
+    const { service, prisma } = setup();
+    prisma.pullReview.findFirst.mockResolvedValue({
+      decision: ReviewDecision.REQUEST_CHANGES,
+    });
+    await expect(
+      service.submit(ORG, REPO, 'pull_1', 'u_1', approve()),
+    ).resolves.toMatchObject({ decision: 'approve' });
   });
 
   // The decision is kept even when Redis is down; its copy is failed.
