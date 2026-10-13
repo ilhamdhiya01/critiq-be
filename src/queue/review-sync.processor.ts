@@ -5,6 +5,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { EncryptionService } from '../common/encryption/encryption.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import {
   IntegrationState,
   Provider,
@@ -59,6 +60,7 @@ export class ReviewSyncProcessor extends WorkerHost {
     private readonly githubAppService: GithubAppService,
     private readonly gitlabApiService: GitlabApiService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {
     super();
   }
@@ -95,10 +97,13 @@ export class ReviewSyncProcessor extends WorkerHost {
         });
         throw failure;
       }
-      await this.prisma.pullReview.updateMany({
+      const { count } = await this.prisma.pullReview.updateMany({
         where: { id: review.id, syncStatus: ReviewSyncStatus.PENDING },
         data: { syncStatus: ReviewSyncStatus.FAILED, syncError: failure.code },
       });
+      if (count > 0) {
+        await this.realtime.reviewChanged(review.id);
+      }
       this.logger.warn('review.sync_failed', {
         ...log,
         code: failure.code,
@@ -107,7 +112,7 @@ export class ReviewSyncProcessor extends WorkerHost {
       return;
     }
 
-    await this.prisma.pullReview.updateMany({
+    const { count } = await this.prisma.pullReview.updateMany({
       where: { id: review.id, syncStatus: ReviewSyncStatus.PENDING },
       data: {
         syncStatus: ReviewSyncStatus.SYNCED,
@@ -115,6 +120,9 @@ export class ReviewSyncProcessor extends WorkerHost {
         syncedAt: new Date(),
       },
     });
+    if (count > 0) {
+      await this.realtime.reviewChanged(review.id);
+    }
     this.logger.info('review.synced', log);
   }
 

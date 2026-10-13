@@ -205,6 +205,7 @@ REST + JSON, prefix `/api/v1`, auth via Bearer token (backed by an httpOnly sess
 | Settings            | `GET/PUT .../settings/ai` (Admin: provider, model, base URL, per-provider API key — write-only, consent, locale, daily token budget), `POST .../settings/ai/test` (test connection, 5/hour; always `200`, outcome in `ok` + `error.code`; a reasoning model passes with `warning.code: "reasoning_model"`), `GET .../settings/ai/models?provider=` / `POST .../settings/ai/models` (Admin: models from the provider itself with the stored / a typed key, newest first, `recommended` flag; `source: "catalog"` + `warning` when the provider can't be asked; GET cached 1 h, preview 20/hour); planned: `GET/PUT .../settings/notifications`                       |
 | Integrations        | `GET .../integrations`, `POST .../integrations/gitlab` (`{"instance_url", "token"}` — verified against the GitLab API, idempotent: calling again replaces the token), `DELETE .../integrations/gitlab`, `DELETE .../integrations/github` (Admin — uninstalls the App on GitHub, then removes the integration with its repositories and scan history; 502 `github_unreachable` removes nothing), `GET .../integrations/gitlab/health`, `GET .../integrations/gitlab/candidates`                                                                                                                                                                                                                                                                                                             |
 | Search              | `GET .../search?q=` (powers frontend `⌘K`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Realtime            | `GET .../events` — Server-Sent Events, one stream per tab for the active org, all roles. Events are invalidation hints only (`scan.updated`, `pull.updated`, `review.updated`, `comment.updated`, `integration.updated`, `repo.updated`, `settings.updated` — ids and statuses, never content); the client refetches over REST. No replay: refetch everything after a reconnect. Not in the PRD — see `CLAUDE.md` "Realtime (SSE)" |
 
 `GET .../members` + `PUT/DELETE .../members/:userId` replace the old
 `GET /team` / `PUT /team/:id/role` — those are removed as of PRD v1.2.
@@ -241,6 +242,7 @@ src/
     guards/
     interceptors/
     pipes/
+    realtime/    # SSE: publisher (app + worker, Redis Pub/Sub), hub, events endpoint
   config/
   queue/           # QueueModule, ScanQueueService, WorkerModule, ScanProcessor
     rules/         # static rule definitions + fixtures, path filter, suppression

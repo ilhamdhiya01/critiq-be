@@ -12,6 +12,11 @@ import { ScanQueueService } from '../../queue/scan-queue.service';
 import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { ReposService } from './repos.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only packages reachable through the service's imports.
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -112,6 +117,12 @@ function setup() {
     get: jest.fn().mockResolvedValue(null),
     set: jest.fn().mockResolvedValue('OK'),
   };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new ReposService(
     prisma as unknown as PrismaService,
     { decrypt: () => 'token' } as unknown as EncryptionService,
@@ -121,6 +132,7 @@ function setup() {
     {} as ScanQueueService,
     redis as unknown as Redis,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
   jest
     .spyOn(
@@ -128,7 +140,7 @@ function setup() {
       'installWebhook',
     )
     .mockResolvedValue({ status: 'installed' });
-  return { service, gitlab, tx, prisma, logger, redis };
+  return { realtime, service, gitlab, tx, prisma, logger, redis };
 }
 
 const branches = (...list: string[]) => list.map((name) => ({ name }));

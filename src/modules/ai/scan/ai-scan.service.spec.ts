@@ -17,6 +17,11 @@ import { AiJobPayload } from '../../../queue/ai-queue.constants';
 import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import { AI_PROMPT_VERSION } from './ai-prompt.constants';
 import { aiCacheKey, AiScanService } from './ai-scan.service';
+import { RealtimePublisher } from '../../../common/realtime/realtime.publisher';
+
+jest.mock('../../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only packages this CommonJS Jest setup cannot load.
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -110,14 +115,21 @@ function setup(scan = scanRow()) {
     getOrThrow: (key: string) => CONFIG[key],
     get: (key: string) => CONFIG[key],
   };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new AiScanService(
     prisma as unknown as PrismaService,
     config as unknown as ConfigService,
     queue as unknown as Queue<AiJobPayload>,
     redis as unknown as Redis,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, tx, queue, redis, logger };
+  return { realtime, service, prisma, tx, queue, redis, logger };
 }
 
 function statusWritten(prisma: ReturnType<typeof setup>['prisma']) {
@@ -201,7 +213,7 @@ describe('AiScanService.maybeEnqueue', () => {
 
   // Acceptance 2.
   it('skips Manual-only branches without touching the provider', async () => {
-    const { service, prisma, queue } = setup(
+    const { service, prisma, queue, realtime } = setup(
       scanRow({ pullRequest: { effectivePolicy: ReviewPolicy.MANUAL_ONLY } }),
     );
     await expect(service.maybeEnqueue('scan_2')).resolves.toBe(
@@ -209,6 +221,8 @@ describe('AiScanService.maybeEnqueue', () => {
     );
     expect(statusWritten(prisma)).toEqual([AiScanStatus.SKIPPED_MANUAL_MODE]);
     expect(queue.add).not.toHaveBeenCalled();
+    // The decision reaches open tabs (it is also the static scan's "done").
+    expect(realtime.scanChanged).toHaveBeenCalledWith('scan_2');
   });
 
   it('reports not_configured without a provider or key', async () => {

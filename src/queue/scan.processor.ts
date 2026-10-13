@@ -6,6 +6,7 @@ import Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../common/redis/redis.constants';
 import {
   AiScanStatus,
@@ -84,6 +85,7 @@ export class ScanProcessor
     private readonly configService: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {
     super();
   }
@@ -124,6 +126,7 @@ export class ScanProcessor
       this.logger.info('scan.skipped_not_runnable', log);
       return;
     }
+    await this.realtime.scanChanged(scanId);
 
     // 2. Fetch the diff this scan reads: the whole PR (FULL), or only what
     // changed since the base scan's head (INCREMENTAL, v1.5.1 langkah 3).
@@ -435,6 +438,7 @@ export class ScanProcessor
     // than via a `scan.done` event (no EventEmitter yet; the quality-gate
     // check of v1.5.3 is the next consumer). Its outcome lands on the scan's
     // ai* columns; a failure here must never fail the static scan.
+    // maybeEnqueue also publishes the realtime scan.updated for DONE.
     let aiStatus: AiScanStatus | null = null;
     try {
       aiStatus = await this.aiScanService.maybeEnqueue(scanId);
@@ -528,6 +532,7 @@ export class ScanProcessor
       if (!finalized) {
         return;
       }
+      await this.realtime.scanChanged(scanId);
 
       this.logger.error('scan.failed', { ...log, errorCode });
       await this.notifyScanFailed(log, errorCode);

@@ -11,6 +11,7 @@ import type Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../../common/redis/redis.constants';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Prisma } from '../../generated/prisma/client';
@@ -125,6 +126,7 @@ export class ReposService {
     private readonly scanQueue: ScanQueueService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async getBranchesForCandidate(
@@ -340,6 +342,12 @@ export class ReposService {
       }
       return config;
     });
+    await this.realtime.publish({
+      type: 'repo.updated',
+      orgId: organizationId,
+      repoId: repositoryId,
+      change: 'scan_config_updated',
+    });
 
     // TODO(audit log model): persisted row once the table exists.
     this.logger.info('audit.repo.scan_config_updated', {
@@ -546,6 +554,12 @@ export class ReposService {
         });
 
         const webhook = await this.installWebhook(created.id, integration);
+        await this.realtime.publish({
+          type: 'repo.updated',
+          orgId: organizationId,
+          repoId: created.id,
+          change: 'connected',
+        });
 
         // TODO Fase 4: record an AuditLog entry (repo.connected) here.
         items.push({

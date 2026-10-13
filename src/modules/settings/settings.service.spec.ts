@@ -8,6 +8,11 @@ import { AiError } from '../ai/ai-error';
 import { AiProviderFactory } from '../ai/ai-provider.factory';
 import { AiProvider } from '../ai/ai-provider.interface';
 import { SettingsService } from './settings.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only / heavy modules this CommonJS Jest setup cannot load; every
 // collaborator is a stub below (same pattern as webhooks.service.spec.ts).
@@ -147,14 +152,22 @@ function setup() {
   };
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new SettingsService(
     prisma as unknown as PrismaService,
     encryption,
     factory as unknown as AiProviderFactory,
     rateLimiter as unknown as RateLimiterService,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
   return {
+    realtime,
     service,
     prisma,
     org,

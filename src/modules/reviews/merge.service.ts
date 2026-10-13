@@ -11,6 +11,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import {
   IntegrationState,
   Provider,
@@ -46,6 +47,7 @@ export class MergeService {
     private readonly gitlabApiService: GitlabApiService,
     private readonly scanQueue: ScanQueueService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async merge(
@@ -168,6 +170,14 @@ export class MergeService {
       data: { state: PullRequestState.MERGED },
     });
     await this.scanQueue.cancelPending(pullId);
+    await this.realtime.publish({
+      type: 'pull.updated',
+      orgId: organizationId,
+      repoId: repositoryId,
+      pullId,
+      state: PullRequestState.MERGED,
+      headChanged: false,
+    });
 
     // TODO(audit log model): persisted row once the table exists.
     this.logger.info('audit.pull.merged', {

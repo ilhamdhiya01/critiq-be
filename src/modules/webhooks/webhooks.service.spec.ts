@@ -15,6 +15,11 @@ import { ScanQueueService } from '../../queue/scan-queue.service';
 import { PullsService } from '../pulls/pulls.service';
 import { CommentIngestService } from '../comments/comment-ingest.service';
 import { WebhooksService } from './webhooks.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // @nestjs/config v12 — and the provider SDKs reachable through
 // PullsService/ScanQueueService (@nestjs/bullmq, @nestjs/axios, @octokit/*)
@@ -49,7 +54,10 @@ const repository = {
 function setup() {
   const prisma = {
     repository: { findFirst: jest.fn() },
-    integration: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    integration: {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findFirst: jest.fn().mockResolvedValue({ organizationId: 'org_1' }),
+    },
   };
   const encryptionService = { decrypt: jest.fn(() => GITLAB_SECRET) };
   const configService = { getOrThrow: jest.fn(() => GITHUB_SECRET) };
@@ -77,6 +85,12 @@ function setup() {
 
   prisma.repository.findFirst.mockResolvedValue(repository);
 
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new WebhooksService(
     prisma as unknown as PrismaService,
     encryptionService as unknown as EncryptionService,
@@ -86,8 +100,10 @@ function setup() {
     commentIngest as unknown as CommentIngestService,
     redis as unknown as Redis,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
   return {
+    realtime,
     service,
     prisma,
     pullsService,
@@ -321,7 +337,7 @@ describe('WebhooksService — GitHub installation events', () => {
     ['deleted', IntegrationState.UNINSTALLED],
     ['suspend', IntegrationState.SUSPENDED],
   ])('marks the integration on %s', async (action, state) => {
-    const { service, prisma } = setup();
+    const { service, prisma, realtime } = setup();
     const { rawBody, headers } = installationEvent(action);
 
     const outcome = await service.handleGithubEvent(rawBody, headers);
@@ -330,6 +346,13 @@ describe('WebhooksService — GitHub installation events', () => {
     expect(prisma.integration.updateMany).toHaveBeenCalledWith({
       where: { source: Provider.GITHUB, installationId: '169478542' },
       data: { state },
+    });
+    // Settings shows the new state without a reload.
+    expect(realtime.publish).toHaveBeenCalledWith({
+      type: 'integration.updated',
+      orgId: 'org_1',
+      source: Provider.GITHUB,
+      state,
     });
   });
 
@@ -354,7 +377,7 @@ describe('WebhooksService — GitHub installation events', () => {
   // Disconnecting from Critiq deletes the row first; GitHub then reports
   // the uninstall for an installation Critiq no longer knows.
   it('skips (200) an installation Critiq does not know', async () => {
-    const { service, prisma } = setup();
+    const { service, prisma, realtime } = setup();
     prisma.integration.updateMany.mockResolvedValue({ count: 0 });
     const { rawBody, headers } = installationEvent('deleted');
 
@@ -364,6 +387,7 @@ describe('WebhooksService — GitHub installation events', () => {
       kind: 'skipped',
       reason: 'unknown_installation',
     });
+    expect(realtime.publish).not.toHaveBeenCalled();
   });
 
   // `created` is handled by the install callback, which knows the org.

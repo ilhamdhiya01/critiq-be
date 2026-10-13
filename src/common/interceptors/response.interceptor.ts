@@ -4,6 +4,7 @@ import {
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
+import { SSE_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
@@ -17,7 +18,9 @@ const DEFAULT_MESSAGE = 'Success';
 // callers get one consistent envelope regardless of outcome. Controllers
 // keep returning plain values/DTOs; only endpoints using @Res() for manual
 // redirects (OAuth callbacks) bypass this entirely, since there's no return
-// value for the interceptor to touch in that case.
+// value for the interceptor to touch in that case. Server-Sent Events
+// routes (@Sse) pass through too: each emitted value is one SSE frame, and
+// wrapping it would turn the frame's `type` into part of the data.
 @Injectable()
 export class ResponseInterceptor<T> implements NestInterceptor<
   T,
@@ -29,6 +32,9 @@ export class ResponseInterceptor<T> implements NestInterceptor<
     context: ExecutionContext,
     next: CallHandler<T>,
   ): Observable<WebResponse<T>> {
+    if (this.reflector.get<boolean>(SSE_METADATA, context.getHandler())) {
+      return next.handle() as unknown as Observable<WebResponse<T>>;
+    }
     const message =
       this.reflector.getAllAndOverride<string>(RESPONSE_MESSAGE_KEY, [
         context.getHandler(),

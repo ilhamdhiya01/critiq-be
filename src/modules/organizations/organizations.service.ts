@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { SlugService } from '../../common/slug/slug.service';
 import { Role } from '../../generated/prisma/enums';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
@@ -10,6 +11,7 @@ export class OrganizationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly slugService: SlugService,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async listForUser(userId: string) {
@@ -53,7 +55,7 @@ export class OrganizationsService {
   }
 
   async update(orgId: string, dto: UpdateOrganizationDto) {
-    return this.prisma.$transaction(async (tx) => {
+    const updated = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.organization.findUnique({
         where: { id: orgId },
       });
@@ -72,5 +74,11 @@ export class OrganizationsService {
         data: { name: dto.name, slug },
       });
     });
+    await this.realtime.publish({
+      type: 'settings.updated',
+      orgId,
+      area: 'organization',
+    });
+    return updated;
   }
 }

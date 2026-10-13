@@ -10,6 +10,8 @@ import { Queue } from 'bullmq';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+import type { CommentChange } from '../../common/realtime/realtime-event.types';
 import {
   CommentKind,
   CommentOrigin,
@@ -43,6 +45,7 @@ export class CommentsService {
     @InjectQueue(COMMENT_SYNC_QUEUE_NAME)
     private readonly commentSyncQueue: Queue<CommentSyncJobPayload>,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async list(
@@ -166,7 +169,7 @@ export class CommentsService {
       kind: comment.kind,
       reply: comment.parentId !== null,
     });
-    return toCommentDto(await this.enqueueSync(comment));
+    return toCommentDto(await this.enqueueSync(comment, 'created'));
   }
 
   async retrySync(
@@ -205,17 +208,25 @@ export class CommentsService {
       });
     }
     return toCommentDto(
-      await this.enqueueSync({
-        ...comment,
-        syncStatus: CommentSyncStatus.PENDING,
-        syncError: null,
-      }),
+      await this.enqueueSync(
+        {
+          ...comment,
+          syncStatus: CommentSyncStatus.PENDING,
+          syncError: null,
+        },
+        'sync_pending',
+      ),
     );
   }
 
   // The comment stays even when the queue cannot take the job: its copy is
-  // marked failed, and the author can send it again.
-  private async enqueueSync(comment: CommentRow): Promise<CommentRow> {
+  // marked failed, and the author can send it again. Either way the other
+  // open tabs learn about it (realtime comment.updated).
+  private async enqueueSync(
+    comment: CommentRow,
+    change: CommentChange,
+  ): Promise<CommentRow> {
+    let failed = false;
     try {
       await this.commentSyncQueue.add(
         'sync',
@@ -238,11 +249,17 @@ export class CommentsService {
         where: { id: comment.id },
         data: { syncStatus: CommentSyncStatus.FAILED, syncError: 'unknown' },
       });
+      failed = true;
       return {
         ...comment,
         syncStatus: CommentSyncStatus.FAILED,
         syncError: 'unknown',
       };
+    } finally {
+      await this.realtime.commentChanged(
+        comment.id,
+        failed ? 'sync_failed' : change,
+      );
     }
   }
 

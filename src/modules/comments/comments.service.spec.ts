@@ -9,6 +9,11 @@ import {
 } from '../../generated/prisma/enums';
 import type { CommentSyncJobPayload } from '../../queue/comment-sync-queue.constants';
 import { CommentsService } from './comments.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('@nestjs/bullmq', () => ({ InjectQueue: () => () => undefined }));
 jest.mock('bullmq', () => ({ Queue: class {} }));
@@ -72,12 +77,19 @@ function setup() {
   };
   const queue = { add: jest.fn().mockResolvedValue({}) };
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new CommentsService(
     prisma as unknown as PrismaService,
     queue as unknown as Queue<CommentSyncJobPayload>,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, queue };
+  return { realtime, service, prisma, queue };
 }
 
 const createData = (prisma: ReturnType<typeof setup>['prisma']) =>
@@ -89,7 +101,7 @@ const createData = (prisma: ReturnType<typeof setup>['prisma']) =>
 
 describe('CommentsService.create', () => {
   it('stores a general comment and queues its copy', async () => {
-    const { service, prisma, queue } = setup();
+    const { service, prisma, queue, realtime } = setup();
     const comment = await service.create(ORG, REPO, 'pull_1', 'u_1', {
       body: '  hello  ',
     });
@@ -111,6 +123,7 @@ describe('CommentsService.create', () => {
       author: { name: 'Ilham', critiqUserId: 'u_1' },
       sync: { status: 'pending', error: null },
     });
+    expect(realtime.commentChanged).toHaveBeenCalledWith('c1', 'created');
   });
 
   it('places an inline comment on the head', async () => {
@@ -190,12 +203,13 @@ describe('CommentsService.create', () => {
   });
 
   it('marks the copy failed when the queue is unreachable', async () => {
-    const { service, queue } = setup();
+    const { service, queue, realtime } = setup();
     queue.add.mockRejectedValue(new Error('ECONNREFUSED'));
     const comment = await service.create(ORG, REPO, 'pull_1', 'u_1', {
       body: 'hello',
     });
     expect(comment.sync).toEqual({ status: 'failed', error: 'unknown' });
+    expect(realtime.commentChanged).toHaveBeenCalledWith('c1', 'sync_failed');
   });
 });
 

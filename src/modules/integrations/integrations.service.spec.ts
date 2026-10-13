@@ -7,6 +7,11 @@ import { IntegrationState, Provider } from '../../generated/prisma/enums';
 import { GithubAppService } from './github-app.service';
 import { GitlabApiService } from './gitlab-api.service';
 import { IntegrationsService } from './integrations.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
 jest.mock('../../common/prisma/prisma.service', () => ({
@@ -48,6 +53,12 @@ function setup(integration: Record<string, unknown> | null) {
     listInstallationRepositories: jest.fn().mockResolvedValue([]),
   };
   const logger = { info: jest.fn(), warn: jest.fn() };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new IntegrationsService(
     prisma as unknown as PrismaService,
     {} as EncryptionService,
@@ -55,8 +66,9 @@ function setup(integration: Record<string, unknown> | null) {
     githubAppService as unknown as GithubAppService,
     {} as GitlabApiService,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, githubAppService, logger };
+  return { realtime, service, prisma, githubAppService, logger };
 }
 
 describe('IntegrationsService.disconnectGithub', () => {
