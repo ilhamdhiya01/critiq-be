@@ -3,6 +3,11 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { Role, RuleTier } from '../../generated/prisma/enums';
 import { RulesService } from './rules.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('../../common/prisma/prisma.service', () => ({
   PrismaService: class {},
@@ -22,11 +27,18 @@ function setup(disabledRuleTiers: RuleTier[] | null) {
     },
   };
   const logger = { info: jest.fn() };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new RulesService(
     prisma as unknown as PrismaService,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, logger };
+  return { realtime, service, prisma, logger };
 }
 
 describe('RulesService', () => {

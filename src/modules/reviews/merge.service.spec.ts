@@ -14,6 +14,11 @@ import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { ProviderMergeError } from '../integrations/provider-merge-error';
 import { MergeService } from './merge.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('../../common/prisma/prisma.service', () => ({
   PrismaService: class {},
@@ -83,6 +88,12 @@ function setup(
   const gitlab = { mergeMergeRequest: jest.fn().mockResolvedValue(undefined) };
   const scanQueue = { cancelPending: jest.fn().mockResolvedValue(0) };
   const logger = { info: jest.fn(), warn: jest.fn() };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new MergeService(
     prisma as unknown as PrismaService,
     { decrypt: () => 'token' } as unknown as EncryptionService,
@@ -90,8 +101,9 @@ function setup(
     gitlab as unknown as GitlabApiService,
     scanQueue as unknown as ScanQueueService,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, github, gitlab, scanQueue, logger };
+  return { realtime, service, prisma, github, gitlab, scanQueue, logger };
 }
 
 const withCritical = (count = 2) =>

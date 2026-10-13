@@ -7,6 +7,7 @@ import type Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../../../common/redis/redis.constants';
 import {
   AiProviderId,
@@ -127,6 +128,7 @@ export class AiScanService {
     @InjectQueue(AI_QUEUE_NAME) private readonly aiQueue: Queue<AiJobPayload>,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   // The organization's AI settings as they are now. A scan's aiStatus is
@@ -147,9 +149,24 @@ export class AiScanService {
 
   // Returns the resulting aiStatus, or null when the scan is not DONE (the
   // AI step never applies to a failed or superseded static scan).
+  //
+  // Publishes scan.updated once the decision is on the row, whatever it
+  // was (or after a failure) — for a static scan that just finished this
+  // is also its "done" event, so ScanProcessor does not publish one.
   async maybeEnqueue(
     scanId: string,
     options: { force?: boolean } = {},
+  ): Promise<AiScanStatus | null> {
+    try {
+      return await this.decide(scanId, options);
+    } finally {
+      await this.realtime.scanChanged(scanId);
+    }
+  }
+
+  private async decide(
+    scanId: string,
+    options: { force?: boolean },
   ): Promise<AiScanStatus | null> {
     const scan = await this.prisma.scan.findUnique({
       where: { id: scanId },

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Prisma } from '../../generated/prisma/client';
 import {
@@ -43,6 +44,7 @@ export class IntegrationsService {
     private readonly githubAppService: GithubAppService,
     private readonly gitlabApiService: GitlabApiService,
     @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async list(organizationId: string): Promise<IntegrationResponseDto[]> {
@@ -144,6 +146,7 @@ export class IntegrationsService {
         connectedByUserId,
       },
     });
+    await this.announce(organizationId, Provider.GITLAB, integration.state);
 
     return this.toResponseDto(integration);
   }
@@ -218,6 +221,7 @@ export class IntegrationsService {
           connectedByUserId,
         },
       });
+      await this.announce(organizationId, Provider.GITHUB, integration.state);
       return this.toResponseDto(integration);
     } catch (error) {
       // `installationId` is globally unique (one GitHub installation can
@@ -255,6 +259,7 @@ export class IntegrationsService {
 
     await this.revokeRepositoryWebhooks(integration);
     await this.prisma.integration.delete({ where: { id: integration.id } });
+    await this.announce(organizationId, Provider.GITLAB, 'DISCONNECTED');
   }
 
   // Uninstalls the App on GitHub first, then deletes the row — cascading
@@ -282,6 +287,7 @@ export class IntegrationsService {
     const installationId = this.assertGithubInstallationId(integration);
     await this.githubAppService.deleteInstallation(installationId);
     await this.prisma.integration.delete({ where: { id: integration.id } });
+    await this.announce(organizationId, Provider.GITHUB, 'DISCONNECTED');
 
     // TODO(audit log model): persisted row once the table exists.
     this.logger.info('audit.integration.github_disconnected', {
@@ -367,8 +373,24 @@ export class IntegrationsService {
       where: { id: integration.id },
       data: { state },
     });
+    if (updated.state !== integration.state) {
+      await this.announce(organizationId, Provider.GITLAB, updated.state);
+    }
 
     return this.toResponseDto(updated);
+  }
+
+  private announce(
+    organizationId: string,
+    source: Provider,
+    state: IntegrationState | 'DISCONNECTED',
+  ): Promise<void> {
+    return this.realtime.publish({
+      type: 'integration.updated',
+      orgId: organizationId,
+      source,
+      state,
+    });
   }
 
   async listGitlabCandidates(

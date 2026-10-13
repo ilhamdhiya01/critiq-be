@@ -8,6 +8,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import {
   FindingSeverity,
   FindingSource,
@@ -110,6 +111,7 @@ export class PullsService {
     private readonly encryptionService: EncryptionService,
     private readonly scansService: ScansService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   // Called from WebhooksService when an in-scope MR/PR event is received,
@@ -135,14 +137,17 @@ export class PullsService {
       repositoryId,
       mapped.targetBranch,
     );
+    const where = {
+      repositoryId_externalId: { repositoryId, externalId: mapped.externalId },
+    };
+    // Only to tell the client whether the diff changed (realtime event).
+    const previous = await this.prisma.pullRequest.findUnique({
+      where,
+      select: { headSha: true },
+    });
 
-    return this.prisma.pullRequest.upsert({
-      where: {
-        repositoryId_externalId: {
-          repositoryId,
-          externalId: mapped.externalId,
-        },
-      },
+    const pull = await this.prisma.pullRequest.upsert({
+      where,
       create: {
         organizationId,
         repositoryId,
@@ -171,6 +176,15 @@ export class PullsService {
       },
       select: { id: true, state: true, headSha: true },
     });
+    await this.realtime.publish({
+      type: 'pull.updated',
+      orgId: organizationId,
+      repoId: repositoryId,
+      pullId: pull.id,
+      state: pull.state,
+      headChanged: previous?.headSha !== pull.headSha,
+    });
+    return pull;
   }
 
   async list(
@@ -594,10 +608,18 @@ export class PullsService {
         repository.externalId,
       );
     }
-    await this.prisma.repository.updateMany({
+    const { count } = await this.prisma.repository.updateMany({
       where: { id: repositoryId, languageCheckedAt: null },
       data: { language, languageCheckedAt: new Date() },
     });
+    if (count > 0 && language) {
+      await this.realtime.publish({
+        type: 'repo.updated',
+        orgId: organizationId,
+        repoId: repositoryId,
+        change: 'language_detected',
+      });
+    }
   }
 
   // The PR with its repository and integration, tenant-checked (404 across

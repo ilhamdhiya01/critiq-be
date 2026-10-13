@@ -6,6 +6,11 @@ import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { ScansService } from '../scans/scans.service';
 import { PullsService } from './pulls.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only packages reachable through the service's imports; every
 // collaborator is a plain stub below.
@@ -41,6 +46,10 @@ function setup(repository: Record<string, unknown> | null = GITHUB_REPO) {
       findUnique: jest.fn().mockResolvedValue(repository),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
+    pullRequest: { findUnique: jest.fn(), upsert: jest.fn() },
+    branchScanPolicy: {
+      findUnique: jest.fn().mockResolvedValue({ policy: 'ALLOW_AI' }),
+    },
   };
   const github = {
     fetchRepository: jest
@@ -48,6 +57,12 @@ function setup(repository: Record<string, unknown> | null = GITHUB_REPO) {
       .mockResolvedValue({ default_branch: 'main', language: 'TypeScript' }),
   };
   const gitlab = { fetchMainLanguage: jest.fn().mockResolvedValue('PHP') };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new PullsService(
     prisma as unknown as PrismaService,
     github as unknown as GithubAppService,
@@ -55,8 +70,9 @@ function setup(repository: Record<string, unknown> | null = GITHUB_REPO) {
     { decrypt: () => 'token' } as unknown as EncryptionService,
     {} as ScansService,
     { info: jest.fn(), warn: jest.fn() } as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, github, gitlab };
+  return { realtime, service, prisma, github, gitlab };
 }
 
 // Repositories connected before Repository.language existed: asked once,
@@ -127,5 +143,51 @@ describe('PullsService.fillMissingLanguage', () => {
       service.fillMissingLanguage('org_1', 'repo_1'),
     ).rejects.toThrow('down');
     expect(prisma.repository.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+// Realtime: every webhook upsert tells open tabs, and whether the diff moved.
+describe('PullsService.upsertFromWebhook', () => {
+  const payload = (sha: string) => ({
+    action: 'synchronize',
+    pull_request: {
+      number: 7,
+      title: 'Add login',
+      body: null,
+      user: { login: 'octo' },
+      state: 'open',
+      merged: false,
+      head: { ref: 'feature', sha },
+      base: { ref: 'main' },
+    },
+  });
+
+  it.each([
+    ['a push', 'old', true],
+    ['an edit of the title', 'new', false],
+  ])('announces %s', async (_case, previousSha, headChanged) => {
+    const { service, prisma, realtime } = setup();
+    prisma.pullRequest.findUnique.mockResolvedValue({ headSha: previousSha });
+    prisma.pullRequest.upsert.mockResolvedValue({
+      id: 'pull_1',
+      state: 'OPEN',
+      headSha: 'new',
+    });
+
+    await service.upsertFromWebhook(
+      'org_1',
+      'repo_1',
+      Provider.GITHUB,
+      payload('new') as never,
+    );
+
+    expect(realtime.publish).toHaveBeenCalledWith({
+      type: 'pull.updated',
+      orgId: 'org_1',
+      repoId: 'repo_1',
+      pullId: 'pull_1',
+      state: 'OPEN',
+      headChanged,
+    });
   });
 });

@@ -12,6 +12,11 @@ import {
 } from '../../generated/prisma/enums';
 import type { ReviewSyncJobPayload } from '../../queue/review-sync-queue.constants';
 import { ReviewsService } from './reviews.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('@nestjs/bullmq', () => ({ InjectQueue: () => () => undefined }));
 jest.mock('bullmq', () => ({ Queue: class {} }));
@@ -82,12 +87,19 @@ function setup(pull: Record<string, unknown> | null = pullRow()) {
   };
   const queue = { add: jest.fn().mockResolvedValue({}) };
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new ReviewsService(
     prisma as unknown as PrismaService,
     queue as unknown as Queue<ReviewSyncJobPayload>,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma, queue, logger };
+  return { realtime, service, prisma, queue, logger };
 }
 
 const approve = (overrides: Record<string, unknown> = {}) => ({

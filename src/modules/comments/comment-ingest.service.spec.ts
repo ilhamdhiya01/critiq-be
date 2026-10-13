@@ -8,6 +8,11 @@ import {
 } from '../../generated/prisma/enums';
 import { CommentIngestService, InboundComment } from './comment-ingest.service';
 import { providerBody } from './comment-marker';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('../../common/prisma/prisma.service', () => ({
   PrismaService: class {},
@@ -48,11 +53,18 @@ function setup() {
       update: jest.fn().mockResolvedValue({}),
     },
   };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new CommentIngestService(
     prisma as unknown as PrismaService,
     { info: jest.fn() } as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { service, prisma };
+  return { realtime, service, prisma };
 }
 
 const created = (prisma: ReturnType<typeof setup>['prisma']) =>
@@ -64,7 +76,8 @@ const created = (prisma: ReturnType<typeof setup>['prisma']) =>
 
 describe('CommentIngestService', () => {
   it('records a provider comment under its author', async () => {
-    const { service, prisma } = setup();
+    const { service, prisma, realtime } = setup();
+    prisma.pullComment.create.mockResolvedValue({ id: 'c9' });
     await expect(service.ingest(event())).resolves.toBe('created');
     expect(created(prisma)).toMatchObject({
       organizationId: 'org_1',
@@ -75,13 +88,22 @@ describe('CommentIngestService', () => {
       parentId: null,
       kind: CommentKind.GENERAL,
     });
+    expect(realtime.publish).toHaveBeenCalledWith({
+      type: 'comment.updated',
+      orgId: 'org_1',
+      repoId: 'repo_1',
+      pullId: 'pull_1',
+      commentId: 'c9',
+      change: 'created',
+    });
   });
 
   it('ignores a comment on a PR Critiq does not track', async () => {
-    const { service, prisma } = setup();
+    const { service, prisma, realtime } = setup();
     prisma.pullRequest.findUnique.mockResolvedValue(null);
     await expect(service.ingest(event())).resolves.toBe('ignored');
     expect(prisma.pullComment.create).not.toHaveBeenCalled();
+    expect(realtime.publish).not.toHaveBeenCalled();
   });
 
   // Anti-echo: our own comment coming back links instead of copying.

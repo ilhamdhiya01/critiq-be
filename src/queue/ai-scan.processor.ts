@@ -7,6 +7,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { EncryptionService } from '../common/encryption/encryption.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../common/redis/redis.constants';
 import {
   AiRiskLevel,
@@ -101,6 +102,7 @@ export class AiScanProcessor
     private readonly configService: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {
     super();
   }
@@ -132,6 +134,7 @@ export class AiScanProcessor
       this.logger.info('ai.skipped_not_runnable', log);
       return;
     }
+    await this.realtime.scanChanged(scanId);
 
     const scan = await this.prisma.scan.findUniqueOrThrow({
       where: { id: scanId },
@@ -163,6 +166,7 @@ export class AiScanProcessor
             aiFinishedAt: new Date(),
           },
         });
+        await this.realtime.scanChanged(scanId);
         await this.notifyResolvedIfDone(scanId, log);
         return;
       }
@@ -411,6 +415,7 @@ export class AiScanProcessor
       this.logger.info('ai.superseded_during_run', log);
       return;
     }
+    await this.realtime.scanChanged(scanId);
     for (const [kind, stats] of [
       ['base_scan', baseMerge?.stats],
       ['same_scan', persisted.merge],
@@ -524,7 +529,7 @@ export class AiScanProcessor
         : // A code host failure while fetching the diff, or a bug.
           'diff_unavailable';
     try {
-      await this.prisma.scan.updateMany({
+      const { count } = await this.prisma.scan.updateMany({
         where: {
           id: scanId,
           aiStatus: { in: [AiScanStatus.QUEUED, AiScanStatus.RUNNING] },
@@ -535,6 +540,9 @@ export class AiScanProcessor
           aiFinishedAt: new Date(),
         },
       });
+      if (count > 0) {
+        await this.realtime.scanChanged(scanId);
+      }
       this.logger.error('ai.failed', { ...log, code });
       await this.notifyResolvedIfDone(scanId, log);
       if (code === 'auth_failed') {

@@ -2,6 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { FindingCategory, RuleTier } from '../../generated/prisma/enums';
 import {
   AI_ONLY_TIERS,
@@ -42,6 +43,7 @@ export class RulesService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async get(organizationId: string): Promise<RulesDto> {
@@ -104,6 +106,11 @@ export class RulesService {
         role: actor.role,
         tier,
         enabled,
+      });
+      await this.realtime.publish({
+        type: 'settings.updated',
+        orgId: organizationId,
+        area: 'rules',
       });
     }
     return this.get(organizationId);

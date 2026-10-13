@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { CommonModule } from '../common/common.module';
 import { RedisModule } from '../common/redis/redis.module';
+import { RealtimeModule } from '../common/realtime/realtime.module';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { ScanTrigger } from '../generated/prisma/enums';
 import { QueueModule } from '../queue/queue.module';
@@ -27,7 +28,7 @@ import { Module } from '@nestjs/common';
 //                                      # changed since the last scan
 //   pnpm scan:enqueue --list        # show recent pull requests to pick from
 @Module({
-  imports: [CommonModule, RedisModule, QueueModule],
+  imports: [CommonModule, RedisModule, RealtimeModule, QueueModule],
 })
 class EnqueueScanModule {}
 

@@ -14,6 +14,11 @@ import { GitlabApiService } from '../modules/integrations/gitlab-api.service';
 import { ProviderCommentError } from '../modules/integrations/provider-comment-error';
 import { CommentSyncProcessor } from './comment-sync.processor';
 import type { CommentSyncJobPayload } from './comment-sync-queue.constants';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
+
+jest.mock('../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('@nestjs/bullmq', () => ({
   Processor: () => () => undefined,
@@ -102,14 +107,21 @@ function setup(row: unknown = commentRow()) {
       .mockResolvedValue({ discussionId: 'd1', noteId: 55 }),
     addDiscussionNote: jest.fn().mockResolvedValue({ noteId: 56 }),
   };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const processor = new CommentSyncProcessor(
     prisma as unknown as PrismaService,
     { decrypt: () => 'token' } as unknown as EncryptionService,
     github as unknown as GithubAppService,
     gitlab as unknown as GitlabApiService,
     { info: jest.fn(), warn: jest.fn() } as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { processor, prisma, github, gitlab };
+  return { realtime, processor, prisma, github, gitlab };
 }
 
 const job = (attemptsMade = 0) =>
@@ -130,7 +142,7 @@ const body = '**Ilham** via Critiq:\n\nhello\n\n<!-- critiq:comment:c1 -->';
 
 describe('CommentSyncProcessor — GitHub', () => {
   it('posts a general comment in the conversation', async () => {
-    const { processor, prisma, github } = setup();
+    const { processor, prisma, github, realtime } = setup();
     await processor.process(job());
     expect(github.createIssueComment).toHaveBeenCalledWith(
       '1',
@@ -144,6 +156,7 @@ describe('CommentSyncProcessor — GitHub', () => {
       providerCommentId: 'github-issue:900',
       providerThreadId: null,
     });
+    expect(realtime.commentChanged).toHaveBeenCalledWith('c1', 'synced');
   });
 
   // GitHub's PR conversation has no threads: a reply quotes its root.
@@ -205,7 +218,7 @@ describe('CommentSyncProcessor — GitHub', () => {
 
   // The thread has not reached GitHub yet: wait for it (retried).
   it('retries a reply whose thread is not synced', async () => {
-    const { processor, prisma } = setup(
+    const { processor, prisma, realtime } = setup(
       commentRow({
         kind: CommentKind.INLINE,
         parent: { body: 'x', providerThreadId: null },
@@ -215,10 +228,11 @@ describe('CommentSyncProcessor — GitHub', () => {
       code: 'parent_not_synced',
     });
     expect(prisma.pullComment.updateMany).not.toHaveBeenCalled();
+    expect(realtime.commentChanged).not.toHaveBeenCalled();
   });
 
   it('fails at once on a position GitHub rejects', async () => {
-    const { processor, prisma, github } = setup(
+    const { processor, prisma, github, realtime } = setup(
       commentRow({
         kind: CommentKind.INLINE,
         path: 'a.ts',
@@ -234,6 +248,7 @@ describe('CommentSyncProcessor — GitHub', () => {
       syncStatus: CommentSyncStatus.FAILED,
       syncError: 'invalid_position',
     });
+    expect(realtime.commentChanged).toHaveBeenCalledWith('c1', 'sync_failed');
   });
 });
 

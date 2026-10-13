@@ -6,6 +6,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../../common/redis/redis.constants';
 import {
   IntegrationState,
@@ -119,6 +120,7 @@ export class WebhooksService {
     private readonly commentIngestService: CommentIngestService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async handleGitlabEvent(
@@ -404,6 +406,18 @@ export class WebhooksService {
       action: parsed.action,
       state: transition.to,
     });
+    const integration = await this.prisma.integration.findFirst({
+      where: { source: Provider.GITHUB, installationId },
+      select: { organizationId: true },
+    });
+    if (integration) {
+      await this.realtime.publish({
+        type: 'integration.updated',
+        orgId: integration.organizationId,
+        source: Provider.GITHUB,
+        state: transition.to,
+      });
+    }
     return { kind: 'installation_updated' };
   }
 

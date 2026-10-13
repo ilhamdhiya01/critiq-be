@@ -14,11 +14,15 @@ import { CommentsModule } from './modules/comments/comments.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
 import { RedisModule } from './common/redis/redis.module';
+import { RealtimeModule } from './common/realtime/realtime.module';
+import { RealtimeStreamModule } from './common/realtime/realtime-stream.module';
 
 @Module({
   imports: [
     CommonModule,
     RedisModule,
+    RealtimeModule,
+    RealtimeStreamModule,
     AuthModule,
     OrganizationsModule,
     IntegrationsModule,

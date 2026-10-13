@@ -9,6 +9,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Prisma } from '../../generated/prisma/client';
 import { AiProviderId, AiUsageKind, Role } from '../../generated/prisma/enums';
@@ -64,6 +65,7 @@ export class SettingsService {
     private readonly aiProviderFactory: AiProviderFactory,
     private readonly rateLimiter: RateLimiterService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   // Full settings for an Admin; the minimal read-only view for anyone else.
@@ -347,6 +349,13 @@ export class SettingsService {
       this.logger.info(`audit.${consentEvent}`, {
         orgId: organizationId,
         by: actorUserId,
+      });
+    }
+    if (changedFields.length > 0 || consentEvent) {
+      await this.realtime.publish({
+        type: 'settings.updated',
+        orgId: organizationId,
+        area: 'ai',
       });
     }
 
