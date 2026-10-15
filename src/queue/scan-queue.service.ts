@@ -4,6 +4,7 @@ import { Queue } from 'bullmq';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import { Prisma } from '../generated/prisma/client';
 import {
   AiScanStatus,
@@ -11,10 +12,12 @@ import {
   FullReason,
   Provider,
   ReviewPolicy,
+  RuleTier,
   ScanStatus,
   ScanTrigger,
 } from '../generated/prisma/enums';
 import { AI_PROMPT_VERSION } from '../modules/ai/scan/ai-prompt.constants';
+import { enabledTiers, sameTiers } from './rules/rule-tiers';
 import { RULESET_VERSION } from './rules/rules.constants';
 import { ScanJobPayload } from './scan-payload.dto';
 
@@ -71,14 +74,20 @@ export function decideScanMode(input: {
     headSha: string;
     rulesetVersion: string;
     aiPromptVersion: string | null;
+    aiLocale: string | null;
     aiStatus: AiScanStatus | null;
     // The base scan has an AI summary (a completed or cached review).
     aiReviewed: boolean;
+    ruleTiers: RuleTier[];
   } | null;
   full: boolean;
   effectivePolicy: ReviewPolicy | null;
   // Provider selected and consent given — the AI will review this scan.
   aiEnabled: boolean;
+  // The organization's AI language now.
+  locale: string | null;
+  // The organization's enabled Critical tiers now.
+  ruleTiers: RuleTier[];
 }): ScanModeDecision {
   const full = (fullReason: FullReason): ScanModeDecision => ({
     diffMode: DiffMode.FULL,
@@ -95,11 +104,24 @@ export function decideScanMode(input: {
   if (input.base.rulesetVersion !== RULESET_VERSION) {
     return full(FullReason.RULESET_CHANGED);
   }
+  // A tier turned on must look at the whole PR, not just the latest push;
+  // a tier turned off must not leave its old findings carried forward.
+  if (!sameTiers(input.base.ruleTiers, input.ruleTiers)) {
+    return full(FullReason.RULES_CHANGED);
+  }
   // Only when the AI runs on this PR: a Manual-only branch never sent a
   // prompt, so a prompt change is irrelevant to it.
-  if (
+  // The language is part of the prompt: after a switch, a delta review
+  // would leave the carried-forward findings in the old language.
+  const promptVersionChanged =
     input.base.aiPromptVersion !== null &&
-    input.base.aiPromptVersion !== AI_PROMPT_VERSION &&
+    input.base.aiPromptVersion !== AI_PROMPT_VERSION;
+  const localeChanged =
+    input.base.aiLocale !== null &&
+    input.locale !== null &&
+    input.base.aiLocale !== input.locale;
+  if (
+    (promptVersionChanged || localeChanged) &&
     input.effectivePolicy !== ReviewPolicy.MANUAL_ONLY
   ) {
     return full(FullReason.PROMPT_CHANGED);
@@ -152,6 +174,7 @@ export class ScanQueueService {
     private readonly scanQueue: Queue<ScanJobPayload>,
     private readonly prisma: PrismaService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async enqueue(input: EnqueueScanInput): Promise<EnqueueScanResult> {
@@ -167,8 +190,14 @@ export class ScanQueueService {
         status: true,
         attempt: true,
         rulesetVersion: true,
+        ruleTiers: true,
       },
     });
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: input.organizationId },
+      select: { disabledRuleTiers: true },
+    });
+    const ruleTiers = enabledTiers(organization?.disabledRuleTiers ?? []);
 
     // A finished scan under an older ruleset is not a duplicate: the rules
     // that would flag this diff today did not exist when it ran. Without
@@ -179,9 +208,11 @@ export class ScanQueueService {
     // ruleset is still in flight, and creating a new one would supersede it
     // below — churning work to replace a result that was about to arrive.
     // Let it finish; the next webhook for that sha picks up the new rules.
+    // Same for a scan that ran under another quality profile.
     const rulesetIsStale =
       latestForSha?.status === ScanStatus.DONE &&
-      latestForSha.rulesetVersion !== RULESET_VERSION;
+      (latestForSha.rulesetVersion !== RULESET_VERSION ||
+        !sameTiers(latestForSha.ruleTiers, ruleTiers));
 
     if (
       input.trigger === ScanTrigger.WEBHOOK &&
@@ -217,7 +248,9 @@ export class ScanQueueService {
           headSha: true,
           rulesetVersion: true,
           aiPromptVersion: true,
+          aiLocale: true,
           aiStatus: true,
+          ruleTiers: true,
           aiSummary: { select: { id: true } },
         },
       }),
@@ -225,7 +258,9 @@ export class ScanQueueService {
         where: { id: input.pullId },
         select: {
           effectivePolicy: true,
-          organization: { select: { aiProvider: true, aiConsentAt: true } },
+          organization: {
+            select: { aiProvider: true, aiConsentAt: true, aiLocale: true },
+          },
         },
       }),
     ]);
@@ -236,6 +271,8 @@ export class ScanQueueService {
       aiEnabled: Boolean(
         pull?.organization.aiProvider && pull.organization.aiConsentAt,
       ),
+      locale: pull?.organization.aiLocale ?? null,
+      ruleTiers,
     });
 
     let scanId: string;
@@ -251,6 +288,7 @@ export class ScanQueueService {
           trigger,
           attempt: (latestForSha?.attempt ?? 0) + 1,
           rulesetVersion: RULESET_VERSION,
+          ruleTiers,
           ...mode,
         },
         select: { id: true },
@@ -313,8 +351,10 @@ export class ScanQueueService {
           finishedAt: new Date(),
         },
       });
+      await this.realtime.scanChanged(scanId);
       throw error;
     }
+    await this.realtime.scanChanged(scanId);
 
     this.logger.info('scan.enqueued', {
       orgId: input.organizationId,
@@ -368,6 +408,11 @@ export class ScanQueueService {
       data: { status: ScanStatus.SUPERSEDED, finishedAt: new Date() },
     });
     this.logger.info('scan.superseded', { pullId, count });
+    if (count > 0) {
+      for (const { id } of inFlight) {
+        await this.realtime.scanChanged(id);
+      }
+    }
     return count;
   }
 }

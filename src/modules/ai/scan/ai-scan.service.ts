@@ -7,6 +7,7 @@ import type Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../../../common/redis/redis.constants';
 import {
   AiProviderId,
@@ -16,6 +17,7 @@ import {
   FindingSource,
   FindingStatus,
   ReviewPolicy,
+  RuleTier,
   ScanStatus,
   SuppressionReason,
 } from '../../../generated/prisma/enums';
@@ -25,6 +27,7 @@ import {
   AiJobPayload,
   buildAiJobId,
 } from '../../../queue/ai-queue.constants';
+import { tierKey } from '../../../queue/rules/rule-tiers';
 import { defaultModelFor, toProviderName } from '../ai-models.constants';
 import { AiProviderName } from '../ai-provider.interface';
 import { dedupeAiFindings } from './ai-deduper';
@@ -36,6 +39,7 @@ import {
   persistAiResult,
   ScanForAi,
 } from './ai-scan.persistence';
+import { isComparableRun } from './regenerate-merge';
 
 const CACHE_TTL_SECONDS = 30 * 86_400;
 const BUDGET_NOTIFY_TTL_SECONDS = 26 * 3600;
@@ -57,14 +61,19 @@ export interface AiCacheKeyParts {
   // result from a full review of the same head.
   diffMode: string;
   prevHeadSha: string | null;
+  // A review written in another language is a different result.
+  locale: string;
+  // So is a review that looked for another set of Critical tiers.
+  ruleTiers: readonly RuleTier[];
 }
 
 // Bump when what happens to a model's answer after the call changes —
 // validation above all: a cache hit copies the stored findings without
 // validating them again, so answers kept under older rules must not be
 // reused. (2: echoes_code, AI findings follow static suppression.
-// 3: severity calibration, confidence gate, near-duplicate merge.)
-export const AI_POSTPROCESS_VERSION = 'post-3';
+// 3: severity calibration, confidence gate, near-duplicate merge.
+// 4: Critical tiers — disabled categories rejected, untiered capped at major.)
+export const AI_POSTPROCESS_VERSION = 'post-4';
 
 export function aiCacheKey(parts: AiCacheKeyParts): string {
   const digest = createHash('sha256')
@@ -79,6 +88,8 @@ export function aiCacheKey(parts: AiCacheKeyParts): string {
         parts.model,
         parts.diffMode,
         parts.prevHeadSha ?? '',
+        parts.locale,
+        tierKey(parts.ruleTiers),
       ].join('|'),
     )
     .digest('hex');
@@ -87,6 +98,23 @@ export function aiCacheKey(parts: AiCacheKeyParts): string {
 
 export function todayUtc(): Date {
   return new Date(new Date().toISOString().slice(0, 10));
+}
+
+// Whether the organization's AI settings let a scan through, and with what.
+// The first missing setting is the status a scan records for it.
+export type AiConfiguration =
+  | { ready: true; provider: AiProviderName; model: string }
+  | {
+      ready: false;
+      blockedBy:
+        | typeof AiScanStatus.NOT_CONFIGURED
+        | typeof AiScanStatus.CONSENT_REQUIRED;
+    };
+
+interface OrganizationAiSettings {
+  aiProvider: AiProviderId | null;
+  aiModel: string | null;
+  aiConsentAt: Date | null;
 }
 
 // Decides whether a finished static scan gets an AI review, and starts it.
@@ -100,13 +128,45 @@ export class AiScanService {
     @InjectQueue(AI_QUEUE_NAME) private readonly aiQueue: Queue<AiJobPayload>,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
+
+  // The organization's AI settings as they are now. A scan's aiStatus is
+  // decided once, when it finishes — GET …/summary uses this to tell a
+  // NOT_CONFIGURED/CONSENT_REQUIRED scan that has since become runnable
+  // apart from one that is still blocked. Null for an unknown organization.
+  async configurationFor(
+    organizationId: string,
+  ): Promise<AiConfiguration | null> {
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { aiProvider: true, aiModel: true, aiConsentAt: true },
+    });
+    return organization
+      ? this.resolveConfiguration(organizationId, organization)
+      : null;
+  }
 
   // Returns the resulting aiStatus, or null when the scan is not DONE (the
   // AI step never applies to a failed or superseded static scan).
+  //
+  // Publishes scan.updated once the decision is on the row, whatever it
+  // was (or after a failure) — for a static scan that just finished this
+  // is also its "done" event, so ScanProcessor does not publish one.
   async maybeEnqueue(
     scanId: string,
     options: { force?: boolean } = {},
+  ): Promise<AiScanStatus | null> {
+    try {
+      return await this.decide(scanId, options);
+    } finally {
+      await this.realtime.scanChanged(scanId);
+    }
+  }
+
+  private async decide(
+    scanId: string,
+    options: { force?: boolean },
   ): Promise<AiScanStatus | null> {
     const scan = await this.prisma.scan.findUnique({
       where: { id: scanId },
@@ -118,6 +178,7 @@ export class AiScanService {
             aiModel: true,
             aiConsentAt: true,
             aiDailyTokenBudget: true,
+            aiLocale: true,
           },
         },
       },
@@ -133,37 +194,17 @@ export class AiScanService {
       return settle(AiScanStatus.SKIPPED_MANUAL_MODE);
     }
 
-    // 2. Provider + credential, without decrypting anything.
+    // 2–3. Provider + credential + model, then consent.
     const { organization } = scan;
-    const providerId = organization.aiProvider;
-    const credential = providerId
-      ? await this.prisma.aiCredential.findUnique({
-          where: {
-            organizationId_provider: {
-              organizationId: scan.organizationId,
-              provider: providerId,
-            },
-          },
-          select: { encryptedKey: true, baseUrl: true },
-        })
-      : null;
-    const configured =
-      providerId === AiProviderId.OPENAI_COMPATIBLE
-        ? Boolean(credential?.baseUrl)
-        : Boolean(credential?.encryptedKey);
-    if (!providerId || !configured) {
-      return settle(AiScanStatus.NOT_CONFIGURED);
+    const configuration = await this.resolveConfiguration(
+      scan.organizationId,
+      organization,
+    );
+    if (!configuration.ready) {
+      return settle(configuration.blockedBy);
     }
-    const provider = toProviderName(providerId);
-    const model = organization.aiModel ?? defaultModelFor(provider);
-    if (!model) {
-      return settle(AiScanStatus.NOT_CONFIGURED);
-    }
-
-    // 3. Consent.
-    if (!organization.aiConsentAt) {
-      return settle(AiScanStatus.CONSENT_REQUIRED);
-    }
+    const { provider, model } = configuration;
+    const locale = organization.aiLocale;
 
     // 4. Nothing changed since the base scan (a rescan of the same head):
     // every finding was carried forward, so the previous summary still
@@ -174,7 +215,10 @@ export class AiScanService {
       (scan.diffBytes ?? 0) === 0 &&
       scan.filesChanged === 0
     ) {
-      return this.copySummaryFromBase(scan);
+      const copied = await this.copySummaryFromBase(scan, locale);
+      if (copied) {
+        return copied;
+      }
     }
 
     // 5. Size — the scannable patch bytes the static scan measured, which
@@ -202,9 +246,30 @@ export class AiScanService {
       model,
       diffMode: scan.diffMode,
       prevHeadSha: scan.prevHeadSha,
+      locale,
+      ruleTiers: scan.ruleTiers,
     });
+    // A regenerate of this scan by a comparable run keeps the earlier
+    // run's findings (regenerate-merge.ts). Read before step 8 overwrites
+    // the scan's AI columns.
+    const mergePrevious = isComparableRun(
+      {
+        provider: scan.aiProvider,
+        model: scan.aiModel,
+        promptVersion: scan.aiPromptVersion,
+        locale: scan.aiLocale,
+        ruleTiers: scan.ruleTiers,
+      },
+      {
+        provider,
+        model,
+        promptVersion: AI_PROMPT_VERSION,
+        locale,
+        ruleTiers: scan.ruleTiers,
+      },
+    );
     if (!options.force) {
-      const cached = await this.copyFromCache(scan, cacheKey);
+      const cached = await this.copyFromCache(scan, cacheKey, mergePrevious);
       if (cached) {
         this.logger.info('audit.ai.completed', {
           ...log,
@@ -226,6 +291,7 @@ export class AiScanService {
         aiProvider: provider,
         aiModel: model,
         aiPromptVersion: AI_PROMPT_VERSION,
+        aiLocale: locale,
       },
     });
     if (claimed.count === 0) {
@@ -234,7 +300,12 @@ export class AiScanService {
     try {
       await this.aiQueue.add(
         'ai',
-        { scanId, organizationId: scan.organizationId, pullId: scan.pullId },
+        {
+          scanId,
+          organizationId: scan.organizationId,
+          pullId: scan.pullId,
+          mergePrevious,
+        },
         {
           jobId: buildAiJobId(scanId, Date.now()),
           attempts: AI_JOB_ATTEMPTS,
@@ -292,6 +363,44 @@ export class AiScanService {
     });
   }
 
+  // Provider + credential (without decrypting anything) + model, then
+  // consent — in this order, so the status names the first thing to fix.
+  private async resolveConfiguration(
+    organizationId: string,
+    organization: OrganizationAiSettings,
+  ): Promise<AiConfiguration> {
+    const notConfigured: AiConfiguration = {
+      ready: false,
+      blockedBy: AiScanStatus.NOT_CONFIGURED,
+    };
+    const providerId = organization.aiProvider;
+    if (!providerId) {
+      return notConfigured;
+    }
+    const credential = await this.prisma.aiCredential.findUnique({
+      where: {
+        organizationId_provider: { organizationId, provider: providerId },
+      },
+      select: { encryptedKey: true, baseUrl: true },
+    });
+    const configured =
+      providerId === AiProviderId.OPENAI_COMPATIBLE
+        ? Boolean(credential?.baseUrl)
+        : Boolean(credential?.encryptedKey);
+    if (!configured) {
+      return notConfigured;
+    }
+    const provider = toProviderName(providerId);
+    const model = organization.aiModel ?? defaultModelFor(provider);
+    if (!model) {
+      return notConfigured;
+    }
+    if (!organization.aiConsentAt) {
+      return { ready: false, blockedBy: AiScanStatus.CONSENT_REQUIRED };
+    }
+    return { ready: true, provider, model };
+  }
+
   private async setStatus(
     scanId: string,
     status: AiScanStatus,
@@ -340,13 +449,18 @@ export class AiScanService {
   }
 
   // A rescan with no new commits: copy the base scan's summary. The
-  // findings are already here (carried forward by the static step).
-  private async copySummaryFromBase(scan: {
-    id: string;
-    organizationId: string;
-    pullId: string;
-    baseScanId: string | null;
-  }): Promise<AiScanStatus> {
+  // findings are already here (carried forward by the static step). Null
+  // when the base summary is in another language than the organization's
+  // now: the caller then asks the model again.
+  private async copySummaryFromBase(
+    scan: {
+      id: string;
+      organizationId: string;
+      pullId: string;
+      baseScanId: string | null;
+    },
+    locale: string,
+  ): Promise<AiScanStatus | null> {
     const base = await this.prisma.scan.findUnique({
       where: { id: scan.baseScanId! },
       select: {
@@ -354,9 +468,13 @@ export class AiScanService {
         aiProvider: true,
         aiModel: true,
         aiPromptVersion: true,
+        aiLocale: true,
         aiSummary: true,
       },
     });
+    if (base?.aiSummary && base.aiLocale !== null && base.aiLocale !== locale) {
+      return null;
+    }
     // No review to copy (the base was skipped as too large or over budget):
     // report the same reason rather than an empty CACHED.
     if (!base?.aiSummary) {
@@ -375,6 +493,7 @@ export class AiScanService {
           aiProvider: base?.aiProvider ?? null,
           aiModel: base?.aiModel ?? null,
           aiPromptVersion: base?.aiPromptVersion ?? null,
+          aiLocale: base?.aiLocale ?? null,
           aiTokensIn: null,
           aiTokensOut: null,
         },
@@ -404,6 +523,7 @@ export class AiScanService {
   private async copyFromCache(
     scan: ScanForAi,
     cacheKey: string,
+    mergePrevious: boolean,
   ): Promise<boolean> {
     let sourceScanId: string | null;
     try {
@@ -498,8 +618,10 @@ export class AiScanService {
           provider: source.aiProvider ?? '',
           model: source.aiModel ?? '',
           promptVersion: source.aiPromptVersion ?? AI_PROMPT_VERSION,
+          locale: source.aiLocale,
           tokensIn: null,
           tokensOut: null,
+          mergeWithPrevious: mergePrevious,
         },
         // Any settled state (or none yet) may take a cached copy; a run in
         // flight may not be overwritten.

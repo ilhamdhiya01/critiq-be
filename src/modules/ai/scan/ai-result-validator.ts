@@ -1,7 +1,12 @@
 import {
   FindingCategory,
   FindingSeverity,
+  RuleTier,
 } from '../../../generated/prisma/enums';
+import {
+  ALL_RULE_TIERS,
+  tierForCategory,
+} from '../../../queue/rules/rule-tiers';
 import { SentFile } from './ai-prompt-builder';
 import { ReportReviewInput } from './ai-prompt.constants';
 
@@ -22,7 +27,8 @@ const DROP_BELOW = 0.5;
 const DOWNGRADE_BELOW = 0.7;
 // A hedged title ("Potential …", "May …") is the model guessing: one level
 // down, not dropped — it may still be right.
-const HEDGED_TITLE = /^(potential|possible|may|might)\b/i;
+const HEDGED_TITLE =
+  /^(potential|possible|may|might|mungkin|kemungkinan|berpotensi|potensi|bisa jadi)\b/i;
 const SEVERITY_ORDER: FindingSeverity[] = [
   FindingSeverity.MINOR,
   FindingSeverity.MAJOR,
@@ -49,7 +55,9 @@ export type RejectReason =
   | 'outside_added_lines'
   | 'empty_title'
   | 'message_too_short'
-  | 'echoes_code';
+  | 'echoes_code'
+  // The category belongs to a Critical tier the scan ran without.
+  | 'tier_disabled';
 
 export interface ValidationResult {
   accepted: AiFindingDraft[];
@@ -77,7 +85,7 @@ function isReviewable(line: number, added: Set<number>): boolean {
 function normalizeText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
 
@@ -131,9 +139,22 @@ export function calibrateSeverity(
   return severity;
 }
 
+// Categories outside every Critical tier are general review notes, never
+// Critical — only a tier the organization can switch may block a PR.
+function capUntiered(
+  category: FindingCategory,
+  severity: FindingSeverity,
+): FindingSeverity {
+  return tierForCategory(category) === null &&
+    severity === FindingSeverity.CRITICAL
+    ? FindingSeverity.MAJOR
+    : severity;
+}
+
 export function validateAiFindings(
   findings: ReportReviewInput['findings'],
   sentFiles: Map<string, SentFile>,
+  ruleTiers: readonly RuleTier[] = ALL_RULE_TIERS,
 ): ValidationResult {
   const result: ValidationResult = {
     accepted: [],
@@ -158,9 +179,21 @@ export function validateAiFindings(
       reject('range_too_long');
       continue;
     }
+    const category = finding.category.toUpperCase() as FindingCategory;
+    const tier = tierForCategory(category);
+    if (tier !== null && !ruleTiers.includes(tier)) {
+      reject('tier_disabled');
+      continue;
+    }
+    // A breaking change is often a removal, with no added line to point at:
+    // any numbered line the model was shown will do.
+    const pointable = (line: number) =>
+      category === FindingCategory.BREAKING_CHANGE
+        ? sent.lines.has(line) || isReviewable(line, sent.addedLines)
+        : isReviewable(line, sent.addedLines);
     let inside = true;
     for (let line = finding.line_start; line <= finding.line_end; line += 1) {
-      if (!isReviewable(line, sent.addedLines)) {
+      if (!pointable(line)) {
         inside = false;
         break;
       }
@@ -192,8 +225,11 @@ export function validateAiFindings(
       filePath,
       lineStart: finding.line_start,
       lineEnd: finding.line_end,
-      category: finding.category.toUpperCase() as FindingCategory,
-      severity: calibrateSeverity(reportedSeverity, finding.confidence, title),
+      category,
+      severity: capUntiered(
+        category,
+        calibrateSeverity(reportedSeverity, finding.confidence, title),
+      ),
       title,
       message,
       confidence: finding.confidence,

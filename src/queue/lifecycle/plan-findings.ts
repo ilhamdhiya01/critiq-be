@@ -32,6 +32,10 @@ export interface StoredFinding {
   category: FindingCategory | null;
   confidence: { toNumber(): number } | number | null;
   reportedSeverity?: FindingSeverity | null;
+  // AI re-run on the same commit (regenerate-merge.ts) — carried along.
+  previousRunSeverity?: FindingSeverity | null;
+  latestRunSeverity?: FindingSeverity | null;
+  notReproduced?: boolean;
   firstSeenScanId: string;
   dedupeOfId?: string | null;
 }
@@ -94,6 +98,9 @@ function fromStored(
     confidence: confidenceOf(base.confidence),
     reportedSeverity: base.reportedSeverity ?? null,
     dedupeOfId: base.dedupeOfId ?? null,
+    previousRunSeverity: base.previousRunSeverity ?? null,
+    latestRunSeverity: base.latestRunSeverity ?? null,
+    notReproduced: base.notReproduced ?? false,
     status,
     firstSeenScanId: base.firstSeenScanId,
     originFindingId: base.id,

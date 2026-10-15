@@ -13,6 +13,17 @@ export interface AiTestSnapshot {
   latencyMs: number;
   structuredOutput: 'native' | 'json_mode' | 'failed';
   model: string | null;
+  // AiTestWarning code, so the warning survives a reload. Absent on tests
+  // run before warnings existed.
+  warning?: AiTestWarning['code'] | null;
+}
+
+// The test passed, but the model may still fail real reviews.
+// reasoning_model: it reasoned before answering, and on a large diff can
+// spend the whole output budget doing so (reasoning_exhausted).
+export interface AiTestWarning {
+  code: 'reasoning_model';
+  message: string;
 }
 
 // GET/PUT …/settings/ai. The key itself never appears here — only whether
@@ -47,6 +58,8 @@ export class AiTestResultDto {
   structuredOutput!: 'native' | 'json_mode' | 'failed';
   usage!: { inputTokens: number; outputTokens: number } | null;
   error!: { code: string; message: string } | null;
+  // Only with ok: true.
+  warning!: AiTestWarning | null;
 
   constructor(partial: AiTestResultDto) {
     Object.assign(this, partial);

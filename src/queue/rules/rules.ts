@@ -1,4 +1,5 @@
 import { Rule } from './rule.interface';
+import { SYNTAX_RULE_ID } from './syntax/syntax-check';
 import { secretAwsAccessKeyRule } from './definitions/secret.aws-access-key.rule';
 import { secretAssignmentLiteralRule } from './definitions/secret.assignment-literal.rule';
 import { secretPrivateKeyBlockRule } from './definitions/secret.private-key-block.rule';
@@ -15,6 +16,8 @@ import { codeSqlStringConcatRule } from './definitions/code.sql-string-concat.ru
 import { codeShellInjectionRule } from './definitions/code.shell-injection.rule';
 import { codeInsecureTlsRule } from './definitions/code.insecure-tls.rule';
 import { codeDebuggerLeftRule } from './definitions/code.debugger-left.rule';
+import { codeEmptyCatchRule } from './definitions/code.empty-catch.rule';
+import { secretEnvFallbackRule } from './definitions/secret.env-fallback.rule';
 import { configDockerfileRootSecretRule } from './definitions/config.dockerfile-root-secret.rule';
 import { configCorsWildcardCredentialsRule } from './definitions/config.cors-wildcard-credentials.rule';
 
@@ -32,6 +35,7 @@ export const RULES: Rule[] = [
   secretSlackWebhookRule,
   secretJwtLiteralRule,
   secretDbUrlWithPasswordRule,
+  secretEnvFallbackRule,
   // Fixed-prefix provider credentials, built from one factory — see
   // provider-token.rules.ts for why they are not fourteen separate files.
   ...providerTokenRules,
@@ -43,6 +47,12 @@ export const RULES: Rule[] = [
   codeShellInjectionRule,
   codeInsecureTlsRule,
   codeDebuggerLeftRule,
+  codeEmptyCatchRule,
   configDockerfileRootSecretRule,
   configCorsWildcardCredentialsRule,
 ];
+
+// Whole-file checks: not line rules (they read the changed file itself, see
+// syntax/syntax-check.ts), registered here so the rule list the PM checks
+// covers them too.
+export const FILE_RULE_IDS: string[] = [SYNTAX_RULE_ID];

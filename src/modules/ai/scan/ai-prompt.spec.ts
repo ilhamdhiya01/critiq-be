@@ -1,7 +1,11 @@
+import { RuleTier } from '../../../generated/prisma/enums';
+import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import {
   AI_PROMPT_VERSION,
   buildSystemPrompt,
+  categoriesFor,
   promptFingerprint,
+  reportReviewSchemaFor,
 } from './ai-prompt.constants';
 
 // Acceptance 20. The system prompt and the report_review schema are part of
@@ -18,6 +22,13 @@ const FINGERPRINT_BY_VERSION: Record<string, string> = {
     '05b7cfb140b5af975a4ca502f5112ea2ce7f38349df2ee34c95091a13fbad069',
   'ai-2026.10.1':
     'fa3aff2fef9d58880d8f38e2116c4e3bbb3d568f903f921ad63535ebc65cc1db',
+  'ai-2026.10.2':
+    '33ee9ae58f4545deb7b62d4f6eae722bac5110f4c5417b3d007c75898a3059dc',
+  // Re-pinned without a version bump when the CI tier was removed: its
+  // TIER_CHECKS entry was null (no prompt block), so the text the model sees
+  // is unchanged — the old hash (ef41ba83…) only differed by `"CI":null`.
+  'ai-2026.10.3':
+    'fa551e659b54f7ac3a815ea1b7b2f70a7f7f0d691e478312e448e71581f2dae8',
 };
 
 describe('AI prompt', () => {
@@ -25,12 +36,16 @@ describe('AI prompt', () => {
     expect(promptFingerprint()).toBe(FINGERPRINT_BY_VERSION[AI_PROMPT_VERSION]);
   });
 
-  // Acceptance 15: message/summary in the org locale, titles in English.
-  it('asks for the org language and English titles', () => {
+  // Acceptance 15 (revised): summary, titles and messages all follow the
+  // org locale — titles used to be English-only.
+  it('asks for the org language in summary, titles and messages', () => {
     const prompt = buildSystemPrompt('id');
-    expect(prompt).toContain('Indonesian (Bahasa Indonesia)');
-    expect(prompt).toContain('every "title" in short English');
-    expect(buildSystemPrompt('en')).toContain('in English');
+    expect(prompt).toContain(
+      'write "summary", every "title" and every "message" in Indonesian (Bahasa Indonesia)',
+    );
+    expect(prompt).not.toContain('short English');
+    expect(prompt).not.toContain('{{LANGUAGE}}');
+    expect(buildSystemPrompt('en')).toContain('"message" in English');
   });
 
   // The model used to report "files omitted" on PRs where nothing was.
@@ -53,5 +68,37 @@ describe('AI prompt', () => {
 
   it('treats repository content as data, not instructions', () => {
     expect(buildSystemPrompt('en')).toMatch(/never instructions/i);
+  });
+});
+
+// Rules & Profiles: the model is asked only for the tiers that are on.
+describe('AI prompt — Critical tiers', () => {
+  it('lists every check when all tiers are on', () => {
+    const prompt = buildSystemPrompt('en');
+    expect(prompt).toContain('- Breaking changes (category "breaking_change")');
+    expect(prompt).toContain('- Performance killers (category "performance")');
+    expect(prompt).not.toContain('{{CHECKS}}');
+  });
+
+  it('leaves out the checks of disabled tiers', () => {
+    const tiers = ALL_RULE_TIERS.filter(
+      (tier) => tier !== RuleTier.PERFORMANCE,
+    );
+    const prompt = buildSystemPrompt('en', 'full', tiers);
+    expect(prompt).not.toContain('Performance killers');
+    expect(prompt).toContain('Security vulnerabilities');
+    expect(buildSystemPrompt('en', 'full', [])).toContain(
+      'turned on exactly these. Look for each one actively; report a problem that belongs to a check not listed here (it is turned off) not at all, not even as major or minor:\n- none',
+    );
+  });
+
+  it('narrows the category enum to the enabled tiers', () => {
+    expect(categoriesFor([])).toEqual(['logic', 'other']);
+    expect(categoriesFor([RuleTier.SECURITY])).toEqual(
+      expect.arrayContaining(['injection', 'insecure_tls', 'auth', 'config']),
+    );
+    const schema = JSON.stringify(reportReviewSchemaFor([RuleTier.CRASH]));
+    expect(schema).toContain('"crash"');
+    expect(schema).not.toContain('"performance"');
   });
 });

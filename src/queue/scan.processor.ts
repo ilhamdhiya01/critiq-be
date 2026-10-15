@@ -6,6 +6,7 @@ import Redis from 'ioredis';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../common/redis/redis.constants';
 import {
   AiScanStatus,
@@ -14,6 +15,7 @@ import {
   FindingSource,
   FindingStatus,
   FullReason,
+  RuleTier,
   ScanErrorCode,
   ScanStatus,
 } from '../generated/prisma/enums';
@@ -27,7 +29,11 @@ import {
   loadRecentResolved,
   logWindowMisses,
 } from './lifecycle/lifecycle-context';
-import { CandidateFinding, planFindings } from './lifecycle/plan-findings';
+import {
+  CandidateFinding,
+  planFindings,
+  StoredFinding,
+} from './lifecycle/plan-findings';
 import {
   notifyIfAllCriticalResolved,
   recomputeScanCounts,
@@ -38,10 +44,30 @@ import {
   sanitizeErrorMessage,
   ScanFailure,
 } from './scan-errors';
+import { cachedHeadFileContents } from './head-file-cache';
+import { detectLanguage } from './rules/language-detector';
+import { isFindingEnabled, tierForRule } from './rules/rule-tiers';
+import { RULES } from './rules/rules';
+import { SYNTAX_RULE_ID } from './rules/syntax/syntax-check';
+import {
+  runSyntaxChecks,
+  syntaxCheckFiles,
+  SyntaxStepResult,
+} from './rules/syntax/syntax-step';
 import { ScanJobPayload } from './scan-payload.dto';
 import { SCAN_QUEUE_NAME } from './scan-queue.service';
+import { classifySuppression } from './suppression';
 
 const SCAN_FAILED_NOTIFY_THROTTLE_SECONDS = 3600;
+
+const noSyntaxResult = (): SyntaxStepResult & {
+  decidedOldPaths: Set<string>;
+} => ({
+  hits: [],
+  decidedPaths: new Set<string>(),
+  decidedOldPaths: new Set<string>(),
+  skipped: {},
+});
 
 type LogContext = Record<string, unknown>;
 
@@ -59,6 +85,7 @@ export class ScanProcessor
     private readonly configService: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {
     super();
   }
@@ -99,6 +126,7 @@ export class ScanProcessor
       this.logger.info('scan.skipped_not_runnable', log);
       return;
     }
+    await this.realtime.scanChanged(scanId);
 
     // 2. Fetch the diff this scan reads: the whole PR (FULL), or only what
     // changed since the base scan's head (INCREMENTAL, v1.5.1 langkah 3).
@@ -112,8 +140,10 @@ export class ScanProcessor
         diffMode: true,
         baseScanId: true,
         prevHeadSha: true,
+        ruleTiers: true,
       },
     });
+    const tiers = scanRow.ruleTiers;
     let diffMode = scanRow.diffMode;
     let diff: { files: PullRequestDiffDto['files']; truncated: boolean };
     if (diffMode === DiffMode.INCREMENTAL && scanRow.prevHeadSha) {
@@ -141,6 +171,15 @@ export class ScanProcessor
     } else {
       diff = await this.fetchDiff(job.data, log);
     }
+    // Display only, once per repository — never affects the scan.
+    await this.pullsService
+      .fillMissingLanguage(organizationId, repositoryId)
+      .catch((error: unknown) =>
+        this.logger.warn('scan.language_lookup_failed', {
+          ...log,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     this.assertWithinDeadline(deadline);
 
     // 3–5. Filter, parse, run rules, classify suppression, dedupe, cap —
@@ -148,6 +187,11 @@ export class ScanProcessor
     await job.updateProgress({ step: 'rules', pct: 35 });
     const analysis = analyzeDiff(diff.files, {
       maxDiffBytes: this.configService.getOrThrow<number>('scan.maxDiffBytes'),
+      // Only the rules of the tiers the quality profile had on.
+      rules: RULES.filter((rule) => {
+        const tier = tierForRule(rule.id);
+        return tier !== null && tiers.includes(tier);
+      }),
       afterFile: () => this.assertWithinDeadline(deadline),
     });
     if (analysis.diffTooLarge) {
@@ -183,12 +227,46 @@ export class ScanProcessor
       );
     }
 
+    // A finding of a tier that is now off is neither carried nor resolved:
+    // the code did not change, the profile did. It just leaves the PR.
+    const base = scanRow.baseScanId
+      ? (await loadBaseFindings(this.prisma, scanRow.baseScanId)).filter(
+          (finding) => isFindingEnabled(finding, tiers),
+        )
+      : [];
+
+    // 5b. Syntax (code.syntax_error): the changed files themselves, parsed
+    // whole — a broken brace is invisible to line rules.
+    await job.updateProgress({ step: 'syntax', pct: 60 });
+    const syntax = tiers.includes(RuleTier.CRASH)
+      ? await this.checkChangedFilesSyntax(
+          job.data,
+          scanRow.headSha,
+          diff.files,
+          base,
+          deadline,
+          log,
+        )
+      : noSyntaxResult();
+    const syntaxFindings = syntax.hits.map((hit) => ({
+      ...hit,
+      suppressedReason: classifySuppression({
+        ruleId: hit.ruleId,
+        filePath: hit.filePath,
+        language: detectLanguage(hit.filePath),
+      }),
+    }));
+    const syntaxSuppressed = syntaxFindings.filter(
+      (finding) => finding.suppressedReason !== null,
+    ).length;
+
     // 6. Lifecycle (v1.5.1 langkah 3): continue or close the base scan's
     // findings, and give this scan's own findings NEW or REOPENED.
     await job.updateProgress({ step: 'persist', pct: 90 });
     const candidates: CandidateFinding[] = [
       ...analysis.active,
       ...analysis.suppressed,
+      ...syntaxFindings,
     ].map((finding) => ({
       ...finding,
       source: FindingSource.STATIC,
@@ -198,9 +276,19 @@ export class ScanProcessor
       severity: FindingSeverity.CRITICAL,
       confidence: null,
     }));
-    const base = scanRow.baseScanId
-      ? await loadBaseFindings(this.prisma, scanRow.baseScanId)
-      : [];
+    // Incremental: a syntax finding in a file the check just decided is not
+    // carried by line — the fix may be a brace added elsewhere. It is
+    // matched by fingerprint instead: still broken → PERSISTED, parses →
+    // RESOLVED. Undecided files (fetch failed, capped) carry as before.
+    const reevaluated =
+      diffMode === DiffMode.INCREMENTAL
+        ? base.filter(
+            (finding) =>
+              finding.source === FindingSource.STATIC &&
+              finding.ruleId === SYNTAX_RULE_ID &&
+              syntax.decidedOldPaths.has(finding.filePath),
+          )
+        : [];
     const recent = await loadRecentResolved(this.prisma, pullId, scanId);
     const plan = planFindings({
       scanId,
@@ -210,14 +298,19 @@ export class ScanProcessor
       // the AI step matches its own.
       carry:
         diffMode === DiffMode.INCREMENTAL
-          ? { base, files: diff.files }
+          ? {
+              base: base.filter((finding) => !reevaluated.includes(finding)),
+              files: diff.files,
+            }
           : undefined,
       match:
         diffMode === DiffMode.FULL && base.length > 0
           ? {
               base: base.filter((f) => f.source === FindingSource.STATIC),
             }
-          : undefined,
+          : reevaluated.length > 0
+            ? { base: reevaluated }
+            : undefined,
       recentResolved: recent.rows,
     });
     // Suppressed static findings carried over from the base scan (kept
@@ -248,7 +341,8 @@ export class ScanProcessor
           diffBytes: analysis.diffBytes,
           filesChanged: analysis.filesChanged,
           findingsTruncated: analysis.findingsTruncated,
-          suppressedCount: analysis.suppressedCount + carriedSuppressed,
+          suppressedCount:
+            analysis.suppressedCount + syntaxSuppressed + carriedSuppressed,
           suppressedTruncated: analysis.suppressedTruncated,
           // rulesetVersion is deliberately NOT written here. It is set at
           // enqueue (ScanQueueService) and describes the ruleset the scan
@@ -319,8 +413,8 @@ export class ScanProcessor
       diffBytes: analysis.diffBytes,
       filesChanged: analysis.filesChanged,
       filesSkipped: analysis.filesSkipped,
-      findings: analysis.activeCount,
-      suppressed: analysis.suppressedCount,
+      findings: analysis.activeCount + syntaxFindings.length - syntaxSuppressed,
+      suppressed: analysis.suppressedCount + syntaxSuppressed,
       rulesMs: analysis.rulesMs,
     });
     // Only criticals this push brought (NEW) or brought back (REOPENED):
@@ -344,6 +438,7 @@ export class ScanProcessor
     // than via a `scan.done` event (no EventEmitter yet; the quality-gate
     // check of v1.5.3 is the next consumer). Its outcome lands on the scan's
     // ai* columns; a failure here must never fail the static scan.
+    // maybeEnqueue also publishes the realtime scan.updated for DONE.
     let aiStatus: AiScanStatus | null = null;
     try {
       aiStatus = await this.aiScanService.maybeEnqueue(scanId);
@@ -437,6 +532,7 @@ export class ScanProcessor
       if (!finalized) {
         return;
       }
+      await this.realtime.scanChanged(scanId);
 
       this.logger.error('scan.failed', { ...log, errorCode });
       await this.notifyScanFailed(log, errorCode);
@@ -507,6 +603,80 @@ export class ScanProcessor
       );
     }
     throw error;
+  }
+
+  // Best effort: a fetch failure or a parser surprise skips the check (and
+  // is logged) rather than failing the scan — every other rule's verdict
+  // still stands. Only the scan deadline propagates.
+  private async checkChangedFilesSyntax(
+    data: ScanJobPayload,
+    headSha: string,
+    files: PullRequestDiffDto['files'],
+    base: StoredFinding[],
+    deadline: number,
+    log: LogContext,
+  ): Promise<SyntaxStepResult & { decidedOldPaths: Set<string> }> {
+    const nothing = noSyntaxResult();
+    const { files: selected, capped } = syntaxCheckFiles(
+      files,
+      this.configService.getOrThrow<number>('scan.syntaxMaxFiles'),
+    );
+    if (selected.length === 0) {
+      return nothing;
+    }
+    const brokenBefore = new Set(
+      base
+        .filter((finding) => finding.ruleId === SYNTAX_RULE_ID)
+        .map((finding) => finding.filePath),
+    );
+    const oldPathOf = (file: (typeof selected)[number]) =>
+      file.previousPath ?? file.path;
+    try {
+      const contents = await cachedHeadFileContents(
+        this.redis,
+        this.pullsService,
+        {
+          organizationId: data.organizationId,
+          repositoryId: data.repositoryId,
+          pullId: data.pullId,
+          sha: headSha,
+        },
+        selected.map((file) => file.path),
+      );
+      this.assertWithinDeadline(deadline);
+      const result = runSyntaxChecks(selected, contents, {
+        knownBroken: new Set(
+          selected
+            .filter((file) => brokenBefore.has(oldPathOf(file)))
+            .map((file) => file.path),
+        ),
+        capped,
+        afterFile: () => this.assertWithinDeadline(deadline),
+      });
+      this.logger.info('syntax.checked', {
+        ...log,
+        files: selected.length,
+        hits: result.hits.length,
+        skipped: result.skipped,
+      });
+      return {
+        ...result,
+        decidedOldPaths: new Set(
+          selected
+            .filter((file) => result.decidedPaths.has(file.path))
+            .map(oldPathOf),
+        ),
+      };
+    } catch (error) {
+      if (error instanceof ScanFailure) {
+        throw error;
+      }
+      this.logger.warn('syntax.check_failed', {
+        ...log,
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+      return nothing;
+    }
   }
 
   private assertWithinDeadline(deadline: number) {

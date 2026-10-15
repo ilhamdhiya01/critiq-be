@@ -9,6 +9,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Prisma } from '../../generated/prisma/client';
 import { AiProviderId, AiUsageKind, Role } from '../../generated/prisma/enums';
@@ -31,6 +32,7 @@ import {
   AiSettingsSummaryDto,
   AiTestResultDto,
   AiTestSnapshot,
+  AiTestWarning,
 } from './dto/ai-settings.dto';
 import { aiErrorMessage } from './ai-error-message';
 import { TestAiSettingsDto } from './dto/test-ai-settings.dto';
@@ -38,6 +40,14 @@ import { UpdateAiSettingsDto } from './dto/update-ai-settings.dto';
 
 const TEST_LIMIT_PER_HOUR = 5;
 const HOUR_SECONDS = 3600;
+// Not a refusal: the Admin may pick any model. A reasoning model passes the
+// small fixture, but reviews slower, costs more output tokens, and varies
+// more between regenerations — worth knowing before choosing it.
+const REASONING_MODEL_WARNING: AiTestWarning = {
+  code: 'reasoning_model',
+  message:
+    'This model reasons before answering. Reviews take longer and use more output tokens, results vary more between regenerations, and a very large diff can exhaust the output budget.',
+};
 
 function unprocessable(message: string, field = 'provider'): never {
   throw new UnprocessableEntityException({ field, message });
@@ -55,6 +65,7 @@ export class SettingsService {
     private readonly aiProviderFactory: AiProviderFactory,
     private readonly rateLimiter: RateLimiterService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   // Full settings for an Admin; the minimal read-only view for anyone else.
@@ -340,6 +351,13 @@ export class SettingsService {
         by: actorUserId,
       });
     }
+    if (changedFields.length > 0 || consentEvent) {
+      await this.realtime.publish({
+        type: 'settings.updated',
+        orgId: organizationId,
+        area: 'ai',
+      });
+    }
 
     return this.getAi(organizationId);
   }
@@ -381,10 +399,15 @@ export class SettingsService {
         structuredOutput: completion.structuredOutput,
         usage: completion.usage,
         error: null,
+        warning: completion.reasoning ? REASONING_MODEL_WARNING : null,
       });
       await this.recordTestUsage(organizationId, completion.usage);
     } catch (error) {
       const aiError = toAiError(error);
+      // A failed answer is billed too.
+      if (aiError.usage) {
+        await this.recordTestUsage(organizationId, aiError.usage);
+      }
       this.logger.warn('ai.test_failed', {
         orgId: organizationId,
         code: aiError.code,
@@ -396,8 +419,9 @@ export class SettingsService {
         latencyMs: Date.now() - startedAt,
         model: null,
         structuredOutput: 'failed',
-        usage: null,
+        usage: aiError.usage ?? null,
         error: { code: aiError.code, message: aiErrorMessage(aiError) },
+        warning: null,
       });
     }
 
@@ -407,6 +431,7 @@ export class SettingsService {
       latencyMs: result.latencyMs,
       structuredOutput: result.structuredOutput,
       model: result.model,
+      warning: result.warning?.code ?? null,
     };
     await this.prisma.organization.update({
       where: { id: organizationId },

@@ -5,7 +5,10 @@ import {
   isMustScanPath,
   isTestLikePath,
 } from './rules/path-filter';
-import { isInsideRegexLiteral } from './rules/regex-literal';
+import {
+  isInsideRegexLiteral,
+  isRegexLiteralLine,
+} from './rules/regex-literal';
 
 export interface SuppressionInput {
   ruleId: string;
@@ -19,12 +22,15 @@ export interface SuppressionInput {
 }
 
 // code.* rules that ARE suppressed in test files: disabling TLS against a
-// mock server and a leftover `debugger;` are routine and harmless in tests.
+// mock server, a leftover `debugger;` and an ignored error are routine and
+// harmless in tests.
 // eval / SQL concat / shell injection are not on this list — that code runs
 // in CI, and dynamic input there can still hurt.
 const TEST_SUPPRESSED_CODE_RULES = new Set([
   'code.insecure_tls',
   'code.debugger_left',
+  // A test asserting that a failure is tolerated swallows it on purpose.
+  'code.empty_catch',
 ]);
 
 // code.* rules checked for regex literals. The others (eval, SQL, shell) are
@@ -75,18 +81,22 @@ export function classifySuppression(
   ) {
     return SuppressionReason.COMMENT;
   }
-  if (
-    isRegexAware(input.ruleId) &&
-    input.match &&
-    input.lineText !== undefined &&
-    isInsideRegexLiteral(
-      input.lineText,
-      input.match.start,
-      input.match.length,
-      input.language,
-    )
-  ) {
-    return SuppressionReason.REGEX_LITERAL;
+  if (isRegexAware(input.ruleId) && input.lineText !== undefined) {
+    // With a column, ask whether the match itself sits inside a regex. An
+    // AI finding has no column (it points at a line), so instead ask
+    // whether the line *is* a regex literal — which is what a rule
+    // definition's own detection pattern looks like.
+    const inRegex = input.match
+      ? isInsideRegexLiteral(
+          input.lineText,
+          input.match.start,
+          input.match.length,
+          input.language,
+        )
+      : isRegexLiteralLine(input.lineText, input.language);
+    if (inRegex) {
+      return SuppressionReason.REGEX_LITERAL;
+    }
   }
   return null;
 }

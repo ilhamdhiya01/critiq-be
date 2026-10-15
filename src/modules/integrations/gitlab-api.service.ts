@@ -8,6 +8,9 @@ import {
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import axios from 'axios';
+import { ProviderCommentError } from './provider-comment-error';
+import { ProviderMergeError } from './provider-merge-error';
+import { ProviderReviewError } from './provider-review-error';
 
 export interface GitlabUser {
   id: number;
@@ -42,6 +45,22 @@ export interface GitlabBranch {
   name: string;
 }
 
+export interface GitlabDiffRefs {
+  base_sha: string;
+  start_sha: string;
+  head_sha: string;
+}
+
+// An inline note's place in the diff: new_line for an added or unchanged
+// line on the new side, old_line for a removed one.
+export interface GitlabNotePosition extends GitlabDiffRefs {
+  position_type: 'text';
+  old_path: string;
+  new_path: string;
+  new_line?: number;
+  old_line?: number;
+}
+
 export interface GitlabProjectHook {
   id: number;
 }
@@ -58,6 +77,8 @@ export interface GitlabMergeRequestDiff {
 
 const MAINTAINER_ACCESS_LEVEL = 40;
 const REQUEST_TIMEOUT_MS = 8000;
+// A merge can take GitLab a while on a large project.
+const MERGE_TIMEOUT_MS = 15_000;
 const MR_DIFFS_PAGE_SIZE = 100;
 const MR_DIFFS_HARD_CAP = 500;
 
@@ -140,6 +161,30 @@ export class GitlabApiService {
       return response.data;
     } catch (error) {
       throw this.mapGitlabRequestError(error);
+    }
+  }
+
+  // The project's main language — GitLab's project detail has none; its
+  // languages endpoint returns { name: percentage }. Display only, so best
+  // effort: any failure is null, never an error for the caller.
+  async fetchMainLanguage(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+  ): Promise<string | null> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get<Record<string, number>>(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/languages`,
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+      const ranked = Object.entries(response.data ?? {}).sort(
+        ([, a], [, b]) => b - a,
+      );
+      return ranked[0]?.[0] ?? null;
+    } catch {
+      return null;
     }
   }
 
@@ -342,6 +387,8 @@ export class GitlabApiService {
             url: opts.url,
             token: opts.secretToken,
             merge_requests_events: true,
+            // Comments written on GitLab, for the two-way comment sync.
+            note_events: true,
             push_events: false,
             enable_ssl_verification: true,
           },
@@ -349,6 +396,244 @@ export class GitlabApiService {
         ),
       );
       return response.data;
+    } catch (error) {
+      throw this.mapGitlabRequestError(error);
+    }
+  }
+
+  // Approves an MR as the org token's user (v1.5.2), pinned to `sha` — GitLab
+  // answers 409 when it is no longer the head. 401 means this user may not
+  // approve, or already did: an approval that is already there is the
+  // outcome asked for, so that case succeeds.
+  async approveMergeRequest(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+    sha: string,
+  ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      await firstValueFrom(
+        this.http.post(
+          `${base}/approve`,
+          { sha },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      if (
+        axios.isAxiosError(error) &&
+        error.response?.status === 401 &&
+        (await this.hasApproved(base, token))
+      ) {
+        return;
+      }
+      throw toReviewError(error);
+    }
+  }
+
+  // Withdraws the org token user's approval — how "request changes" lands
+  // on GitLab, with a note giving the reason. 404: it had not approved.
+  async unapproveMergeRequest(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+  ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      await firstValueFrom(
+        this.http.post(
+          `${base}/unapprove`,
+          {},
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return;
+      }
+      throw toReviewError(error);
+    }
+  }
+
+  async createMergeRequestNote(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+    body: string,
+  ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      await firstValueFrom(
+        this.http.post(
+          `${base}/notes`,
+          { body },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      throw toReviewError(error);
+    }
+  }
+
+  // Merges an MR as the org token's user (v1.5.2), pinned to `sha`. GitLab
+  // answers 405/406 when it cannot merge (draft, conflicts, pipeline or
+  // approvals required, discussions open) and 409 when `sha` is no longer
+  // the head.
+  async mergeMergeRequest(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+    merge: { sha: string; squash: boolean; removeSourceBranch: boolean },
+  ): Promise<void> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      await firstValueFrom(
+        this.http.put(
+          `${base}/merge`,
+          {
+            sha: merge.sha,
+            squash: merge.squash,
+            should_remove_source_branch: merge.removeSourceBranch,
+          },
+          { headers: { 'Private-Token': token }, timeout: MERGE_TIMEOUT_MS },
+        ),
+      );
+    } catch (error) {
+      throw toMergeError(error);
+    }
+  }
+
+  // The shas an inline comment's position must name (v1.5.2).
+  async fetchMergeRequestDiffRefs(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+  ): Promise<GitlabDiffRefs> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      const response = await firstValueFrom(
+        this.http.get<{ diff_refs: GitlabDiffRefs | null }>(base, {
+          headers: { 'Private-Token': token },
+          timeout: REQUEST_TIMEOUT_MS,
+        }),
+      );
+      if (!response.data.diff_refs) {
+        throw new ProviderCommentError(
+          'provider_unreachable',
+          true,
+          'no diff_refs',
+        );
+      }
+      return response.data.diff_refs;
+    } catch (error) {
+      throw toCommentError(error);
+    }
+  }
+
+  // Starts a discussion on the MR: a general one, or an inline one when
+  // `position` is given. Returns the discussion and its first note.
+  async createDiscussion(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+    body: string,
+    position?: GitlabNotePosition,
+  ): Promise<{ discussionId: string; noteId: number }> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      const response = await firstValueFrom(
+        this.http.post<{ id: string; notes: { id: number }[] }>(
+          `${base}/discussions`,
+          position ? { body, position } : { body },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+      return {
+        discussionId: response.data.id,
+        noteId: response.data.notes[0]?.id,
+      };
+    } catch (error) {
+      throw toCommentError(error);
+    }
+  }
+
+  async addDiscussionNote(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    mergeRequestIid: string,
+    discussionId: string,
+    body: string,
+  ): Promise<{ noteId: number }> {
+    const base = this.mergeRequestUrl(instanceUrl, projectId, mergeRequestIid);
+    try {
+      const response = await firstValueFrom(
+        this.http.post<{ id: number }>(
+          `${base}/discussions/${encodeURIComponent(discussionId)}/notes`,
+          { body },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
+      return { noteId: response.data.id };
+    } catch (error) {
+      throw toCommentError(error);
+    }
+  }
+
+  // Whether the token's user has approved the MR. Unknown (the approvals
+  // state cannot be read) counts as no.
+  private async hasApproved(base: string, token: string): Promise<boolean> {
+    try {
+      const response = await firstValueFrom(
+        this.http.get<{ user_has_approved?: boolean }>(`${base}/approvals`, {
+          headers: { 'Private-Token': token },
+          timeout: REQUEST_TIMEOUT_MS,
+        }),
+      );
+      return response.data.user_has_approved === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private mergeRequestUrl(
+    instanceUrl: string,
+    projectId: string,
+    mergeRequestIid: string,
+  ): string {
+    return `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/merge_requests/${encodeURIComponent(mergeRequestIid)}`;
+  }
+
+  // Brings a hook created before the comment sync up to date, keeping its
+  // secret token (omitted fields stay as they are). GitLab requires `url`
+  // on every edit.
+  async enableNoteEvents(
+    instanceUrl: string,
+    token: string,
+    projectId: string,
+    hookId: number,
+    url: string,
+  ): Promise<void> {
+    try {
+      await firstValueFrom(
+        this.http.put(
+          `${instanceUrl}/api/v4/projects/${encodeURIComponent(projectId)}/hooks/${hookId}`,
+          {
+            url,
+            merge_requests_events: true,
+            note_events: true,
+            push_events: false,
+          },
+          { headers: { 'Private-Token': token }, timeout: REQUEST_TIMEOUT_MS },
+        ),
+      );
     } catch (error) {
       throw this.mapGitlabRequestError(error);
     }
@@ -431,4 +716,85 @@ export class GitlabApiService {
   normalizeInstanceUrl(url: string): string {
     return url.trim().replace(/\/+$/, '');
   }
+}
+
+// GitLab's answer to a review call, as a ProviderReviewError: what failed
+// decides whether the review-sync queue retries.
+function toReviewError(error: unknown): ProviderReviewError {
+  if (!axios.isAxiosError(error)) {
+    return new ProviderReviewError(
+      'unknown',
+      true,
+      error instanceof Error ? error.message.slice(0, 200) : undefined,
+    );
+  }
+  const status = error.response?.status;
+  const data = error.response?.data as { message?: unknown } | undefined;
+  const detail = JSON.stringify(data?.message ?? '').slice(0, 200);
+  if (status === undefined || status === 429 || status >= 500) {
+    return new ProviderReviewError('provider_unreachable', true, detail);
+  }
+  // The pinned sha is no longer the MR's head.
+  if (status === 409) {
+    return new ProviderReviewError('head_changed', false, detail);
+  }
+  // The token's user may not approve (author, not an eligible approver).
+  if (status === 401) {
+    return new ProviderReviewError('not_allowed', false, detail);
+  }
+  if (status === 403 || status === 404) {
+    return new ProviderReviewError('insufficient_permission', false, detail);
+  }
+  return new ProviderReviewError('unknown', false, detail);
+}
+
+// GitLab's answer to a merge, as a ProviderMergeError.
+function toMergeError(error: unknown): ProviderMergeError {
+  if (!axios.isAxiosError(error)) {
+    return new ProviderMergeError(
+      'provider_unreachable',
+      error instanceof Error ? error.message.slice(0, 300) : undefined,
+    );
+  }
+  const status = error.response?.status;
+  const data = error.response?.data as { message?: unknown } | undefined;
+  const detail = JSON.stringify(data?.message ?? '').slice(0, 300);
+  if (status === 409) {
+    return new ProviderMergeError('head_changed', detail);
+  }
+  if (status === 405 || status === 406 || status === 422) {
+    return new ProviderMergeError('not_mergeable', detail);
+  }
+  if (status === 401 || status === 403 || status === 404) {
+    return new ProviderMergeError('insufficient_permission', detail);
+  }
+  return new ProviderMergeError('provider_unreachable', detail);
+}
+
+// GitLab's answer to a comment call, as a ProviderCommentError.
+function toCommentError(error: unknown): ProviderCommentError {
+  if (error instanceof ProviderCommentError) {
+    return error;
+  }
+  if (!axios.isAxiosError(error)) {
+    return new ProviderCommentError(
+      'unknown',
+      true,
+      error instanceof Error ? error.message.slice(0, 200) : undefined,
+    );
+  }
+  const status = error.response?.status;
+  const data = error.response?.data as { message?: unknown } | undefined;
+  const detail = JSON.stringify(data?.message ?? '').slice(0, 200);
+  if (status === undefined || status === 429 || status >= 500) {
+    return new ProviderCommentError('provider_unreachable', true, detail);
+  }
+  if (status === 401 || status === 403 || status === 404) {
+    return new ProviderCommentError('insufficient_permission', false, detail);
+  }
+  // A position GitLab cannot map ("line_code can't be blank").
+  if (status === 400 || status === 422) {
+    return new ProviderCommentError('invalid_position', false, detail);
+  }
+  return new ProviderCommentError('unknown', false, detail);
 }

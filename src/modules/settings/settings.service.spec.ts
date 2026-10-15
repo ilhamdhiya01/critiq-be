@@ -8,6 +8,11 @@ import { AiError } from '../ai/ai-error';
 import { AiProviderFactory } from '../ai/ai-provider.factory';
 import { AiProvider } from '../ai/ai-provider.interface';
 import { SettingsService } from './settings.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+
+jest.mock('../../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only / heavy modules this CommonJS Jest setup cannot load; every
 // collaborator is a stub below (same pattern as webhooks.service.spec.ts).
@@ -147,14 +152,22 @@ function setup() {
   };
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const service = new SettingsService(
     prisma as unknown as PrismaService,
     encryption,
     factory as unknown as AiProviderFactory,
     rateLimiter as unknown as RateLimiterService,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
   return {
+    realtime,
     service,
     prisma,
     org,
@@ -392,6 +405,64 @@ describe('SettingsService — test connection', () => {
         'Provider stopped at the output token limit before finishing the result.',
     });
     expect(provider.complete.mock.calls).toHaveLength(1); // no retry
+  });
+
+  // The fixture is small, so a reasoning model passes it and may then fail
+  // every large diff with reasoning_exhausted.
+  it('passes a reasoning model with a warning that survives a reload', async () => {
+    const { service, provider, org } = setup();
+    provider.complete.mockResolvedValue({
+      toolInput: { summary: 'Disables TLS verification.', findings: [] },
+      usage: { inputTokens: 410, outputTokens: 900 },
+      model: 'deepseek-v4-flash',
+      structuredOutput: 'native',
+      reasoning: true,
+    });
+
+    const result = await service.testAi(ORG, {});
+
+    expect(result).toMatchObject({
+      ok: true,
+      error: null,
+      warning: {
+        code: 'reasoning_model',
+        message: expect.any(String) as unknown,
+      },
+    });
+    expect(org.aiLastTest).toMatchObject({ warning: 'reasoning_model' });
+  });
+
+  it('has no warning for a model that answers directly', async () => {
+    const { service, org } = setup();
+    const result = await service.testAi(ORG, {});
+    expect(result.warning).toBeNull();
+    expect(org.aiLastTest).toMatchObject({ warning: null });
+  });
+
+  it('records TEST usage for a billed failure', async () => {
+    const { service, provider, prisma } = setup();
+    provider.complete.mockRejectedValue(
+      new AiError('reasoning_exhausted', {
+        usage: { inputTokens: 410, outputTokens: 1000 },
+      }),
+    );
+
+    const result = await service.testAi(ORG, {});
+
+    expect(result).toMatchObject({
+      ok: false,
+      usage: { inputTokens: 410, outputTokens: 1000 },
+      error: { code: 'reasoning_exhausted' },
+      warning: null,
+    });
+    expect(prisma.aiUsageDaily.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          kind: AiUsageKind.TEST,
+          outputTokens: 1000,
+        }) as unknown,
+      }),
+    );
   });
 
   // Acceptance 10.

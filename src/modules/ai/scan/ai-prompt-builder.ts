@@ -1,14 +1,16 @@
-import { FindingCategory } from '../../../generated/prisma/enums';
+import { FindingCategory, RuleTier } from '../../../generated/prisma/enums';
 import { parsePatch } from '../../../queue/diff/diff-parser';
 import {
   isIgnoredPath,
   isMustScanPath,
 } from '../../../queue/rules/path-filter';
+import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import { AiRequest } from '../ai-provider.interface';
 import {
   buildSystemPrompt,
-  REPORT_REVIEW_SCHEMA,
+  languageName,
   REPORT_REVIEW_TOOL,
+  reportReviewSchemaFor,
   ReviewMode,
 } from './ai-prompt.constants';
 
@@ -92,6 +94,8 @@ export interface PromptBuildInput {
   // v1.5.1 langkah 3: INCREMENTAL scans review only the latest push, with
   // what the previous review reported and what this push resolved.
   mode?: ReviewMode;
+  // The scan's enabled Critical tiers; all of them when absent.
+  ruleTiers?: RuleTier[];
   lifecycle?: {
     resolved: LifecycleItem[];
     persisted: LifecycleItem[];
@@ -284,6 +288,7 @@ function dominantLanguage(paths: string[]): string {
 }
 
 export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
+  const tiers = input.ruleTiers ?? ALL_RULE_TIERS;
   const secretLines = secretLinesByFile(input.staticFindings);
   const withFindings = new Set(
     input.staticFindings.filter((f) => !f.suppressed).map((f) => f.filePath),
@@ -365,17 +370,24 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
   ].join('\n');
 
   const system =
-    buildSystemPrompt(input.locale, input.mode ?? 'full') +
+    buildSystemPrompt(input.locale, input.mode ?? 'full', tiers) +
     (input.systemSuffix ?? '');
   const diffIntro =
-    'DIFF (new-side line numbers; "+" marks added lines — the only lines a finding may point at):';
+    'DIFF (new-side line numbers; "+" marks added lines — the only lines a finding may point at, except a breaking change, which may point at any numbered line of its hunk):';
+  // Repeated at the very end: smaller models drift back to English when
+  // the only language instruction sits far above a long English diff.
+  const languageReminder = `Reply in ${languageName(input.locale)}: the summary, every title and every message.`;
 
   // Drop files from the end until the prompt fits the input budget.
   const kept = [...rendered];
   const omittedForSize: string[] = [];
   const size = () =>
     estimateTokens(
-      system + header + diffIntro + kept.map((f) => f.text).join('\n\n'),
+      system +
+        header +
+        diffIntro +
+        kept.map((f) => f.text).join('\n\n') +
+        languageReminder,
     );
   while (kept.length > 0 && size() > input.maxInputTokens) {
     omittedForSize.unshift(kept.pop()!.path);
@@ -401,6 +413,8 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
     diffIntro,
     '',
     kept.map((f) => f.text).join('\n\n'),
+    '',
+    languageReminder,
   ].join('\n');
 
   const sentFiles = new Map<string, SentFile>(
@@ -415,7 +429,7 @@ export function buildReviewPrompt(input: PromptBuildInput): PromptBuildResult {
         name: REPORT_REVIEW_TOOL,
         description:
           'Report the review of this pull request: a short summary, an overall risk level, and each problem found.',
-        schema: REPORT_REVIEW_SCHEMA,
+        schema: reportReviewSchemaFor(tiers),
       },
       maxTokens: input.maxOutputTokens,
       temperature: 0,

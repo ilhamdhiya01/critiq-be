@@ -4,7 +4,9 @@ import {
   SuppressionReason,
 } from '../../../generated/prisma/enums';
 import { jaroWinkler } from '../../../common/text/jaro-winkler';
+import { detectLanguage } from '../../../queue/rules/language-detector';
 import { classifySuppression } from '../../../queue/suppression';
+import { SentFile } from './ai-prompt-builder';
 import { AiFindingDraft } from './ai-result-validator';
 
 // AI findings against each other, then against the static ones of the same
@@ -21,7 +23,8 @@ const SIMILAR_TITLE = 0.85;
 const MAX_MERGED_RANGE = 40;
 // Stripped before fingerprinting: "Potential missing X" and "Missing X"
 // are the same finding.
-const HEDGE_PREFIX = /^(potential|possible|may|might)\s+/i;
+const HEDGE_PREFIX =
+  /^(potential|possible|may|might|mungkin|kemungkinan|berpotensi|potensi|bisa jadi)\s+/i;
 
 export interface StaticForDedupe {
   id: string;
@@ -63,7 +66,7 @@ function normalizeTitle(title: string): string {
     .trim()
     .replace(HEDGE_PREFIX, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
 
@@ -128,27 +131,44 @@ function overlaps(finding: KeptAiFinding, other: StaticForDedupe): boolean {
 
 // Why a finding kept after dedupe is suppressed: the reason of a suppressed
 // static finding it overlaps (the model saw the same commented-out key or
-// regex), else the path rules — no line/column, so only test_file applies.
+// regex), else the ordinary rules.
+//
+// `sentFiles` supplies the text of the line the model pointed at, which is
+// what lets REGEX_LITERAL and COMMENT apply to AI findings at all. Without
+// it only path rules can fire, and the model reports a rule definition's own
+// detection regex — `process.env.X ?? '...'` inside a pattern that exists to
+// find that shape — as a hard-coded secret. No `match` is passed: the model
+// reports a line, not a column, and classifySuppression switches to a
+// line-level regex check when the column is absent.
 function suppressionFor(
   finding: KeptAiFinding,
   suppressedStatic: StaticForDedupe[],
+  sentFiles?: Map<string, SentFile>,
 ): SuppressionReason | null {
   const inherited = suppressedStatic.find((s) => overlaps(finding, s));
   if (inherited) {
     return inherited.suppressedReason;
   }
+  const lineText = sentFiles
+    ?.get(finding.filePath)
+    ?.lines.get(finding.lineStart);
   return classifySuppression({
     ruleId:
       FAMILY_RULE_ID[finding.category] ??
       `ai.${finding.category.toLowerCase()}`,
     filePath: finding.filePath,
-    language: '',
+    language: detectLanguage(finding.filePath),
+    lineText,
   });
 }
 
 export function dedupeAiFindings(
   findings: AiFindingDraft[],
   staticFindings: StaticForDedupe[],
+  // The files the model was shown, keyed by path. Optional: the regenerate
+  // path rebuilds findings from stored rows and has no diff to hand, so it
+  // falls back to path-only suppression.
+  sentFiles?: Map<string, SentFile>,
 ): DedupeResult {
   const { merged, folded } = mergeAiFindings(findings);
   const result: DedupeResult = { kept: [], merged: folded, duplicates: [] };
@@ -166,7 +186,7 @@ export function dedupeAiFindings(
     } else {
       result.kept.push({
         ...finding,
-        suppressedReason: suppressionFor(finding, staticSuppressed),
+        suppressedReason: suppressionFor(finding, staticSuppressed, sentFiles),
       });
     }
   }

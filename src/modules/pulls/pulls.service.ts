@@ -8,6 +8,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import {
   FindingSeverity,
   FindingSource,
@@ -21,6 +22,7 @@ import type {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
 } from '../webhooks/webhook-payload';
+import { assertGithubAccess } from '../integrations/github-access';
 import {
   GithubAppService,
   GithubPullRequestFile,
@@ -52,6 +54,12 @@ import {
   toApiLifecycleFields,
 } from '../scans/dto/lifecycle-fields';
 import { ScansService } from '../scans/scans.service';
+import {
+  REVIEW_INCLUDE,
+  ReviewDto,
+  toReviewDto,
+} from '../reviews/dto/review.dto';
+import { loadMergeBlockers } from '../reviews/merge-blockers';
 
 // What PR lists show of the latest scan — selected, not included, so a list
 // never drags each scan's full row along.
@@ -66,6 +74,13 @@ const LATEST_SCAN_LIST_SELECT = {
 } as const;
 
 const HEAD_FILE_FETCH_CONCURRENCY = 5;
+
+// The PR's most recent review decision (v1.5.2), with its reviewer.
+const LATEST_REVIEW = {
+  orderBy: { createdAt: 'desc' },
+  take: 1,
+  include: REVIEW_INCLUDE,
+} as const;
 // Larger files are skipped for AI context: generated or vendored content,
 // and too big to be worth the tokens around a small hunk.
 const MAX_HEAD_FILE_CHARS = 512 * 1024;
@@ -96,6 +111,7 @@ export class PullsService {
     private readonly encryptionService: EncryptionService,
     private readonly scansService: ScansService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   // Called from WebhooksService when an in-scope MR/PR event is received,
@@ -121,14 +137,17 @@ export class PullsService {
       repositoryId,
       mapped.targetBranch,
     );
+    const where = {
+      repositoryId_externalId: { repositoryId, externalId: mapped.externalId },
+    };
+    // Only to tell the client whether the diff changed (realtime event).
+    const previous = await this.prisma.pullRequest.findUnique({
+      where,
+      select: { headSha: true },
+    });
 
-    return this.prisma.pullRequest.upsert({
-      where: {
-        repositoryId_externalId: {
-          repositoryId,
-          externalId: mapped.externalId,
-        },
-      },
+    const pull = await this.prisma.pullRequest.upsert({
+      where,
       create: {
         organizationId,
         repositoryId,
@@ -157,6 +176,15 @@ export class PullsService {
       },
       select: { id: true, state: true, headSha: true },
     });
+    await this.realtime.publish({
+      type: 'pull.updated',
+      orgId: organizationId,
+      repoId: repositoryId,
+      pullId: pull.id,
+      state: pull.state,
+      headChanged: previous?.headSha !== pull.headSha,
+    });
+    return pull;
   }
 
   async list(
@@ -166,7 +194,10 @@ export class PullsService {
     await this.assertRepositoryInOrg(organizationId, repositoryId);
     const pulls = await this.prisma.pullRequest.findMany({
       where: { repositoryId },
-      include: { latestScan: { select: LATEST_SCAN_LIST_SELECT } },
+      include: {
+        latestScan: { select: LATEST_SCAN_LIST_SELECT },
+        reviews: LATEST_REVIEW,
+      },
       orderBy: { updatedAt: 'desc' },
     });
     const activeScans = await this.scansService.findActiveScans(
@@ -186,6 +217,7 @@ export class PullsService {
           effectivePolicy: pull.effectivePolicy,
           latestScan: this.toLatestScanDto(pull.latestScan),
           activeScan: activeScans.get(pull.id) ?? null,
+          latestReview: this.toLatestReviewDto(pull),
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -212,6 +244,7 @@ export class PullsService {
         // the last valid result and never a count from an in-flight or
         // discarded scan. See PullRequest.latestScanId in schema.prisma.
         latestScan: { select: LATEST_SCAN_LIST_SELECT },
+        reviews: LATEST_REVIEW,
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -239,6 +272,7 @@ export class PullsService {
           effectivePolicy: pull.effectivePolicy,
           latestScan: this.toLatestScanDto(pull.latestScan),
           activeScan: activeScans.get(pull.id) ?? null,
+          latestReview: this.toLatestReviewDto(pull),
           createdAt: pull.createdAt,
           updatedAt: pull.updatedAt,
         }),
@@ -254,6 +288,7 @@ export class PullsService {
       where: { id: pullRequestId },
       include: {
         repository: { select: { path: true } },
+        reviews: LATEST_REVIEW,
         // `latestScan`, not `scans`: the latter is every attempt ever made
         // for this PR (FAILED and SUPERSEDED included). This pointer only
         // moves on a terminal transition, so the review page shows one
@@ -292,6 +327,7 @@ export class PullsService {
     ) {
       throw new NotFoundException('Pull request not found.');
     }
+    const mergeBlockers = await loadMergeBlockers(this.prisma, pull);
 
     return new PullRequestDetailDto({
       id: pull.id,
@@ -306,6 +342,8 @@ export class PullsService {
       headSha: pull.headSha,
       state: pull.state,
       effectivePolicy: pull.effectivePolicy,
+      latestReview: this.toLatestReviewDto(pull),
+      merge: { allowed: mergeBlockers.length === 0, blockers: mergeBlockers },
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
             ...toApiAiScanFields(pull.latestScan),
@@ -343,6 +381,9 @@ export class PullsService {
                   category: finding.category,
                   confidence: finding.confidence,
                   reportedSeverity: finding.reportedSeverity,
+                  previousRunSeverity: finding.previousRunSeverity,
+                  latestRunSeverity: finding.latestRunSeverity,
+                  notReproduced: finding.notReproduced,
                   status: finding.status,
                   firstSeenScanId: finding.firstSeenScanId,
                   originFindingId: finding.originFindingId,
@@ -529,6 +570,58 @@ export class PullsService {
     return contents;
   }
 
+  // Repositories connected before Repository.language existed are asked
+  // once, on their next scan — the worker already talks to the provider,
+  // GET and the webhook never do. Display only: a GitHub failure leaves it
+  // to the next scan; GitLab's lookup is already best effort (null).
+  async fillMissingLanguage(
+    organizationId: string,
+    repositoryId: string,
+  ): Promise<void> {
+    const repository = await this.prisma.repository.findUnique({
+      where: { id: repositoryId },
+      include: { integration: true },
+    });
+    if (
+      !repository ||
+      repository.organizationId !== organizationId ||
+      repository.languageCheckedAt
+    ) {
+      return;
+    }
+    const { integration } = repository;
+    let language: string | null;
+    if (integration.source === Provider.GITHUB) {
+      const [owner, repo] = repository.path.split('/');
+      const detail = await this.githubAppService.fetchRepository(
+        integration.installationId ?? '',
+        owner,
+        repo,
+      );
+      language = detail.language ?? null;
+    } else {
+      language = await this.gitlabApiService.fetchMainLanguage(
+        integration.instanceUrl ?? '',
+        integration.encryptedToken
+          ? this.encryptionService.decrypt(integration.encryptedToken)
+          : '',
+        repository.externalId,
+      );
+    }
+    const { count } = await this.prisma.repository.updateMany({
+      where: { id: repositoryId, languageCheckedAt: null },
+      data: { language, languageCheckedAt: new Date() },
+    });
+    if (count > 0 && language) {
+      await this.realtime.publish({
+        type: 'repo.updated',
+        orgId: organizationId,
+        repoId: repositoryId,
+        change: 'language_detected',
+      });
+    }
+  }
+
   // The PR with its repository and integration, tenant-checked (404 across
   // orgs/repos) and refusing a dead credential — shared by the diff and
   // head-file fetches so both resolve access the same way.
@@ -564,6 +657,7 @@ export class PullsService {
             : 'token_invalid',
       });
     }
+    assertGithubAccess(integration);
     return pull;
   }
 
@@ -633,6 +727,14 @@ export class PullsService {
       annotationsScanId: latestScan.id,
       annotationsHeadSha: latestScan.headSha,
     };
+  }
+
+  private toLatestReviewDto(pull: {
+    headSha: string | null;
+    reviews: Parameters<typeof toReviewDto>[0][];
+  }): ReviewDto | null {
+    const [review] = pull.reviews;
+    return review ? toReviewDto(review, pull.headSha) : null;
   }
 
   private toLatestScanDto(

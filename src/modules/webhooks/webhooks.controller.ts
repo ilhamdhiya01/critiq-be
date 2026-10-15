@@ -97,6 +97,8 @@ export class WebhooksController {
           .json({ received: true, skipped: outcome.reason });
         return;
       case 'pull_closed':
+      case 'installation_updated':
+      case 'comment_recorded':
         res.status(HttpStatus.OK).json({ received: true });
         return;
       case 'scan_enqueued':

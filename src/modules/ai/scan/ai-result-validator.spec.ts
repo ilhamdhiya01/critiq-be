@@ -1,4 +1,5 @@
-import { FindingSeverity } from '../../../generated/prisma/enums';
+import { FindingSeverity, RuleTier } from '../../../generated/prisma/enums';
+import { ALL_RULE_TIERS } from '../../../queue/rules/rule-tiers';
 import { SentFile } from './ai-prompt-builder';
 import { ReportReviewInput } from './ai-prompt.constants';
 import { validateAiFindings } from './ai-result-validator';
@@ -15,6 +16,8 @@ const SENT = new Map<string, SentFile>([
         ...Array.from({ length: 21 }, (_, i) => 100 + i),
       ]),
       lines: new Map([
+        // Context shown around a hunk where an export was removed.
+        [60, 'export function startSession(token: string) {'],
         [110, '  await refreshSession(token);'],
         // A rule definition: describes a problem, is not one.
         [114, 'export const secretAssignmentLiteralRule: Rule = {'],
@@ -126,6 +129,10 @@ describe('validateAiFindings', () => {
     ['May leak the refresh token', 'critical', 0.6, 'MINOR'],
     ['possible null dereference', 'major', 0.8, 'MINOR'],
     ['Maybe-typed response is never checked', 'major', 0.8, 'MAJOR'],
+    // Titles follow the org language, so Indonesian hedges count too.
+    ['Kemungkinan race pada cache sesi', 'critical', 0.9, 'MAJOR'],
+    ['Berpotensi membocorkan refresh token', 'major', 0.8, 'MINOR'],
+    ['Potongan string tidak divalidasi', 'major', 0.8, 'MAJOR'],
   ] as const)('"%s" (%s, %f) → %s', (title, severity, confidence, expected) => {
     const { accepted } = validateAiFindings(
       [finding({ title, severity, confidence })],
@@ -186,5 +193,44 @@ describe('validateAiFindings', () => {
       SENT,
     );
     expect(accepted).toHaveLength(1);
+  });
+});
+
+// Rules & Profiles: what the quality profile allows.
+describe('validateAiFindings — Critical tiers', () => {
+  it('rejects a finding of a tier the scan ran without', () => {
+    const { accepted, rejected } = validateAiFindings(
+      [finding()],
+      SENT,
+      ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.ERROR_HANDLING),
+    );
+    expect(accepted).toEqual([]);
+    expect(rejected).toEqual([
+      { file: 'src/session.ts', reason: 'tier_disabled' },
+    ]);
+  });
+
+  it('never keeps a logic finding critical', () => {
+    const { accepted } = validateAiFindings(
+      [finding({ category: 'logic' })],
+      SENT,
+      [],
+    );
+    expect(accepted[0].severity).toBe(FindingSeverity.MAJOR);
+    expect(accepted[0].reportedSeverity).toBe(FindingSeverity.CRITICAL);
+  });
+
+  it('lets a breaking change point at a context line of its hunk', () => {
+    const removed = finding({
+      category: 'breaking_change',
+      line_start: 60,
+      line_end: 60,
+      title: 'Exported refreshSession removed',
+      message: 'Callers of the exported refreshSession will fail to compile.',
+    });
+    expect(validateAiFindings([removed], SENT).accepted).toHaveLength(1);
+    expect(
+      validateAiFindings([{ ...removed, category: 'crash' }], SENT).rejected,
+    ).toEqual([{ file: 'src/session.ts', reason: 'outside_added_lines' }]);
   });
 });

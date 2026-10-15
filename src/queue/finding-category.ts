@@ -1,4 +1,5 @@
 import { FindingCategory } from '../generated/prisma/enums';
+import { SYNTAX_RULE_ID } from './rules/syntax/syntax-check';
 
 // Category of a static rule — the shared vocabulary AI findings are deduped
 // against (v1.5.1 langkah 2). Must stay in step with the backfill in the
@@ -21,6 +22,14 @@ export function categoryForRule(ruleId: string): FindingCategory {
   }
   if (ruleId.startsWith('config.')) {
     return FindingCategory.CONFIG;
+  }
+  // What an AI review files a broken brace or a left-in breakpoint under —
+  // so the two dedupe. Backfilled by `backfill_crash_category`.
+  if (ruleId === SYNTAX_RULE_ID || ruleId === 'code.debugger_left') {
+    return FindingCategory.CRASH;
+  }
+  if (ruleId === 'code.empty_catch') {
+    return FindingCategory.ERROR_HANDLING;
   }
   return FindingCategory.OTHER;
 }

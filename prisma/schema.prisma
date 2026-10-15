@@ -24,6 +24,8 @@ model User {
   connectedIntegrations Integration[]  @relation("IntegrationConnectedBy")
   aiConsentOrgs         Organization[] @relation("OrganizationAiConsentBy")
   updatedAiCredentials  AiCredential[] @relation("AiCredentialUpdatedBy")
+  pullReviews           PullReview[]   @relation("PullReviewReviewer")
+  pullComments          PullComment[]  @relation("PullCommentAuthor")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -50,6 +52,8 @@ model Organization {
   aiCredentials      AiCredential[]
   aiUsageDaily       AiUsageDaily[]
   aiSummaries        AiSummary[]
+  pullReviews        PullReview[]
+  pullComments       PullComment[]
 
   // AI provider (v1.5.1 langkah 1). The active provider/model; credentials
   // live per provider in ai_credentials so switching back and forth never
@@ -64,10 +68,29 @@ model Organization {
   // Result of the last "Test connection" — shown back in GET settings/ai.
   aiLastTest         Json?
 
+  // Quality profile: the Critical tiers this organization turned off. The
+  // disabled ones are stored rather than the enabled ones, so every
+  // organization starts with all tiers on, and a tier added later is on too.
+  disabledRuleTiers  RuleTier[] @default([])
+  ruleTiersUpdatedAt DateTime?
+  ruleTiersUpdatedBy String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("organizations")
+}
+
+// The Critical tiers of the quality profile (Rules & Profiles). Each tier
+// groups static rules and AI categories — see
+// src/queue/rules/rule-tiers.ts for what belongs to which.
+enum RuleTier {
+  SECRETS
+  CRASH
+  BREAKING_CHANGE
+  ERROR_HANDLING
+  PERFORMANCE
+  SECURITY
 }
 
 model Membership {
@@ -179,6 +202,12 @@ enum IntegrationState {
   // (Fase 4) to detect that approval automatically — this state persists
   // until an admin re-runs the install flow after approval.
   PENDING_APPROVAL
+  // GitHub App only, from the App's `installation` webhook: removed or
+  // suspended on GitHub's side. The row and its repositories are kept —
+  // reinstalling upserts the same row back to ACTIVE. Disconnecting from
+  // Critiq deletes it instead (DELETE …/integrations/github).
+  UNINSTALLED
+  SUSPENDED
 }
 
 // Short-lived, single-use record bridging the GitHub App installation
@@ -214,6 +243,13 @@ model Repository {
   externalId     String
   path           String
   defaultBranch  String
+
+  // Main language as the provider reports it — display only. Read at
+  // connect; repos connected before the column existed are filled once by
+  // the worker on their next scan (languageCheckedAt null). Null language
+  // with a languageCheckedAt = the provider did not know.
+  language          String?
+  languageCheckedAt DateTime?
 
   // GitLab-only — a hook is registered per-repo via the GitLab API when the
   // repo is connected (see ReposService.createRepos). Null until that call
@@ -409,6 +445,8 @@ model PullRequest {
   // Repeated webhook events (opened, then synchronize, then closed) for
   // the same PR/MR must upsert the same row, never duplicate it.
   findings Finding[]
+  reviews  PullReview[]
+  comments PullComment[]
 
   @@unique([repositoryId, externalId])
   @@index([organizationId])
@@ -444,6 +482,11 @@ model Scan {
   // that didn't exist yet when they actually ran.
   rulesetVersion String
 
+  // The organization's enabled Critical tiers when the scan was created —
+  // what the static rules and the AI review were allowed to check. A scan
+  // keeps the profile it ran under even after the profile changes.
+  ruleTiers RuleTier[] @default([SECRETS, CRASH, BREAKING_CHANGE, ERROR_HANDLING, PERFORMANCE, SECURITY])
+
   // True once findings for this scan hit the 500-per-scan cap (see
   // ScansModule) — the first 500 are still persisted, this just tells the
   // FE "there were more."
@@ -464,6 +507,9 @@ model Scan {
   aiProvider          String?
   aiModel             String?
   aiPromptVersion     String?
+  // The organization language the review was written in. Null = the scan
+  // ran before this was recorded.
+  aiLocale            String?
   aiTokensIn          Int?
   aiTokensOut         Int?
   aiCached            Boolean       @default(false)
@@ -551,15 +597,26 @@ model Finding {
 
   // Shared vocabulary for static and AI findings, used to dedupe one against
   // the other. Nullable only for rows the migration backfill could not map.
-  category         FindingCategory?
+  category            FindingCategory?
   // AI only, 0.00–1.00 as the model reported it.
-  confidence       Decimal?         @db.Decimal(3, 2)
+  confidence          Decimal?         @db.Decimal(3, 2)
   // AI only: the severity the model reported, before Critiq's calibration
   // (confidence downgrade, hedged-title guard) — kept to evaluate it.
-  reportedSeverity FindingSeverity?
+  reportedSeverity    FindingSeverity?
+  // AI only — a re-run on the same commit (regenerate, or a rescan with no
+  // new commits) by the same provider, model and prompt is merged with the
+  // earlier run instead of replacing it: a model is not deterministic, and a
+  // critical that vanishes on regenerate is the dangerous kind of noise.
+  // When the two runs rated a finding differently, `severity` is the higher
+  // and these hold each run's own; null when they agreed.
+  previousRunSeverity FindingSeverity?
+  latestRunSeverity   FindingSeverity?
+  // Reported by an earlier run on the same commit but not by the latest —
+  // kept and counted until a reviewer decides (dismiss: v1.5.2).
+  notReproduced       Boolean          @default(false)
   // AI finding kept although it duplicates this static finding
   // (AI_KEEP_DEDUPED=true, suppressedReason DEDUPE_STATIC).
-  dedupeOfId       String?
+  dedupeOfId          String?
 
   // Lifecycle (v1.5.1 langkah 3). pullId is denormalized from the scan so
   // lifecycle queries across a PR's scans stay cheap. A RESOLVED row lives
@@ -652,6 +709,8 @@ enum FindingCategory {
   DATA_LOSS
   CONFIG
   OTHER
+  CRASH
+  BREAKING_CHANGE
 }
 
 enum AiScanStatus {
@@ -703,6 +762,8 @@ enum FullReason {
   RULESET_CHANGED
   PROMPT_CHANGED
   MANUAL
+  // The organization's enabled Critical tiers changed since the base scan.
+  RULES_CHANGED
 }
 
 enum FindingStatus {
@@ -710,4 +771,114 @@ enum FindingStatus {
   PERSISTED
   REOPENED
   RESOLVED
+}
+
+// A human's decision on a PR (v1.5.2): approve or request changes, for one
+// commit. The record in Critiq is the source of truth; syncStatus tracks the
+// copy sent to GitHub/GitLab (as Critiq's App / the org token, never as the
+// reviewer — see CLAUDE.md "Review & sinkronisasi ke provider"). Policy,
+// role and confirmation are snapshots, for the audit trail.
+model PullReview {
+  id                 String           @id @default(cuid())
+  organizationId     String
+  pullId             String
+  headSha            String
+  decision           ReviewDecision
+  body               String?          @db.Text
+  reviewerId         String?
+  reviewerRole       Role
+  effectivePolicy    ReviewPolicy
+  manualConfirmation Boolean          @default(false)
+  syncStatus         ReviewSyncStatus @default(PENDING)
+  // Why the provider copy failed (ReviewSyncError), null otherwise.
+  syncError          String?
+  syncedAt           DateTime?
+  createdAt          DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pullRequest  PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  reviewer     User?        @relation("PullReviewReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, pullId, createdAt(sort: Desc)])
+  @@map("pull_reviews")
+}
+
+enum ReviewDecision {
+  APPROVE
+  REQUEST_CHANGES
+}
+
+enum ReviewSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+}
+
+// A comment on a PR (v1.5.2), synced both ways with GitHub/GitLab. A thread
+// is a root comment (parentId null) and its replies (parentId = the root).
+// Written in Critiq → sent by the comment-sync queue (syncStatus); written on
+// the provider → arrives by webhook (origin GITHUB/GITLAB, no syncStatus).
+model PullComment {
+  id                      String             @id @default(cuid())
+  organizationId          String
+  pullId                  String
+  origin                  CommentOrigin
+  kind                    CommentKind
+  parentId                String?
+  // A Critiq user (origin CRITIQ); null once that account is deleted.
+  authorId                String?
+  // The provider's own author (origin GITHUB/GITLAB).
+  providerAuthor          String?
+  providerAuthorAvatarUrl String?
+  body                    String             @db.Text
+  // INLINE only: where in the diff, and on which commit.
+  path                    String?
+  line                    Int?
+  side                    DiffSide?
+  headSha                 String?
+  // The provider's ids, prefixed by kind (`github-issue:`, `github-review:`,
+  // `gitlab-note:`) — GitHub's issue and review comment ids are separate
+  // sequences. Unique per PR: a webhook for a comment already here updates it.
+  providerCommentId       String?
+  // GitHub: the root review comment; GitLab: the discussion.
+  providerThreadId        String?
+  syncStatus              CommentSyncStatus?
+  syncError               String?
+  editedAt                DateTime?
+  deletedAt               DateTime?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pullRequest  PullRequest   @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  author       User?         @relation("PullCommentAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  parent       PullComment?  @relation("PullCommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies      PullComment[] @relation("PullCommentThread")
+
+  @@unique([pullId, providerCommentId])
+  @@index([organizationId, pullId, createdAt])
+  @@index([pullId, providerThreadId])
+  @@map("pull_comments")
+}
+
+enum CommentOrigin {
+  CRITIQ
+  GITHUB
+  GITLAB
+}
+
+enum CommentKind {
+  GENERAL
+  INLINE
+}
+
+enum DiffSide {
+  NEW
+  OLD
+}
+
+enum CommentSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
 }

@@ -68,6 +68,26 @@ describe('renderFile', () => {
 describe('buildReviewPrompt', () => {
   const secretValue = 'AKIA' + 'TESTONLYNOTREAL0';
 
+  // Small models drift back to English after a long English diff.
+  it('ends the user message with a reminder of the org language', () => {
+    const result = buildReviewPrompt(
+      input({
+        locale: 'id',
+        files: [
+          {
+            path: 'a.ts',
+            status: 'added',
+            patch: patch(['const a = 1;']),
+            headLines: null,
+          },
+        ],
+      }),
+    );
+    expect(result.request.user.trimEnd()).toMatch(
+      /Reply in Indonesian \(Bahasa Indonesia\): the summary, every title and every message\.$/,
+    );
+  });
+
   it('redacts lines a static secret rule flagged', () => {
     const result = buildReviewPrompt(
       input({

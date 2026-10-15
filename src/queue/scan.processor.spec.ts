@@ -1,4 +1,5 @@
 import { UnprocessableEntityException } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import Redis from 'ioredis';
@@ -12,14 +13,21 @@ import {
   FindingSource,
   FindingStatus,
   FullReason,
+  RuleTier,
   ScanErrorCode,
 } from '../generated/prisma/enums';
 import { AiScanService } from '../modules/ai/scan/ai-scan.service';
 import { PullsService } from '../modules/pulls/pulls.service';
 import { StoredFinding } from './lifecycle/plan-findings';
+import { ALL_RULE_TIERS } from './rules/rule-tiers';
 import { ScanFailure } from './scan-errors';
 import { ScanJobPayload } from './scan-payload.dto';
 import { ScanProcessor } from './scan.processor';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
+
+jest.mock('../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only packages and heavy collaborators — all replaced by stubs.
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -49,6 +57,7 @@ const CONFIG: Record<string, unknown> = {
   'scan.concurrency': 3,
   'scan.jobTimeoutMs': 120_000,
   'scan.maxDiffBytes': 1_048_576,
+  'scan.syntaxMaxFiles': 50,
 };
 
 function stored(
@@ -127,6 +136,10 @@ function setup(options: {
   compare?: { files: typeof PUSH_2; ancestor: boolean };
   aiStatus?: AiScanStatus;
   resolvedCritical?: number;
+  // Head file contents for the syntax check; files not listed are
+  // unavailable (null), so it decides nothing about them.
+  heads?: Record<string, string>;
+  ruleTiers?: RuleTier[];
 }) {
   const written: Row[] = [];
   const tx = {
@@ -201,6 +214,7 @@ function setup(options: {
         diffMode: options.compare ? DiffMode.INCREMENTAL : DiffMode.FULL,
         baseScanId: options.base ? 'scan_1' : null,
         prevHeadSha: options.compare ? 'aaa111' : null,
+        ruleTiers: options.ruleTiers ?? ALL_RULE_TIERS,
       }),
     },
     finding: {
@@ -220,17 +234,33 @@ function setup(options: {
   };
   const pullsService = {
     getDiff: jest.fn().mockResolvedValue({ files: [], truncated: false }),
+    fillMissingLanguage: jest.fn().mockResolvedValue(undefined),
     getCompareDiff: jest.fn().mockResolvedValue({
       ...(options.compare ?? { files: [], ancestor: true }),
       truncated: false,
     }),
+    getHeadFileContents: jest.fn(
+      (
+        _org: string,
+        _repo: string,
+        _pull: string,
+        _sha: string,
+        paths: string[],
+      ) =>
+        Promise.resolve(
+          new Map(paths.map((path) => [path, options.heads?.[path] ?? null])),
+        ),
+    ),
   };
   const aiScanService = {
     maybeEnqueue: jest
       .fn()
       .mockResolvedValue(options.aiStatus ?? AiScanStatus.SKIPPED_MANUAL_MODE),
   };
-  const redis = { set: jest.fn().mockResolvedValue('OK') };
+  const redis = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue('OK'),
+  };
   const logger = {
     info: jest.fn(),
     warn: jest.fn(),
@@ -239,6 +269,12 @@ function setup(options: {
   };
   const config = { getOrThrow: (key: string) => CONFIG[key] };
 
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const processor = new ScanProcessor(
     prisma as unknown as PrismaService,
     pullsService as unknown as PullsService,
@@ -246,8 +282,9 @@ function setup(options: {
     config as unknown as ConfigService,
     redis as unknown as Redis,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { processor, prisma, tx, pullsService, logger, written };
+  return { realtime, processor, prisma, tx, pullsService, logger, written };
 }
 
 const job = {
@@ -383,7 +420,7 @@ describe('ScanProcessor — lifecycle (v1.5.1 langkah 3)', () => {
 
   // Acceptance 15: the first scan of a PR behaves as before, all NEW.
   it('marks a first scan FULL and every finding NEW', async () => {
-    const { processor, pullsService, written } = setup({});
+    const { processor, pullsService, written, realtime } = setup({});
     pullsService.getDiff.mockResolvedValue({
       files: [
         {
@@ -402,6 +439,9 @@ describe('ScanProcessor — lifecycle (v1.5.1 langkah 3)', () => {
     expect(written.length).toBeGreaterThan(0);
     expect(written.every((r) => r.status === FindingStatus.NEW)).toBe(true);
     expect(written.every((r) => r.firstSeenScanId === 'scan_2')).toBe(true);
+    // "Running" reaches open tabs on claim; "done" comes from the AI step
+    // (AiScanService.maybeEnqueue), mocked here.
+    expect(realtime.scanChanged).toHaveBeenCalledWith('scan_2');
   });
 });
 
@@ -440,5 +480,317 @@ describe('ScanProcessor — provider errors', () => {
     pullsService.getCompareDiff.mockRejectedValue(unreachable);
 
     await expect(processor.process(job)).rejects.toBe(unreachable);
+  });
+});
+
+// Repository.language for repos connected before the column existed: asked
+// once on a scan, display only — a failed lookup never fails the scan.
+describe('ScanProcessor — repository language', () => {
+  it('fills a missing language during the scan', async () => {
+    const { processor, pullsService } = setup({
+      compare: { files: [], ancestor: true },
+    });
+    await processor.process(job);
+    expect(pullsService.fillMissingLanguage).toHaveBeenCalledWith(
+      'org_1',
+      'repo_1',
+    );
+  });
+
+  it('finishes the scan when the lookup fails', async () => {
+    const { processor, pullsService, tx } = setup({
+      compare: { files: [], ancestor: true },
+    });
+    pullsService.fillMissingLanguage.mockRejectedValue(new Error('boom'));
+    await expect(processor.process(job)).resolves.toBeUndefined();
+    expect(countsWritten(tx)).toBeDefined();
+  });
+});
+
+// code.syntax_error: the changed file is read whole and parsed.
+describe('ScanProcessor — syntax check', () => {
+  const PATH = 'src/total.js';
+  const FIXED = [
+    'function total(items) {',
+    '  if (items.length === 0) {',
+    '    return 0;',
+    '  }',
+    '  return items.length;',
+    '}',
+    '',
+  ].join('\n');
+  const BROKEN = FIXED.replace('\n  }\n', '\n  // }\n');
+  const SYNTAX_FINGERPRINT = createHash('sha1')
+    .update(`code.syntax_error\0${PATH}`)
+    .digest('hex');
+  const brokenInBase = stored('s_syntax', PATH, 4, {
+    ruleId: 'code.syntax_error',
+    title: 'Syntax error',
+    category: FindingCategory.CRASH,
+    fingerprint: SYNTAX_FINGERPRINT,
+  });
+
+  it('flags a commented-out brace as a new critical and notifies', async () => {
+    const { processor, pullsService, written, logger } = setup({
+      heads: { [PATH]: BROKEN },
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [
+        {
+          path: PATH,
+          previousPath: null,
+          status: 'modified',
+          patch: [
+            '@@ -1,6 +1,6 @@',
+            ' function total(items) {',
+            '   if (items.length === 0) {',
+            '     return 0;',
+            '-  }',
+            '+  // }',
+            '   return items.length;',
+            ' }',
+          ].join('\n'),
+        },
+      ],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        source: FindingSource.STATIC,
+        severity: FindingSeverity.CRITICAL,
+        category: FindingCategory.CRASH,
+        status: FindingStatus.NEW,
+        filePath: PATH,
+        lineStart: 4,
+        suppressedReason: null,
+        fingerprint: SYNTAX_FINGERPRINT,
+      }),
+    ]);
+    expect(pullsService.getHeadFileContents).toHaveBeenCalledWith(
+      'org_1',
+      'repo_1',
+      'pull_1',
+      'bbb222',
+      [PATH],
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      'notification.pull_critical_found',
+      expect.objectContaining({ criticalCount: 1 }),
+    );
+  });
+
+  it('does not run when the crash tier is off', async () => {
+    const { processor, pullsService, written } = setup({
+      heads: { [PATH]: BROKEN },
+      ruleTiers: ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.CRASH),
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [
+        {
+          path: PATH,
+          previousPath: null,
+          status: 'modified',
+          patch: '@@ -4 +4 @@\n-  }\n+  // }',
+        },
+      ],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([]);
+    expect(pullsService.getHeadFileContents).not.toHaveBeenCalled();
+  });
+
+  it('suppresses it in a data fixture', async () => {
+    const fixture = 'fixtures/broken.json';
+    const { processor, pullsService, written } = setup({
+      heads: { [fixture]: '{"a": \n' },
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [
+        {
+          path: fixture,
+          previousPath: null,
+          status: 'added',
+          patch: '@@ -0,0 +1 @@\n+{"a": ',
+        },
+      ],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        suppressedReason: 'TEST_FILE',
+      }),
+    ]);
+  });
+
+  // The fix adds `}` below the finding's line, which the push did not
+  // touch — carried by line, the finding would wrongly stay open.
+  it('resolves it when a later push makes the file parse again', async () => {
+    const fixedLater = BROKEN.replace('  // }\n', '  // }\n  }\n');
+    const { processor, written } = setup({
+      base: [brokenInBase],
+      compare: {
+        files: [
+          {
+            path: PATH,
+            previousPath: null,
+            status: 'modified',
+            patch: [
+              '@@ -3,3 +3,4 @@',
+              '     return 0;',
+              '   // }',
+              '+  }',
+              '   return items.length;',
+            ].join('\n'),
+          },
+        ],
+        ancestor: true,
+      },
+      heads: { [PATH]: fixedLater },
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        status: FindingStatus.RESOLVED,
+        originFindingId: 's_syntax',
+      }),
+    ]);
+  });
+
+  it('persists it while a later push leaves the file broken', async () => {
+    const { processor, written } = setup({
+      base: [brokenInBase],
+      compare: {
+        files: [
+          {
+            path: PATH,
+            previousPath: null,
+            status: 'modified',
+            patch: [
+              '@@ -2,3 +2,3 @@',
+              '   if (items.length === 0) {',
+              '-    return 0;',
+              '+    return -1;',
+              '   // }',
+            ].join('\n'),
+          },
+        ],
+        ancestor: true,
+      },
+      heads: { [PATH]: BROKEN.replace('return 0;', 'return -1;') },
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        status: FindingStatus.PERSISTED,
+        originFindingId: 's_syntax',
+        firstSeenScanId: 'scan_1',
+      }),
+    ]);
+  });
+
+  // Undecided: the finding carries by line as before, the scan still ends.
+  it('keeps the scan going when the file cannot be fetched', async () => {
+    const { processor, pullsService, written, logger } = setup({
+      base: [brokenInBase],
+      compare: {
+        files: [
+          {
+            path: PATH,
+            previousPath: null,
+            status: 'modified',
+            patch: '@@ -3,1 +3,1 @@\n-    return 0;\n+    return -1;',
+          },
+        ],
+        ancestor: true,
+      },
+    });
+    pullsService.getHeadFileContents.mockRejectedValue(new Error('boom'));
+
+    await processor.process(job);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'syntax.check_failed',
+      expect.objectContaining({ error: 'Error' }),
+    );
+    expect(written).toEqual([
+      expect.objectContaining({
+        ruleId: 'code.syntax_error',
+        status: FindingStatus.PERSISTED,
+      }),
+    ]);
+  });
+});
+
+// Rules & Profiles: a tier that is off runs none of its rules, and the base
+// findings of that tier neither carry forward nor resolve.
+describe('ScanProcessor — Critical tiers', () => {
+  const TLS_PATCH = {
+    path: 'src/http.ts',
+    previousPath: null,
+    status: 'modified' as const,
+    patch:
+      '@@ -1 +1 @@\n-const agent = new Agent();\n+const agent = new Agent({ rejectUnauthorized: false });',
+  };
+
+  it('runs the rules of an enabled tier', async () => {
+    const { processor, pullsService, written } = setup({});
+    pullsService.getDiff.mockResolvedValue({
+      files: [TLS_PATCH],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([
+      expect.objectContaining({ ruleId: 'code.insecure_tls' }),
+    ]);
+  });
+
+  it('skips the rules of a disabled tier', async () => {
+    const { processor, pullsService, written } = setup({
+      ruleTiers: ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.SECURITY),
+    });
+    pullsService.getDiff.mockResolvedValue({
+      files: [TLS_PATCH],
+      truncated: false,
+    });
+
+    await processor.process(job);
+
+    expect(written).toEqual([]);
+  });
+
+  it('drops base findings of a disabled tier instead of resolving them', async () => {
+    const { processor, pullsService, written } = setup({
+      base: [
+        stored('s_tls', 'src/other.ts', 3, {
+          ruleId: 'code.insecure_tls',
+          category: FindingCategory.INSECURE_TLS,
+        }),
+      ],
+      ruleTiers: ALL_RULE_TIERS.filter((tier) => tier !== RuleTier.SECURITY),
+    });
+    pullsService.getDiff.mockResolvedValue({ files: [], truncated: false });
+
+    await processor.process(job);
+
+    expect(written).toEqual([]);
   });
 });

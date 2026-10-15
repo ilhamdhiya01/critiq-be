@@ -6,20 +6,36 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../../common/redis/redis.constants';
 import {
+  IntegrationState,
   Provider,
   PullRequestState,
   ScanTrigger,
 } from '../../generated/prisma/enums';
 import { ScanQueueService } from '../../queue/scan-queue.service';
+import {
+  CommentIngestService,
+  InboundComment,
+} from '../comments/comment-ingest.service';
 import { PullsService } from '../pulls/pulls.service';
+import {
+  fromGithubIssueComment,
+  fromGithubReviewComment,
+  fromGitlabNote,
+} from './comment-events';
 import {
   GithubPullRequestPayload,
   GitlabMergeRequestPayload,
+  isGithubInstallationPayload,
+  isGithubIssueCommentPayload,
   isGithubPingEvent,
   isGithubPullRequestPayload,
+  isGithubReviewCommentPayload,
+  isGitlabEventEnvelope,
   isGitlabMergeRequestPayload,
+  isGitlabNotePayload,
   parseJsonBody,
 } from './webhook-payload';
 
@@ -27,7 +43,9 @@ export type WebhookSkipReason =
   | 'malformed'
   | 'ping'
   | 'unsupported_event'
+  | 'unknown_installation'
   | 'unknown_repo'
+  | 'untracked_pull'
   | 'out_of_scope'
   | 'not_scan_trigger'
   | 'no_head_sha';
@@ -39,9 +57,28 @@ export type WebhookOutcome =
   | { kind: 'duplicate' }
   | { kind: 'skipped'; reason: WebhookSkipReason }
   | { kind: 'pull_closed' }
+  | { kind: 'installation_updated' }
+  | { kind: 'comment_recorded' }
   | { kind: 'scan_enqueued'; scanId: string; deduplicated: boolean };
 
 const DELIVERY_DEDUPE_TTL_SECONDS = 86_400;
+
+// `installation` actions that change what Critiq can do with an
+// installation. `from` limits the transition: unsuspend only lifts a
+// suspension, it never revives an uninstalled or pending row. `created`
+// is not here — connecting goes through the install callback, which knows
+// the organization; the event does not.
+const INSTALLATION_TRANSITIONS: Record<
+  string,
+  { to: IntegrationState; from?: IntegrationState }
+> = {
+  deleted: { to: IntegrationState.UNINSTALLED },
+  suspend: { to: IntegrationState.SUSPENDED },
+  unsuspend: {
+    to: IntegrationState.ACTIVE,
+    from: IntegrationState.SUSPENDED,
+  },
+};
 
 // Actions after which the PR's head may point at code not yet scanned.
 // Everything else (edited, labeled, assigned, approved, ...) only touches
@@ -80,8 +117,10 @@ export class WebhooksService {
     private readonly configService: ConfigService,
     private readonly pullsService: PullsService,
     private readonly scanQueueService: ScanQueueService,
+    private readonly commentIngestService: CommentIngestService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async handleGitlabEvent(
@@ -89,7 +128,10 @@ export class WebhooksService {
     headers: Record<string, unknown>,
   ): Promise<WebhookOutcome> {
     const parsed = parseJsonBody(rawBody);
-    if (!isGitlabMergeRequestPayload(parsed)) {
+    // Only the envelope is checked before the sender is authenticated: a
+    // hook still subscribed to other events (pipelines, from when CI was
+    // tracked) is acknowledged and ignored below, not called malformed.
+    if (!isGitlabEventEnvelope(parsed)) {
       this.logger.warn('webhook.gitlab.rejected', {
         reason: 'malformed_payload',
       });
@@ -134,6 +176,13 @@ export class WebhooksService {
       return { kind: 'rejected' };
     }
 
+    if (payload.object_kind === 'note') {
+      return this.recordComment(
+        Provider.GITLAB,
+        isGitlabNotePayload(parsed) ? fromGitlabNote(parsed) : undefined,
+        this.headerString(headers, 'x-gitlab-event-uuid'),
+      );
+    }
     if (payload.object_kind !== 'merge_request') {
       this.logger.info('webhook.gitlab.ignored_event', {
         repositoryId: repository.id,
@@ -141,15 +190,23 @@ export class WebhooksService {
       });
       return { kind: 'skipped', reason: 'unsupported_event' };
     }
+    if (!isGitlabMergeRequestPayload(parsed)) {
+      this.logger.warn('webhook.gitlab.rejected', {
+        repositoryId: repository.id,
+        reason: 'malformed_payload',
+      });
+      return { kind: 'skipped', reason: 'malformed' };
+    }
 
-    const attrs = payload.object_attributes;
+    const mergeRequest = parsed;
+    const attrs = mergeRequest.object_attributes;
     const action = attrs?.action;
     return this.processVerifiedEvent({
       provider: Provider.GITLAB,
       repository,
       deliveryId: this.headerString(headers, 'x-gitlab-event-uuid'),
       targetBranch: attrs?.target_branch,
-      payload,
+      payload: mergeRequest,
       // `update` fires for title/description/label edits too; only an
       // update carrying `oldrev` means new commits were pushed. A missing
       // action (older GitLab) falls through to scanning — the sha-level
@@ -200,6 +257,27 @@ export class WebhooksService {
     // pull_request_review / pull_request_review_comment payloads also carry
     // a full `pull_request` object and would pass the shape guard below.
     const eventName = this.headerString(headers, 'x-github-event');
+    if (eventName === 'installation') {
+      return this.handleGithubInstallationEvent(parsed);
+    }
+    if (
+      eventName === 'issue_comment' ||
+      eventName === 'pull_request_review_comment'
+    ) {
+      const comment =
+        eventName === 'issue_comment'
+          ? isGithubIssueCommentPayload(parsed)
+            ? fromGithubIssueComment(parsed)
+            : undefined
+          : isGithubReviewCommentPayload(parsed)
+            ? fromGithubReviewComment(parsed)
+            : undefined;
+      return this.recordComment(
+        Provider.GITHUB,
+        comment,
+        this.headerString(headers, 'x-github-delivery'),
+      );
+    }
     if (eventName !== undefined && eventName !== 'pull_request') {
       this.logger.info('webhook.github.ignored_event', { eventName });
       return { kind: 'skipped', reason: 'unsupported_event' };
@@ -240,6 +318,107 @@ export class WebhooksService {
         payload.action === undefined || GITHUB_SCAN_ACTIONS.has(payload.action),
       baseSha: payload.pull_request?.base.sha ?? null,
     });
+  }
+
+  // A comment written on the provider (v1.5.2, two-way sync), already
+  // authenticated. `undefined` = the body did not have a comment's shape;
+  // `null` = a comment with nothing to record (not on a PR, a system note).
+  private async recordComment(
+    provider: Provider,
+    comment: InboundComment | null | undefined,
+    deliveryId: string | undefined,
+  ): Promise<WebhookOutcome> {
+    if (comment === undefined) {
+      this.logger.warn(`webhook.${provider.toLowerCase()}.rejected`, {
+        reason: 'malformed_payload',
+        event: 'comment',
+      });
+      return { kind: 'skipped', reason: 'malformed' };
+    }
+    if (comment === null) {
+      return { kind: 'skipped', reason: 'unsupported_event' };
+    }
+    const dedupeKey = deliveryId
+      ? `webhook:delivery:${provider}:${deliveryId}`
+      : null;
+    if (dedupeKey && !(await this.claimDelivery(dedupeKey))) {
+      return { kind: 'duplicate' };
+    }
+    try {
+      const outcome = await this.commentIngestService.ingest(comment);
+      return outcome === 'ignored'
+        ? { kind: 'skipped', reason: 'untracked_pull' }
+        : { kind: 'comment_recorded' };
+    } catch (error) {
+      // As in processVerifiedEvent: a redelivery must not be swallowed.
+      if (dedupeKey) {
+        await this.redis.del(dedupeKey).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  // The App was uninstalled or (un)suspended on GitHub. Only the state
+  // changes: the row and its repositories stay, so reinstalling — which
+  // upserts the same row — restores them. The signature was already
+  // checked; installationId is globally unique, so this touches at most one
+  // organization's row.
+  private async handleGithubInstallationEvent(
+    parsed: unknown,
+  ): Promise<WebhookOutcome> {
+    if (!isGithubInstallationPayload(parsed)) {
+      this.logger.warn('webhook.github.rejected', {
+        reason: 'malformed_payload',
+        eventName: 'installation',
+      });
+      return { kind: 'skipped', reason: 'malformed' };
+    }
+    const installationId = String(parsed.installation.id);
+    const transition = INSTALLATION_TRANSITIONS[parsed.action];
+    if (!transition) {
+      this.logger.info('webhook.github.ignored_event', {
+        eventName: 'installation',
+        action: parsed.action,
+      });
+      return { kind: 'skipped', reason: 'unsupported_event' };
+    }
+
+    const { count } = await this.prisma.integration.updateMany({
+      where: {
+        source: Provider.GITHUB,
+        installationId,
+        ...(transition.from ? { state: transition.from } : {}),
+      },
+      data: { state: transition.to },
+    });
+    if (count === 0) {
+      // Disconnected from Critiq first (the row is gone, and GitHub then
+      // reports the uninstall), never connected, or not in `from`.
+      this.logger.info('webhook.github.unknown_installation', {
+        installationId,
+        action: parsed.action,
+      });
+      return { kind: 'skipped', reason: 'unknown_installation' };
+    }
+    // TODO(audit log model): persisted row once the table exists.
+    this.logger.info('integration.github_installation_changed', {
+      installationId,
+      action: parsed.action,
+      state: transition.to,
+    });
+    const integration = await this.prisma.integration.findFirst({
+      where: { source: Provider.GITHUB, installationId },
+      select: { organizationId: true },
+    });
+    if (integration) {
+      await this.realtime.publish({
+        type: 'integration.updated',
+        orgId: integration.organizationId,
+        source: Provider.GITHUB,
+        state: transition.to,
+      });
+    }
+    return { kind: 'installation_updated' };
   }
 
   // Everything after the sender is authenticated and the repo resolved —

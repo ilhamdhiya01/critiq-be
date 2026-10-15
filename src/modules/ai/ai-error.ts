@@ -2,6 +2,8 @@
 // worker in step 2) decide retry and user-facing messages without knowing
 // which SDK threw.
 
+import type { AiUsage } from './ai-provider.interface';
+
 export type AiErrorCode =
   | 'auth_failed'
   | 'rate_limited'
@@ -11,6 +13,10 @@ export type AiErrorCode =
   // The provider stopped at max_tokens before the tool call was complete.
   // Not retryable: the same request stops at the same limit again.
   | 'output_truncated'
+  // A reasoning model spent the whole output budget thinking and stopped
+  // before writing any answer. Not retryable either, and a different fix
+  // from output_truncated: a smaller diff or another model.
+  | 'reasoning_exhausted'
   | 'bad_request'
   // Configuration problems, raised before any call is made.
   | 'insecure_base_url'
@@ -47,6 +53,9 @@ export class AiError extends Error {
   // For invalid_response only: what the model actually returned, kept for
   // debugging (stored encrypted, never logged). Never contains the key.
   readonly raw: unknown;
+  // Tokens the provider billed although the answer was unusable (truncated,
+  // no tool call, invalid JSON). Absent when no response came back.
+  readonly usage: AiUsage | undefined;
 
   constructor(
     readonly code: AiErrorCode,
@@ -54,6 +63,7 @@ export class AiError extends Error {
       providerMessage?: string | null;
       status?: number;
       raw?: unknown;
+      usage?: AiUsage;
     } = {},
   ) {
     super(code);
@@ -65,6 +75,18 @@ export class AiError extends Error {
         : sanitizeProviderMessage(options.providerMessage);
     this.status = options.status;
     this.raw = options.raw;
+    this.usage = options.usage;
+  }
+
+  // The same error, carrying `usage` instead — completeValidated puts the
+  // total of every attempt on the error it finally throws.
+  withUsage(usage: AiUsage): AiError {
+    return new AiError(this.code, {
+      providerMessage: this.providerMessage,
+      status: this.status,
+      raw: this.raw,
+      usage,
+    });
   }
 }
 

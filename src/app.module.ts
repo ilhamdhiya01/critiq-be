@@ -5,16 +5,24 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { ReposModule } from './modules/repos/repos.module';
 import { PullsModule } from './modules/pulls/pulls.module';
 import { ScansModule } from './modules/scans/scans.module';
+import { RulesModule } from './modules/rules/rules.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { HealthModule } from './modules/health/health.module';
+import { ReviewsModule } from './modules/reviews/reviews.module';
+import { CommentsModule } from './modules/comments/comments.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
 import { RedisModule } from './common/redis/redis.module';
+import { RealtimeModule } from './common/realtime/realtime.module';
+import { RealtimeStreamModule } from './common/realtime/realtime-stream.module';
 
 @Module({
   imports: [
     CommonModule,
     RedisModule,
+    RealtimeModule,
+    RealtimeStreamModule,
     AuthModule,
     OrganizationsModule,
     IntegrationsModule,
@@ -22,7 +30,11 @@ import { RedisModule } from './common/redis/redis.module';
     PullsModule,
     ScansModule,
     SettingsModule,
+    RulesModule,
     WebhooksModule,
+    HealthModule,
+    ReviewsModule,
+    CommentsModule,
     QueueModule,
   ],
   controllers: [],
