@@ -23,6 +23,11 @@ import { ALL_RULE_TIERS } from './rules/rule-tiers';
 import { ScanFailure } from './scan-errors';
 import { ScanJobPayload } from './scan-payload.dto';
 import { ScanProcessor } from './scan.processor';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
+
+jest.mock('../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only packages and heavy collaborators — all replaced by stubs.
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -264,6 +269,12 @@ function setup(options: {
   };
   const config = { getOrThrow: (key: string) => CONFIG[key] };
 
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const processor = new ScanProcessor(
     prisma as unknown as PrismaService,
     pullsService as unknown as PullsService,
@@ -271,8 +282,9 @@ function setup(options: {
     config as unknown as ConfigService,
     redis as unknown as Redis,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { processor, prisma, tx, pullsService, logger, written };
+  return { realtime, processor, prisma, tx, pullsService, logger, written };
 }
 
 const job = {
@@ -408,7 +420,7 @@ describe('ScanProcessor — lifecycle (v1.5.1 langkah 3)', () => {
 
   // Acceptance 15: the first scan of a PR behaves as before, all NEW.
   it('marks a first scan FULL and every finding NEW', async () => {
-    const { processor, pullsService, written } = setup({});
+    const { processor, pullsService, written, realtime } = setup({});
     pullsService.getDiff.mockResolvedValue({
       files: [
         {
@@ -427,6 +439,9 @@ describe('ScanProcessor — lifecycle (v1.5.1 langkah 3)', () => {
     expect(written.length).toBeGreaterThan(0);
     expect(written.every((r) => r.status === FindingStatus.NEW)).toBe(true);
     expect(written.every((r) => r.firstSeenScanId === 'scan_2')).toBe(true);
+    // "Running" reaches open tabs on claim; "done" comes from the AI step
+    // (AiScanService.maybeEnqueue), mocked here.
+    expect(realtime.scanChanged).toHaveBeenCalledWith('scan_2');
   });
 });
 

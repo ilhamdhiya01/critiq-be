@@ -10,6 +10,7 @@ import { Queue } from 'bullmq';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import {
   AiScanStatus,
   PullRequestState,
@@ -40,6 +41,7 @@ export class ReviewsService {
     @InjectQueue(REVIEW_SYNC_QUEUE_NAME)
     private readonly reviewSyncQueue: Queue<ReviewSyncJobPayload>,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async submit(
@@ -266,7 +268,8 @@ export class ReviewsService {
   }
 
   // The review stays recorded even when the queue cannot take the job: its
-  // copy is marked failed, and the reviewer can send it again.
+  // copy is marked failed, and the reviewer can send it again. Either way
+  // the other open tabs learn about it (realtime review.updated).
   private async enqueueSync<T extends { syncStatus: ReviewSyncStatus }>(
     reviewId: string,
     review: T,
@@ -298,6 +301,8 @@ export class ReviewsService {
         syncStatus: ReviewSyncStatus.FAILED,
         syncError: 'unknown',
       };
+    } finally {
+      await this.realtime.reviewChanged(reviewId);
     }
   }
 

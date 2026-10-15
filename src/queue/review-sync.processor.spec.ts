@@ -13,6 +13,11 @@ import { GitlabApiService } from '../modules/integrations/gitlab-api.service';
 import { ProviderReviewError } from '../modules/integrations/provider-review-error';
 import type { ReviewSyncJobPayload } from './review-sync-queue.constants';
 import { ReviewSyncProcessor } from './review-sync.processor';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
+
+jest.mock('../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 jest.mock('@nestjs/bullmq', () => ({
   Processor: () => () => undefined,
@@ -89,14 +94,21 @@ function setup(row: unknown = reviewRow()) {
     createMergeRequestNote: jest.fn().mockResolvedValue(undefined),
   };
   const logger = { info: jest.fn(), warn: jest.fn() };
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const processor = new ReviewSyncProcessor(
     prisma as unknown as PrismaService,
     { decrypt: () => 'token' } as unknown as EncryptionService,
     github as unknown as GithubAppService,
     gitlab as unknown as GitlabApiService,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
-  return { processor, prisma, github, gitlab };
+  return { realtime, processor, prisma, github, gitlab };
 }
 
 const job = (attemptsMade = 0) =>
@@ -115,7 +127,7 @@ function statusWritten(prisma: ReturnType<typeof setup>['prisma']) {
 
 describe('ReviewSyncProcessor', () => {
   it('approves on GitHub as the App, pinned to the reviewed commit', async () => {
-    const { processor, prisma, github } = setup();
+    const { processor, prisma, github, realtime } = setup();
     await processor.process(job());
     expect(github.submitPullReview).toHaveBeenCalledWith(
       '169478542',
@@ -132,6 +144,7 @@ describe('ReviewSyncProcessor', () => {
       syncStatus: ReviewSyncStatus.SYNCED,
       syncError: null,
     });
+    expect(realtime.reviewChanged).toHaveBeenCalledWith('rev_1');
   });
 
   it('requests changes on GitHub with the reason', async () => {
@@ -213,11 +226,12 @@ describe('ReviewSyncProcessor', () => {
   });
 
   it('leaves a transient failure to BullMQ to retry', async () => {
-    const { processor, prisma, github } = setup();
+    const { processor, prisma, github, realtime } = setup();
     const unreachable = new ProviderReviewError('provider_unreachable', true);
     github.submitPullReview.mockRejectedValue(unreachable);
     await expect(processor.process(job(0))).rejects.toBe(unreachable);
     expect(prisma.pullReview.updateMany).not.toHaveBeenCalled();
+    expect(realtime.reviewChanged).not.toHaveBeenCalled();
   });
 
   it('fails a transient failure on the last attempt', async () => {

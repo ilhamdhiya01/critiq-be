@@ -4,6 +4,7 @@ import { Queue } from 'bullmq';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import { Prisma } from '../generated/prisma/client';
 import {
   AiScanStatus,
@@ -173,6 +174,7 @@ export class ScanQueueService {
     private readonly scanQueue: Queue<ScanJobPayload>,
     private readonly prisma: PrismaService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async enqueue(input: EnqueueScanInput): Promise<EnqueueScanResult> {
@@ -349,8 +351,10 @@ export class ScanQueueService {
           finishedAt: new Date(),
         },
       });
+      await this.realtime.scanChanged(scanId);
       throw error;
     }
+    await this.realtime.scanChanged(scanId);
 
     this.logger.info('scan.enqueued', {
       orgId: input.organizationId,
@@ -404,6 +408,11 @@ export class ScanQueueService {
       data: { status: ScanStatus.SUPERSEDED, finishedAt: new Date() },
     });
     this.logger.info('scan.superseded', { pullId, count });
+    if (count > 0) {
+      for (const { id } of inFlight) {
+        await this.realtime.scanChanged(id);
+      }
+    }
     return count;
   }
 }

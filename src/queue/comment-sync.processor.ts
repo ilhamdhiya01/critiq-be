@@ -5,6 +5,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { EncryptionService } from '../common/encryption/encryption.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
 import {
   CommentKind,
   CommentSyncStatus,
@@ -49,6 +50,7 @@ export class CommentSyncProcessor extends WorkerHost {
     private readonly githubAppService: GithubAppService,
     private readonly gitlabApiService: GitlabApiService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {
     super();
   }
@@ -140,10 +142,13 @@ export class CommentSyncProcessor extends WorkerHost {
         });
         throw failure;
       }
-      await this.prisma.pullComment.updateMany({
+      const { count } = await this.prisma.pullComment.updateMany({
         where: { id: comment.id, syncStatus: CommentSyncStatus.PENDING },
         data: { syncStatus: CommentSyncStatus.FAILED, syncError: failure.code },
       });
+      if (count > 0) {
+        await this.realtime.commentChanged(comment.id, 'sync_failed');
+      }
       this.logger.warn('comment.sync_failed', {
         ...log,
         code: failure.code,
@@ -152,7 +157,7 @@ export class CommentSyncProcessor extends WorkerHost {
       return;
     }
 
-    await this.prisma.pullComment.updateMany({
+    const { count } = await this.prisma.pullComment.updateMany({
       where: { id: comment.id, syncStatus: CommentSyncStatus.PENDING },
       data: {
         syncStatus: CommentSyncStatus.SYNCED,
@@ -161,6 +166,9 @@ export class CommentSyncProcessor extends WorkerHost {
         providerThreadId: ids.providerThreadId,
       },
     });
+    if (count > 0) {
+      await this.realtime.commentChanged(comment.id, 'synced');
+    }
     this.logger.info('comment.synced', log);
   }
 

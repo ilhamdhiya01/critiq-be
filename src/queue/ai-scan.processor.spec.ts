@@ -22,6 +22,11 @@ import { AiJobPayload } from './ai-queue.constants';
 import { ALL_RULE_TIERS } from './rules/rule-tiers';
 import { AI_PROMPT_VERSION } from '../modules/ai/scan/ai-prompt.constants';
 import { AiJobFailure, AiScanProcessor } from './ai-scan.processor';
+import { RealtimePublisher } from '../common/realtime/realtime.publisher';
+
+jest.mock('../common/realtime/realtime.publisher', () => ({
+  RealtimePublisher: class {},
+}));
 
 // ESM-only packages and heavy collaborators — all replaced by stubs.
 jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
@@ -226,6 +231,12 @@ function setup(
     get: (key: string) => CONFIG[key],
   };
 
+  const realtime = {
+    publish: jest.fn(),
+    scanChanged: jest.fn(),
+    reviewChanged: jest.fn(),
+    commentChanged: jest.fn(),
+  };
   const processor = new AiScanProcessor(
     prisma as unknown as PrismaService,
     pullsService as unknown as PullsService,
@@ -235,8 +246,10 @@ function setup(
     config as unknown as ConfigService,
     redis as unknown as Redis,
     logger as unknown as Logger,
+    realtime as unknown as RealtimePublisher,
   );
   return {
+    realtime,
     processor,
     prisma,
     tx,

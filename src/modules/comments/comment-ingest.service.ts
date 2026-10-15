@@ -2,6 +2,8 @@ import { Inject, Injectable } from '@nestjs/common';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+import type { CommentChange } from '../../common/realtime/realtime-event.types';
 import {
   CommentKind,
   CommentOrigin,
@@ -45,6 +47,7 @@ export class CommentIngestService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    private readonly realtime: RealtimePublisher,
   ) {}
 
   async ingest(event: InboundComment): Promise<IngestOutcome> {
@@ -77,6 +80,15 @@ export class CommentIngestService {
       providerCommentId: event.providerCommentId,
       action: event.action,
     };
+    const announce = (commentId: string, change: CommentChange) =>
+      this.realtime.publish({
+        type: 'comment.updated',
+        orgId: repository.organizationId,
+        repoId: repository.id,
+        pullId: pull.id,
+        commentId,
+        change,
+      });
 
     const existing = await this.prisma.pullComment.findUnique({
       where: {
@@ -95,6 +107,7 @@ export class CommentIngestService {
         where: { id: existing.id },
         data: { deletedAt: new Date() },
       });
+      await announce(existing.id, 'deleted');
       this.logger.info('comment.ingested', { ...log, outcome: 'deleted' });
       return 'deleted';
     }
@@ -113,6 +126,7 @@ export class CommentIngestService {
         where: { id: existing.id },
         data: { body, editedAt: new Date() },
       });
+      await announce(existing.id, 'edited');
       this.logger.info('comment.ingested', { ...log, outcome: 'updated' });
       return 'updated';
     }
@@ -136,7 +150,7 @@ export class CommentIngestService {
     }
 
     const thread = await this.resolveThread(pull.id, event);
-    await this.prisma.pullComment.create({
+    const created = await this.prisma.pullComment.create({
       data: {
         organizationId: repository.organizationId,
         pullId: pull.id,
@@ -151,7 +165,9 @@ export class CommentIngestService {
         createdAt: event.createdAt,
         ...thread,
       },
+      select: { id: true },
     });
+    await announce(created.id, 'created');
     this.logger.info('comment.ingested', { ...log, outcome: 'created' });
     return 'created';
   }
