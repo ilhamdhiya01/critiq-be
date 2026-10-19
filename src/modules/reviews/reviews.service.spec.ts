@@ -11,7 +11,7 @@ import {
   ScanStatus,
 } from '../../generated/prisma/enums';
 import type { ReviewSyncJobPayload } from '../../queue/review-sync-queue.constants';
-import { ReviewsService } from './reviews.service';
+import { ReviewsService, aiReviewedHead } from './reviews.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 
 jest.mock('../../common/realtime/realtime.publisher', () => ({
@@ -57,6 +57,7 @@ function reviewRow(overrides: Record<string, unknown> = {}) {
     reviewerRole: Role.REVIEWER,
     effectivePolicy: ReviewPolicy.ALLOW_AI,
     manualConfirmation: false,
+    aiAssisted: true,
     syncStatus: ReviewSyncStatus.PENDING,
     syncError: null,
     syncedAt: null,
@@ -124,6 +125,7 @@ describe('ReviewsService.submit', () => {
           reviewerId: 'u_1',
           reviewerRole: Role.REVIEWER,
           effectivePolicy: ReviewPolicy.ALLOW_AI,
+          aiAssisted: true,
         }) as unknown,
       }),
     );
@@ -382,5 +384,49 @@ describe('ReviewsService.retrySync', () => {
     await expect(
       service.retrySync(ORG, REPO, 'pull_1', 'rev_1'),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+// Dashboard "AI-assisted": snapshotted on the review, from the commit decided on.
+describe('aiReviewedHead', () => {
+  it('is true when the AI review of the head is done or cached', () => {
+    expect(aiReviewedHead(pullRow())).toBe(true);
+    expect(
+      aiReviewedHead(
+        pullRow({
+          latestScan: {
+            status: ScanStatus.DONE,
+            headSha: HEAD,
+            aiStatus: AiScanStatus.CACHED,
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['no scan yet', null],
+    [
+      'the AI did not run',
+      {
+        status: ScanStatus.DONE,
+        headSha: HEAD,
+        aiStatus: AiScanStatus.NOT_CONFIGURED,
+      },
+    ],
+    [
+      'the AI is still running',
+      {
+        status: ScanStatus.DONE,
+        headSha: HEAD,
+        aiStatus: AiScanStatus.RUNNING,
+      },
+    ],
+    [
+      'the scan is of an older commit',
+      { status: ScanStatus.DONE, headSha: 'old', aiStatus: AiScanStatus.DONE },
+    ],
+  ])('is false when %s', (_case, latestScan) => {
+    expect(aiReviewedHead(pullRow({ latestScan }))).toBe(false);
   });
 });

@@ -56,6 +56,16 @@ export default () => ({
   health: {
     token: process.env.HEALTH_TOKEN ?? '',
   },
+  // Invitation emails (CLAUDE.md "Members & undangan"). No host = emails
+  // are not sent; the Admin shares the invite link by hand.
+  mail: {
+    host: process.env.SMTP_HOST ?? '',
+    port: Number(process.env.SMTP_PORT ?? 465),
+    secure: (process.env.SMTP_SECURE ?? 'true') !== 'false',
+    user: process.env.SMTP_USER ?? '',
+    pass: process.env.SMTP_PASS ?? '',
+    from: process.env.MAIL_FROM || 'Critiq <no-reply@critiq-dev.web.id>',
+  },
   scan: {
     concurrency: Number(process.env.SCAN_CONCURRENCY ?? 3),
     jobTimeoutMs: Number(process.env.SCAN_JOB_TIMEOUT_MS ?? 120000),

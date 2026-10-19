@@ -50,4 +50,13 @@ export const validationSchema = Joi.object({
   // Unlocks the detailed GET /health (queue counts, workers, AI orgs).
   // Empty: only the overall status is ever shown.
   HEALTH_TOKEN: Joi.string().allow('').optional(),
+  // Invitation emails. All optional: without SMTP_HOST invitations are still
+  // created and the Admin shares the link. Credentials only ever come from
+  // the environment.
+  SMTP_HOST: Joi.string().hostname().allow('').optional(),
+  SMTP_PORT: Joi.number().integer().min(1).max(65535).default(465),
+  SMTP_SECURE: Joi.boolean().default(true),
+  SMTP_USER: Joi.string().allow('').optional(),
+  SMTP_PASS: Joi.string().allow('').optional(),
+  MAIL_FROM: Joi.string().allow('').optional(),
 });

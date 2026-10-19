@@ -1,4 +1,13 @@
-import { Controller, Get, Req, Res, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
@@ -7,6 +16,7 @@ import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { SessionUserDto } from './dto/session-user.dto';
+import { clearSessionCookie, setSessionCookie } from './session-cookie';
 
 interface AuthenticatedRequest extends Request {
   user: {
@@ -66,6 +76,17 @@ export class AuthController {
     this.handleOAuthCallback(req.user, res);
   }
 
+  // No guard: signing out must work with an expired or missing session
+  // too. The httpOnly cookie can only be removed by the server. The JWT is
+  // stateless, so a copy taken elsewhere stays valid until it expires.
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  @ResponseMessage('Signed out')
+  logout(@Res({ passthrough: true }) res: Response): { loggedOut: true } {
+    clearSessionCookie(res);
+    return { loggedOut: true };
+  }
+
   @Get('me')
   @UseGuards(AuthGuard('jwt'))
   @ResponseMessage('Current session retrieved successfully')
@@ -91,16 +112,7 @@ export class AuthController {
       onboardingCompleted: auth.onboardingCompleted,
     });
 
-    // SameSite=None + Secure:true unconditionally: user's explicit choice to
-    // run FE/BE cross-origin locally instead of same-origin via proxy — see
-    // main.ts for the full rationale and the local HTTPS cert this depends
-    // on.
-    res.cookie('session', token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      maxAge: 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
 
     const feUrl = this.configService.getOrThrow<string>('feUrl');
     res.redirect(`${feUrl}`);

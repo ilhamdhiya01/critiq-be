@@ -16,6 +16,7 @@ import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { CreateOrganizationResponseDto } from './dto/create-organization-response.dto';
 import { AuthService, JwtPayload } from '../auth/auth.service';
+import { setSessionCookie } from '../auth/session-cookie';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { Role } from '../../generated/prisma/enums';
@@ -61,13 +62,7 @@ export class OrganizationsController {
       // schema default rather than reading the row back.
       onboardingCompleted: false,
     });
-    // Kept in sync with auth.controller.ts's session cookie settings.
-    res.cookie('session', token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      maxAge: 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
 
     return new CreateOrganizationResponseDto({
       id: organization.id,
