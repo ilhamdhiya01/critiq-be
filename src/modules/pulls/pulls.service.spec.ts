@@ -5,7 +5,7 @@ import { Provider } from '../../generated/prisma/enums';
 import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { ScansService } from '../scans/scans.service';
-import { PullsService } from './pulls.service';
+import { PullsService, parseProviderTime } from './pulls.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 
 jest.mock('../../common/realtime/realtime.publisher', () => ({
@@ -159,6 +159,7 @@ describe('PullsService.upsertFromWebhook', () => {
       merged: false,
       head: { ref: 'feature', sha },
       base: { ref: 'main' },
+      created_at: '2026-10-19T01:00:00Z',
     },
   });
 
@@ -189,5 +190,43 @@ describe('PullsService.upsertFromWebhook', () => {
       state: 'OPEN',
       headChanged,
     });
+  });
+
+  // The dashboard's turnaround counts from when the PR was opened.
+  it('stores when the PR was opened on the provider', async () => {
+    const { service, prisma } = setup();
+    prisma.pullRequest.findUnique.mockResolvedValue(null);
+    prisma.pullRequest.upsert.mockResolvedValue({
+      id: 'pull_1',
+      state: 'OPEN',
+      headSha: 'new',
+    });
+    await service.upsertFromWebhook(
+      'org_1',
+      'repo_1',
+      Provider.GITHUB,
+      payload('new') as never,
+    );
+    const [args] = prisma.pullRequest.upsert.mock.calls[0] as [
+      { create: { openedAt: Date }; update: { openedAt: Date } },
+    ];
+    const opened = new Date('2026-10-19T01:00:00Z');
+    expect(args.create.openedAt).toEqual(opened);
+    expect(args.update.openedAt).toEqual(opened);
+  });
+});
+
+describe('parseProviderTime', () => {
+  it.each([
+    ['2026-10-19T01:00:00Z', '2026-10-19T01:00:00.000Z'],
+    ['2026-10-19T08:00:00.000+07:00', '2026-10-19T01:00:00.000Z'],
+    // Older GitLab instances.
+    ['2026-10-19 01:00:00 UTC', '2026-10-19T01:00:00.000Z'],
+  ])('reads %s', (value, iso) => {
+    expect(parseProviderTime(value)?.toISOString()).toBe(iso);
+  });
+
+  it.each([undefined, '', 'not a date'])('is null for %p', (value) => {
+    expect(parseProviderTime(value)).toBeNull();
   });
 });

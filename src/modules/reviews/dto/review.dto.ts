@@ -21,6 +21,8 @@ export class ReviewDto {
   reviewerRole!: 'admin' | 'reviewer' | 'viewer';
   effectivePolicy!: 'manual_only' | 'allow_ai' | 'require_both';
   manualConfirmation!: boolean;
+  // The AI review of the reviewed commit was done when the reviewer decided.
+  aiAssisted!: boolean;
   // The PR has commits newer than the one reviewed.
   outdated!: boolean;
   sync!: {
@@ -55,6 +57,7 @@ export function toReviewDto(
     effectivePolicy:
       row.effectivePolicy.toLowerCase() as ReviewDto['effectivePolicy'],
     manualConfirmation: row.manualConfirmation,
+    aiAssisted: row.aiAssisted,
     outdated: pullHeadSha !== null && row.headSha !== pullHeadSha,
     sync: {
       status: row.syncStatus.toLowerCase() as ReviewDto['sync']['status'],

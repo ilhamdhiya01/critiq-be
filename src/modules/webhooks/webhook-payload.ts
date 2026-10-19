@@ -33,6 +33,9 @@ export interface GitlabMergeRequestPayload {
     // Previous head sha, present on `update` only when new commits were
     // pushed — NOT the merge base, so it is never stored as baseSha.
     oldrev?: string;
+    // When the MR was opened. ISO or GitLab's older `2026-10-19 08:00:00
+    // UTC` form; stored as PullRequest.openedAt.
+    created_at?: string;
   };
   user?: { username: string };
 }
@@ -51,6 +54,8 @@ export interface GithubPullRequestPayload {
     user?: { login: string };
     head: { sha: string; ref: string };
     base: { ref: string; sha?: string };
+    // When the PR was opened (ISO); stored as PullRequest.openedAt.
+    created_at?: string;
   };
 }
 

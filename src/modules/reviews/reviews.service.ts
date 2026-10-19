@@ -31,6 +31,26 @@ import { SubmitReviewDto } from './dto/submit-review.dto';
 
 const AI_DONE: AiScanStatus[] = [AiScanStatus.DONE, AiScanStatus.CACHED];
 
+// "AI-assisted" (dashboard), snapshotted on the review: the AI review of the
+// commit being decided on was done at that moment.
+export function aiReviewedHead(pull: {
+  headSha: string | null;
+  latestScan: {
+    status: ScanStatus;
+    headSha: string;
+    aiStatus: AiScanStatus | null;
+  } | null;
+}): boolean {
+  const scan = pull.latestScan;
+  return (
+    scan !== null &&
+    scan.status === ScanStatus.DONE &&
+    scan.headSha === pull.headSha &&
+    scan.aiStatus !== null &&
+    AI_DONE.includes(scan.aiStatus)
+  );
+}
+
 // v1.5.2 human-in-the-loop: a reviewer's decision, recorded in Critiq and
 // copied to GitHub/GitLab by the review-sync queue. Only a person calling
 // this endpoint ever creates one — no scan or AI job does.
@@ -122,6 +142,7 @@ export class ReviewsService {
         reviewerRole: membership.role,
         effectivePolicy: pull.effectivePolicy,
         manualConfirmation: dto.manualConfirmation === true,
+        aiAssisted: aiReviewedHead(pull),
       },
       include: REVIEW_INCLUDE,
     });

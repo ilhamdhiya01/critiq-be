@@ -100,6 +100,21 @@ interface MappedPullRequest {
   targetBranch: string;
   headSha: string | null;
   state: PullRequestState;
+  openedAt: Date | null;
+}
+
+// A webhook timestamp, or null when absent or unreadable. GitLab sends ISO
+// or, on older instances, `2026-10-19 08:00:00 UTC`.
+export function parseProviderTime(value: string | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/.test(value)
+      ? value.replace(' ', 'T').replace(' UTC', 'Z')
+      : value,
+  );
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 @Injectable()
@@ -160,6 +175,7 @@ export class PullsService {
         targetBranch: mapped.targetBranch,
         headSha: mapped.headSha,
         state: mapped.state,
+        openedAt: mapped.openedAt,
         effectivePolicy,
       },
       // effectivePolicy is deliberately omitted here — it's a snapshot
@@ -173,6 +189,9 @@ export class PullsService {
         sourceBranch: mapped.sourceBranch,
         headSha: mapped.headSha,
         state: mapped.state,
+        // Constant on the provider: also fills PRs first seen before the
+        // column existed, on their next event.
+        ...(mapped.openedAt ? { openedAt: mapped.openedAt } : {}),
       },
       select: { id: true, state: true, headSha: true },
     });
@@ -851,6 +870,7 @@ export class PullsService {
       targetBranch: attrs.target_branch,
       headSha: attrs.last_commit?.id ?? null,
       state: this.mapGitlabState(attrs.state),
+      openedAt: parseProviderTime(attrs.created_at),
     };
   }
 
@@ -870,6 +890,7 @@ export class PullsService {
       targetBranch: pr.base.ref,
       headSha: pr.head.sha ?? null,
       state: this.mapGithubState(pr.state, pr.merged),
+      openedAt: parseProviderTime(pr.created_at),
     };
   }
 
