@@ -9,6 +9,8 @@ import { PullsModule } from '../modules/pulls/pulls.module';
 import { AiScanProcessor } from './ai-scan.processor';
 import { QueueModule } from './queue.module';
 import { CommentSyncProcessor } from './comment-sync.processor';
+import { InvitationEmailProcessor } from './invitation-email.processor';
+import { MailModule } from '../common/mail/mail.module';
 import { ReviewSyncProcessor } from './review-sync.processor';
 import { ScanProcessor } from './scan.processor';
 
@@ -33,12 +35,14 @@ import { ScanProcessor } from './scan.processor';
     IntegrationsModule,
     AiModule,
     AiScanModule,
+    MailModule,
   ],
   providers: [
     ScanProcessor,
     AiScanProcessor,
     ReviewSyncProcessor,
     CommentSyncProcessor,
+    InvitationEmailProcessor,
   ],
 })
 export class WorkerModule {}

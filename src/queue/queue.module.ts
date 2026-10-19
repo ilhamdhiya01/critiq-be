@@ -3,6 +3,7 @@ import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AI_QUEUE_NAME } from './ai-queue.constants';
 import { COMMENT_SYNC_QUEUE_NAME } from './comment-sync-queue.constants';
+import { EMAIL_QUEUE_NAME } from './email-queue.constants';
 import { REVIEW_SYNC_QUEUE_NAME } from './review-sync-queue.constants';
 import { SCAN_QUEUE_NAME, ScanQueueService } from './scan-queue.service';
 
@@ -19,6 +20,7 @@ import { SCAN_QUEUE_NAME, ScanQueueService } from './scan-queue.service';
     BullModule.registerQueue({ name: AI_QUEUE_NAME }),
     BullModule.registerQueue({ name: REVIEW_SYNC_QUEUE_NAME }),
     BullModule.registerQueue({ name: COMMENT_SYNC_QUEUE_NAME }),
+    BullModule.registerQueue({ name: EMAIL_QUEUE_NAME }),
   ],
   providers: [ScanQueueService],
   exports: [BullModule, ScanQueueService],
