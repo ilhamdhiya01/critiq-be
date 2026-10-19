@@ -1,4 +1,5 @@
 import type { FindingSource } from '../../../generated/prisma/enums';
+import type { PullRefDto } from '../../pulls/dto/pull-ref.dto';
 
 // Hours are rounded to one decimal; null when there is nothing to average.
 export class DashboardSummaryDto {
@@ -26,14 +27,6 @@ export class DashboardSummaryDto {
   }
 }
 
-export interface DashboardPullRef {
-  id: string;
-  number: string;
-  title: string;
-  repoId: string;
-  repoPath: string;
-}
-
 export class CriticalIssueDto {
   findingId!: string;
   title!: string;
@@ -42,24 +35,9 @@ export class CriticalIssueDto {
   lineStart!: number;
   // When the finding first appeared on the PR (it is carried scan to scan).
   firstSeenAt!: Date;
-  pull!: DashboardPullRef;
+  pull!: PullRefDto;
 
   constructor(partial: CriticalIssueDto) {
-    Object.assign(this, partial);
-  }
-}
-
-export class RecentReviewDto {
-  id!: string;
-  decision!: 'approve' | 'request_changes';
-  aiAssisted!: boolean;
-  sync!: { status: 'pending' | 'synced' | 'failed' };
-  // Null when the reviewer's account was deleted since.
-  reviewer!: { id: string; name: string; avatarUrl: string | null } | null;
-  pull!: DashboardPullRef;
-  createdAt!: Date;
-
-  constructor(partial: RecentReviewDto) {
     Object.assign(this, partial);
   }
 }

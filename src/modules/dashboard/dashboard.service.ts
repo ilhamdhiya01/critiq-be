@@ -6,32 +6,17 @@ import {
   PullRequestState,
   ReviewDecision,
 } from '../../generated/prisma/enums';
+import type { ReviewActivityItemDto } from '../activity/dto/activity.dto';
 import {
-  CriticalIssueDto,
-  DashboardPullRef,
-  DashboardSummaryDto,
-  RecentReviewDto,
-} from './dto/dashboard.dto';
+  REVIEW_ACTIVITY_SELECT,
+  toReviewActivityItem,
+} from '../activity/review-activity';
+import { PULL_REF_SELECT, toPullRef } from '../pulls/dto/pull-ref.dto';
+import { CriticalIssueDto, DashboardSummaryDto } from './dto/dashboard.dto';
 
 export const DASHBOARD_LIST_LIMIT = 5;
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
-
-const PULL_REF_SELECT = {
-  id: true,
-  externalId: true,
-  title: true,
-  repositoryId: true,
-  repository: { select: { path: true } },
-} as const;
-
-interface PullRefRow {
-  id: string;
-  externalId: string;
-  title: string;
-  repositoryId: string;
-  repository: { path: string };
-}
 
 // The first review of a PR, with when the PR was opened.
 interface FirstReview {
@@ -39,14 +24,6 @@ interface FirstReview {
   aiAssisted: boolean;
   pullRequest: { openedAt: Date | null; createdAt: Date };
 }
-
-const toPullRef = (pull: PullRefRow): DashboardPullRef => ({
-  id: pull.id,
-  number: pull.externalId,
-  title: pull.title,
-  repoId: pull.repositoryId,
-  repoPath: pull.repository.path,
-});
 
 // PR opened (on the provider; when Critiq first saw it for PRs older than
 // `openedAt`) → this review, in hours. Never negative.
@@ -237,46 +214,13 @@ export class DashboardService {
   async recentReviews(
     organizationId: string,
     limit = DASHBOARD_LIST_LIMIT,
-  ): Promise<RecentReviewDto[]> {
+  ): Promise<ReviewActivityItemDto[]> {
     const reviews = await this.prisma.pullReview.findMany({
       where: { organizationId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
-      select: {
-        id: true,
-        decision: true,
-        aiAssisted: true,
-        syncStatus: true,
-        createdAt: true,
-        reviewer: {
-          select: { id: true, name: true, email: true, avatarUrl: true },
-        },
-        pullRequest: { select: PULL_REF_SELECT },
-      },
+      select: REVIEW_ACTIVITY_SELECT,
     });
-    return reviews.map(
-      (review) =>
-        new RecentReviewDto({
-          id: review.id,
-          decision:
-            review.decision === ReviewDecision.APPROVE
-              ? 'approve'
-              : 'request_changes',
-          aiAssisted: review.aiAssisted,
-          sync: {
-            status:
-              review.syncStatus.toLowerCase() as RecentReviewDto['sync']['status'],
-          },
-          reviewer: review.reviewer
-            ? {
-                id: review.reviewer.id,
-                name: review.reviewer.name ?? review.reviewer.email,
-                avatarUrl: review.reviewer.avatarUrl,
-              }
-            : null,
-          pull: toPullRef(review.pullRequest),
-          createdAt: review.createdAt,
-        }),
-    );
+    return reviews.map(toReviewActivityItem);
   }
 }

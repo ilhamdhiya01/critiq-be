@@ -808,6 +808,9 @@ model PullReview {
   reviewer     User?        @relation("PullReviewReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, pullId, createdAt(sort: Desc)])
+  // Org-wide newest-first listing: Activity's keyset pages and the
+  // dashboard's recent reviews.
+  @@index([organizationId, createdAt(sort: Desc), id(sort: Desc)])
   @@map("pull_reviews")
 }
 
