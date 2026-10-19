@@ -412,6 +412,11 @@ model PullRequest {
   targetBranch   String
   headSha        String?
   state          PullRequestState
+  // When the PR was opened on the provider (webhook `created_at`), for the
+  // dashboard's review turnaround. `createdAt` is when Critiq first saw it,
+  // which for a PR opened before its repo was connected is much later.
+  // Null for PRs first seen before this column existed.
+  openedAt       DateTime?
 
   // Denormalized pointer to the most recent Scan that reached a terminal
   // state (DONE or FAILED) for this PR — updated only on those transitions,
@@ -789,6 +794,9 @@ model PullReview {
   reviewerRole       Role
   effectivePolicy    ReviewPolicy
   manualConfirmation Boolean          @default(false)
+  // Snapshot: the AI review of this very commit was done (DONE/CACHED) when
+  // the reviewer decided — "AI-assisted" on the dashboard. Never recomputed.
+  aiAssisted         Boolean          @default(false)
   syncStatus         ReviewSyncStatus @default(PENDING)
   // Why the provider copy failed (ReviewSyncError), null otherwise.
   syncError          String?
