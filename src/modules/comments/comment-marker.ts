@@ -34,10 +34,18 @@ export function providerBody(
 }
 
 // The comment as written, without what providerBody added — for a comment
-// that comes back from the provider edited.
-export function stripCritiqFraming(body: string): string {
-  return body
+// that comes back from the provider edited. `quotedParent`: it was sent
+// with its root quoted (a general reply on GitHub), so the leading quote is
+// Critiq's, not the author's. GitHub may return CRLF line endings.
+export function stripCritiqFraming(
+  body: string,
+  options: { quotedParent?: boolean } = {},
+): string {
+  const text = body
+    .replace(/\r\n/g, '\n')
     .replace(MARKER, '')
-    .replace(/^\*\*[^*]+\*\* via Critiq:\n\n/, '')
-    .trim();
+    .replace(/^\*\*[^*]+\*\* via Critiq:\n\n/, '');
+  return (
+    options.quotedParent ? text.replace(/^(?:>[^\n]*\n)+\n/, '') : text
+  ).trim();
 }

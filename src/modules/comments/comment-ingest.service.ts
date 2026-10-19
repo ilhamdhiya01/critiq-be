@@ -113,11 +113,23 @@ export class CommentIngestService {
     }
 
     if (existing) {
+      // Only an edit changes the text. A `created` for a known id is our
+      // own comment coming back after comment-sync already stored its
+      // provider id — taking it as an edit overwrote the Critiq text with
+      // the provider's copy (quote included, marked edited).
+      if (event.action !== 'edited') {
+        return 'linked';
+      }
       // A comment written in Critiq and edited on the provider keeps its
       // Critiq author; only the text changes.
       const body =
         existing.origin === CommentOrigin.CRITIQ
-          ? stripCritiqFraming(event.body)
+          ? stripCritiqFraming(event.body, {
+              quotedParent:
+                event.provider === Provider.GITHUB &&
+                existing.kind === CommentKind.GENERAL &&
+                existing.parentId !== null,
+            })
           : event.body;
       if (body === existing.body) {
         return 'ignored';
