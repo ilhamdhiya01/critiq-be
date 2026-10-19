@@ -26,6 +26,8 @@ model User {
   updatedAiCredentials  AiCredential[] @relation("AiCredentialUpdatedBy")
   pullReviews           PullReview[]   @relation("PullReviewReviewer")
   pullComments          PullComment[]  @relation("PullCommentAuthor")
+  sentInvitations       Invitation[]   @relation("InvitationInvitedBy")
+  acceptedInvitations   Invitation[]   @relation("InvitationAcceptedBy")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -42,6 +44,7 @@ model Organization {
 
   creator            User               @relation("OrganizationCreatedBy", fields: [createdBy], references: [id])
   memberships        Membership[]
+  invitations        Invitation[]
   integrations       Integration[]
   repositories       Repository[]
   repoScanConfigs    RepoScanConfig[]
@@ -112,9 +115,49 @@ model Membership {
   @@map("memberships")
 }
 
+// INVITED is not used: an invitation is an Invitation row (the invitee may
+// not have a User yet), and becomes an ACTIVE Membership when accepted.
 enum MembershipStatus {
   ACTIVE
   INVITED
+}
+
+// An Admin's invitation to join an organization, sent by email as a one-time
+// link (CLAUDE.md "Members & undangan"). Only the token's SHA-256 is stored;
+// whoever holds the link may accept it, even signed in with another email.
+model Invitation {
+  id             String                @id @default(cuid())
+  organizationId String
+  // Lowercased.
+  email          String                @db.VarChar(254)
+  role           Role
+  tokenHash      String                @unique
+  invitedById    String?
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  acceptedById   String?
+  revokedAt      DateTime?
+  emailStatus    InvitationEmailStatus @default(PENDING)
+  // Why the email failed (a short code), null otherwise.
+  emailError     String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy    User?        @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  acceptedBy   User?        @relation("InvitationAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, email])
+  @@map("invitations")
+}
+
+enum InvitationEmailStatus {
+  PENDING
+  SENT
+  FAILED
+  // No SMTP server configured: the Admin shares the link by hand.
+  NOT_CONFIGURED
 }
 
 enum Role {

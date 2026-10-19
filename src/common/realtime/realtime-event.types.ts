@@ -19,7 +19,7 @@ export type CommentChange =
 export type RepoChange =
   'connected' | 'scan_config_updated' | 'language_detected';
 
-export type SettingsArea = 'ai' | 'rules' | 'organization';
+export type SettingsArea = 'ai' | 'rules' | 'organization' | 'members';
 
 // What a caller hands the publisher: Prisma enum values as they are in the
 // code. The publisher lowercases them for the wire, the same spelling REST
