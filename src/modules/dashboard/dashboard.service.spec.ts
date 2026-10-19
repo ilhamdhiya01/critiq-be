@@ -266,7 +266,7 @@ describe('DashboardService.recentReviews', () => {
     expect(prisma.pullReview.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { organizationId: ORG },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: 5,
       }),
     );
