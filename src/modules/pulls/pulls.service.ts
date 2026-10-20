@@ -33,7 +33,10 @@ import {
 } from '../integrations/gitlab-api.service';
 import { PullRequestListItemDto } from './dto/pull-request-list-item.dto';
 import { PullRequestOrgListItemDto } from './dto/pull-request-org-list-item.dto';
-import { PullRequestDetailDto } from './dto/pull-request-detail.dto';
+import {
+  PullRequestDetailDto,
+  type PullReviewerDto,
+} from './dto/pull-request-detail.dto';
 import { ScanSummaryDto } from './dto/scan-summary.dto';
 import {
   DiffAnnotations,
@@ -60,6 +63,7 @@ import {
   toReviewDto,
 } from '../reviews/dto/review.dto';
 import { loadMergeBlockers } from '../reviews/merge-blockers';
+import { latestPerReviewer } from '../reviews/latest-per-reviewer';
 
 // What PR lists show of the latest scan — selected, not included, so a list
 // never drags each scan's full row along.
@@ -346,7 +350,10 @@ export class PullsService {
     ) {
       throw new NotFoundException('Pull request not found.');
     }
-    const mergeBlockers = await loadMergeBlockers(this.prisma, pull);
+    const [mergeBlockers, reviewers] = await Promise.all([
+      loadMergeBlockers(this.prisma, pull),
+      this.loadReviewers(pull.id, pull.headSha),
+    ]);
 
     return new PullRequestDetailDto({
       id: pull.id,
@@ -362,6 +369,7 @@ export class PullsService {
       state: pull.state,
       effectivePolicy: pull.effectivePolicy,
       latestReview: this.toLatestReviewDto(pull),
+      reviewers,
       merge: { allowed: mergeBlockers.length === 0, blockers: mergeBlockers },
       latestScan: pull.latestScan
         ? new ScanSummaryDto({
@@ -746,6 +754,32 @@ export class PullsService {
       annotationsScanId: latestScan.id,
       annotationsHeadSha: latestScan.headSha,
     };
+  }
+
+  // Each reviewer's latest decision (any commit), decisions on the head
+  // first. Detail only: lists keep latestReview.
+  private async loadReviewers(
+    pullId: string,
+    headSha: string | null,
+  ): Promise<PullReviewerDto[]> {
+    const reviews = await this.prisma.pullReview.findMany({
+      where: { pullId },
+      orderBy: { createdAt: 'desc' },
+      include: REVIEW_INCLUDE,
+    });
+    return latestPerReviewer(reviews)
+      .map((row) => toReviewDto(row, headSha))
+      .sort((a, b) => Number(a.outdated) - Number(b.outdated))
+      .map((review) => ({
+        reviewId: review.id,
+        reviewer: review.reviewer,
+        decision: review.decision,
+        headSha: review.headSha,
+        outdated: review.outdated,
+        aiAssisted: review.aiAssisted,
+        sync: { status: review.sync.status, error: review.sync.error },
+        createdAt: review.createdAt,
+      }));
   }
 
   private toLatestReviewDto(pull: {

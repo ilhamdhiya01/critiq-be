@@ -230,3 +230,94 @@ describe('parseProviderTime', () => {
     expect(parseProviderTime(value)).toBeNull();
   });
 });
+
+// Every reviewer once, not just the newest review (approvals of A then B
+// both show).
+describe('PullsService.getDetail reviewers', () => {
+  const review = (
+    id: string,
+    reviewerId: string,
+    decision: 'APPROVE' | 'REQUEST_CHANGES',
+    headSha: string,
+    hoursAgo: number,
+  ) => ({
+    id,
+    organizationId: 'org_1',
+    pullId: 'pull_1',
+    headSha,
+    decision,
+    body: null,
+    reviewerId,
+    reviewerRole: 'REVIEWER',
+    effectivePolicy: 'ALLOW_AI',
+    manualConfirmation: false,
+    aiAssisted: decision === 'APPROVE',
+    syncStatus: 'SYNCED',
+    syncError: null,
+    syncedAt: null,
+    createdAt: new Date(Date.now() - hoursAgo * 3_600_000),
+    reviewer: {
+      id: reviewerId,
+      name: reviewerId,
+      email: 'x@x.io',
+      avatarUrl: null,
+    },
+  });
+
+  it("lists each reviewer's latest decision, head first", async () => {
+    const { service, prisma } = setup();
+    const pull = {
+      id: 'pull_1',
+      organizationId: 'org_1',
+      repositoryId: 'repo_1',
+      provider: Provider.GITHUB,
+      externalId: '40',
+      title: 'Development',
+      authorUsername: 'octo',
+      sourceBranch: 'development',
+      targetBranch: 'main',
+      headSha: 'head',
+      state: 'OPEN',
+      effectivePolicy: 'ALLOW_AI',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      repository: { path: 'acme/web' },
+      reviews: [],
+      latestScan: null,
+    };
+    Object.assign(prisma.pullRequest, {
+      findUnique: jest.fn().mockResolvedValue(pull),
+    });
+    Object.assign(prisma, {
+      pullReview: {
+        findMany: jest.fn((args: { where: { headSha?: string } }) =>
+          Promise.resolve(
+            args.where.headSha
+              ? []
+              : [
+                  review('r4', 'u_a', 'APPROVE', 'head', 1),
+                  review('r3', 'u_c', 'APPROVE', 'old', 2),
+                  review('r2', 'u_b', 'REQUEST_CHANGES', 'head', 3),
+                  review('r1', 'u_a', 'REQUEST_CHANGES', 'old', 4),
+                ],
+          ),
+        ),
+      },
+    });
+
+    const detail = await service.getDetail('org_1', 'repo_1', 'pull_1');
+
+    expect(
+      detail.reviewers.map((r) => [r.reviewId, r.decision, r.outdated]),
+    ).toEqual([
+      ['r4', 'approve', false],
+      ['r2', 'request_changes', false],
+      ['r3', 'approve', true],
+    ]);
+    expect(detail.reviewers[0]).toMatchObject({
+      reviewer: { id: 'u_a' },
+      aiAssisted: true,
+      sync: { status: 'synced', error: null },
+    });
+  });
+});

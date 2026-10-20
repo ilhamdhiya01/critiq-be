@@ -3,6 +3,7 @@ import {
   ReviewDecision,
   ScanStatus,
 } from '../../generated/prisma/enums';
+import { latestPerReviewer } from './latest-per-reviewer';
 
 // Why a PR cannot be merged from Critiq yet, in the order the FE lists them.
 export type MergeBlocker =
@@ -33,15 +34,10 @@ export function mergeBlockers(input: MergeBlockersInput): MergeBlocker[] {
   if (input.state !== PullRequestState.OPEN) {
     return ['pull_not_open'];
   }
-  const latestByReviewer = new Map<string, ReviewDecision>();
-  input.reviewsOnHead.forEach((review, index) => {
-    // A deleted reviewer's review still counts, on its own.
-    const key = review.reviewerId ?? `deleted-${index}`;
-    if (!latestByReviewer.has(key)) {
-      latestByReviewer.set(key, review.decision);
-    }
-  });
-  const decisions = [...latestByReviewer.values()];
+  // A deleted reviewer's review still counts, on its own.
+  const decisions = latestPerReviewer(input.reviewsOnHead).map(
+    (review) => review.decision,
+  );
 
   const blockers: MergeBlocker[] = [];
   if (!decisions.includes(ReviewDecision.APPROVE)) {

@@ -7,6 +7,22 @@ import {
 } from '../../../generated/prisma/enums';
 import { ScanSummaryDto } from './scan-summary.dto';
 
+// A reviewer's latest decision on this PR, on any commit.
+export interface PullReviewerDto {
+  reviewId: string;
+  reviewer: ReviewDto['reviewer'];
+  decision: ReviewDto['decision'];
+  headSha: string;
+  // Decided on an older commit than the current head.
+  outdated: boolean;
+  aiAssisted: boolean;
+  sync: {
+    status: ReviewDto['sync']['status'];
+    error: ReviewDto['sync']['error'];
+  };
+  createdAt: Date;
+}
+
 export class PullRequestDetailDto {
   id!: string;
   repositoryId!: string;
@@ -22,6 +38,9 @@ export class PullRequestDetailDto {
   effectivePolicy!: ReviewPolicy;
   // The most recent review decision (v1.5.2); null before any.
   latestReview!: ReviewDto | null;
+  // Every reviewer once, with their latest decision: decisions on the head
+  // first, then outdated ones, newest first within each.
+  reviewers!: PullReviewerDto[];
   // Whether Merge is enabled in Critiq, and if not why (v1.5.2).
   merge!: { allowed: boolean; blockers: MergeBlocker[] };
   // null when no scan has reached a terminal state yet — a PR that was only
@@ -46,6 +65,7 @@ export class PullRequestDetailDto {
     state: PullRequestState;
     effectivePolicy: ReviewPolicy;
     latestReview: ReviewDto | null;
+    reviewers: PullReviewerDto[];
     merge: { allowed: boolean; blockers: MergeBlocker[] };
     latestScan: ScanSummaryDto | null;
     createdAt: Date;
