@@ -692,6 +692,8 @@ model Finding {
   @@index([scanId, filePath, lineStart])
   @@index([organizationId, pullId, fingerprint, status])
   @@index([organizationId, pullId, status])
+  // Insights: an org's criticals by status over time.
+  @@index([organizationId, severity, status, createdAt])
   @@map("findings")
 }
 
