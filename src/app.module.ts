@@ -15,6 +15,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { ActivityModule } from './modules/activity/activity.module';
 import { MembersModule } from './modules/members/members.module';
 import { InsightsModule } from './modules/insights/insights.module';
+import { SearchModule } from './modules/search/search.module';
 import { CommonModule } from './common/common.module';
 import { QueueModule } from './queue/queue.module';
 import { RedisModule } from './common/redis/redis.module';
@@ -43,6 +44,7 @@ import { RealtimeStreamModule } from './common/realtime/realtime-stream.module';
     ActivityModule,
     MembersModule,
     InsightsModule,
+    SearchModule,
     QueueModule,
   ],
   controllers: [],
