@@ -21,4 +21,12 @@ export function assertGithubAccess(integration: {
       message: 'github_suspended',
     });
   }
+  // Requested from a GitHub organization owner, not installed yet: there is
+  // no installation to mint a token for.
+  if (integration.state === IntegrationState.PENDING_APPROVAL) {
+    throw new ConflictException({
+      field: 'organizationId',
+      message: 'github_pending_approval',
+    });
+  }
 }

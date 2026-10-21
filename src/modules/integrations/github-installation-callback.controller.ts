@@ -54,7 +54,7 @@ export class GithubInstallationCallbackController {
       // are read live from GitHub (candidates). The slug is the only thing
       // this reveals for a known installation id, and it is in every FE URL
       // of that org anyway.
-      if (query.setup_action === 'update') {
+      if (query.setup_action === 'update' && query.installation_id) {
         const slug =
           await this.integrationsService.findOrgSlugForGithubInstallation(
             query.installation_id,
@@ -71,7 +71,12 @@ export class GithubInstallationCallbackController {
       // App directly from GitHub's Marketplace/App page rather than via
       // Critiq's own "Connect GitHub" button. Critiq doesn't know which
       // organization it belongs to, so hand off to an FE flow that asks the
-      // user to pick one, rather than silently failing.
+      // user to pick one, rather than silently failing. A request with no
+      // installation has nothing to claim.
+      if (!query.installation_id) {
+        res.redirect(feUrl);
+        return;
+      }
       res.redirect(
         `${feUrl}/integrations/github/claim?installation_id=${encodeURIComponent(query.installation_id)}`,
       );
@@ -88,6 +93,18 @@ export class GithubInstallationCallbackController {
         ? `${feUrl}/setup?step=2&orgId=${orgId}`
         : `${feUrl}/${encodeURIComponent(orgSlug)}/settings`;
     const separator = redirectBase.includes('?') ? '&' : '?';
+
+    // Requested from the GitHub organization's owner: nothing installed yet,
+    // so nothing to verify — record the pending request and say so.
+    if (!query.installation_id) {
+      try {
+        await this.integrationsService.markGithubPendingApproval(orgId, userId);
+        res.redirect(`${redirectBase}${separator}github=pending_approval`);
+      } catch {
+        res.redirect(`${redirectBase}${separator}github=error`);
+      }
+      return;
+    }
 
     try {
       const installation = await this.githubAppService.verifyInstallation(
