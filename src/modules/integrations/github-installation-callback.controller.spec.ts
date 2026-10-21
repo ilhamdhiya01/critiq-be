@@ -22,6 +22,7 @@ function setup(intent: Record<string, unknown> | null) {
   };
   const integrations = {
     connectGithub: jest.fn().mockResolvedValue(undefined),
+    markGithubPendingApproval: jest.fn().mockResolvedValue(undefined),
     findOrgSlugForGithubInstallation: jest.fn().mockResolvedValue(null),
   };
   const controller = new GithubInstallationCallbackController(
@@ -140,5 +141,41 @@ describe('GithubInstallationCallbackController', () => {
         integrations.findOrgSlugForGithubInstallation,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+// A non-owner requested the install from the GitHub organization's owner:
+// GitHub sends setup_action=request and no installation_id.
+describe('GithubInstallationCallbackController — install request', () => {
+  const request = { setup_action: 'request' as const, state: 's' };
+
+  it('records the pending request and goes back to Settings', async () => {
+    const { controller, res, githubApp, integrations } = setup(fromSettings);
+    await controller.callback(request, res as unknown as Response);
+    expect(integrations.markGithubPendingApproval).toHaveBeenCalledWith(
+      fromSettings.orgId,
+      fromSettings.userId,
+    );
+    expect(githubApp.verifyInstallation).not.toHaveBeenCalled();
+    expect(res.redirect).toHaveBeenCalledWith(
+      `${FE_URL}/cititex-engineer/settings?github=pending_approval`,
+    );
+  });
+
+  it('goes back to the onboarding wizard it came from', async () => {
+    const { controller, res } = setup({
+      ...fromSettings,
+      returnTo: GithubInstallReturnTo.SETUP,
+    });
+    await controller.callback(request, res as unknown as Response);
+    expect(res.redirect).toHaveBeenCalledWith(
+      `${FE_URL}/setup?step=2&orgId=${fromSettings.orgId}&github=pending_approval`,
+    );
+  });
+
+  it('has nothing to claim without an intent', async () => {
+    const { controller, res } = setup(null);
+    await controller.callback(request, res as unknown as Response);
+    expect(res.redirect).toHaveBeenCalledWith(FE_URL);
   });
 });

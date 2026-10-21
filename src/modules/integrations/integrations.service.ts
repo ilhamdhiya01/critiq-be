@@ -245,6 +245,46 @@ export class IntegrationsService {
     }
   }
 
+  // An Admin who does not own the GitHub organization can only *request*
+  // the install: GitHub comes back with setup_action=request and no
+  // installation_id, since nothing is installed yet. The org's GitHub row
+  // records the pending request; once the owner approves, connecting
+  // again upserts the same row ACTIVE. An installation the org already
+  // has (requesting access for another GitHub org) is left untouched.
+  async markGithubPendingApproval(
+    organizationId: string,
+    connectedByUserId: string,
+  ): Promise<void> {
+    const existing = await this.prisma.integration.findUnique({
+      where: {
+        organizationId_source: { organizationId, source: Provider.GITHUB },
+      },
+      select: { installationId: true },
+    });
+    if (existing?.installationId) {
+      return;
+    }
+    const appSlug = this.configService.get<string>('githubApp.slug') ?? null;
+    const integration = await this.prisma.integration.upsert({
+      where: {
+        organizationId_source: { organizationId, source: Provider.GITHUB },
+      },
+      create: {
+        organizationId,
+        source: Provider.GITHUB,
+        credentialKind: CredentialKind.INSTALLATION,
+        appSlug,
+        state: IntegrationState.PENDING_APPROVAL,
+        connectedByUserId,
+      },
+      update: {
+        state: IntegrationState.PENDING_APPROVAL,
+        connectedByUserId,
+      },
+    });
+    await this.announce(organizationId, Provider.GITHUB, integration.state);
+  }
+
   async disconnectGitlab(organizationId: string): Promise<void> {
     const integration = await this.prisma.integration.findUnique({
       where: {

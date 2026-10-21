@@ -4,6 +4,7 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import {
+  AiScanStatus,
   DiffMode,
   FindingSeverity,
   FindingSource,
@@ -400,6 +401,52 @@ describe('ScansService', () => {
       });
       expect(rateLimiter.tryAcquire).not.toHaveBeenCalled();
       expect(scanQueueService.enqueue).not.toHaveBeenCalled();
+    });
+
+    // A DONE scan whose AI review is still running: a rescan would start a
+    // second review of the same commit (PR #26 critiq-fe).
+    it.each([AiScanStatus.QUEUED, AiScanStatus.RUNNING])(
+      '409s ai_in_progress while the latest AI review is %s',
+      async (aiStatus) => {
+        const { service, prisma, scanQueueService, rateLimiter } = setup();
+        prisma.pullRequest.findUnique.mockResolvedValue({
+          ...pull,
+          latestScan: { aiStatus },
+        });
+
+        await expect(
+          service.requestRescan(ORG, REPO, pull.id, 'user_1'),
+        ).rejects.toMatchObject({
+          status: HttpStatus.CONFLICT,
+          response: { field: 'pullId', message: 'ai_in_progress' },
+        });
+        expect(rateLimiter.tryAcquire).not.toHaveBeenCalled();
+        expect(scanQueueService.enqueue).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([AiScanStatus.DONE, AiScanStatus.FAILED, null])(
+      'rescans once the latest AI review is %s',
+      async (aiStatus) => {
+        const { service, prisma, scanQueueService } = setup();
+        prisma.pullRequest.findUnique.mockResolvedValue({
+          ...pull,
+          latestScan: { aiStatus },
+        });
+        await service.requestRescan(ORG, REPO, pull.id, 'user_1');
+        expect(scanQueueService.enqueue).toHaveBeenCalled();
+      },
+    );
+
+    it('reads the AI status of the latest scan only', async () => {
+      const { service, prisma } = setup();
+      await service.requestRescan(ORG, REPO, pull.id, 'user_1');
+      expect(prisma.pullRequest.findUnique).toHaveBeenCalledWith({
+        where: { id: pull.id },
+        select: expect.objectContaining({
+          latestScan: { select: { aiStatus: true } },
+        }) as object,
+      });
     });
 
     it('409s no_head_sha', async () => {

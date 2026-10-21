@@ -23,4 +23,21 @@ describe('comment marker', () => {
       'Edited text',
     );
   });
+
+  it('strips the quote Critiq added only when told it added one', () => {
+    const sent = providerBody('Ilham', 'udah mas', 'c1', 'line 1\nline 2');
+    expect(stripCritiqFraming(sent, { quotedParent: true })).toBe('udah mas');
+    // The author's own quote is theirs to keep.
+    expect(
+      stripCritiqFraming(providerBody('Ilham', '> quoted\n\nmine', 'c1')),
+    ).toBe('> quoted\n\nmine');
+  });
+
+  it('reads CRLF bodies as GitHub returns them', () => {
+    const sent = providerBody('Ilham', 'udah mas', 'c1', 'root').replace(
+      /\n/g,
+      '\r\n',
+    );
+    expect(stripCritiqFraming(sent, { quotedParent: true })).toBe('udah mas');
+  });
 });

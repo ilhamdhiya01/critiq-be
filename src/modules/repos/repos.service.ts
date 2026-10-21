@@ -1,6 +1,8 @@
 import { randomBytes } from 'crypto';
 import {
   ConflictException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   NotFoundException,
@@ -13,6 +15,7 @@ import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { REDIS_CLIENT } from '../../common/redis/redis.constants';
+import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Prisma } from '../../generated/prisma/client';
 import {
@@ -42,6 +45,7 @@ import {
 import { RepositoryListItemDto } from './dto/repository-list-item.dto';
 import { RepositoryDetailDto } from './dto/repository-detail.dto';
 import { RescanResponseDto } from './dto/rescan-response.dto';
+import { rescanBlocker, SCAN_IN_FLIGHT } from '../scans/scan-in-flight';
 
 // Mirrors GithubInstallIntentDto's returnTo mapping pattern — lowercase
 // wire value in, Prisma enum out, kept as a lookup table rather than an
@@ -67,6 +71,9 @@ const INVALID_BRANCH_NAME_PATTERN = /[\s*?[\]]/;
 const BRANCH_LIST_LIMIT = 50;
 // How long a provider branch list is served from Redis.
 const BRANCH_CACHE_TTL_SECONDS = 120;
+// One "Re-scan open PRs" per repository per window — same window as a
+// single PR's manual rescan (ScansService).
+const RESCAN_WINDOW_SECONDS = 30;
 
 interface ProviderIntegration {
   source: Provider;
@@ -127,6 +134,7 @@ export class ReposService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
     private readonly realtime: RealtimePublisher,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   async getBranchesForCandidate(
@@ -724,22 +732,48 @@ export class ReposService {
       throw new NotFoundException('Repository not found.');
     }
 
+    const allowed = await this.rateLimiter.tryAcquire(
+      `ratelimit:rescan:repo:${repositoryId}`,
+      RESCAN_WINDOW_SECONDS,
+    );
+    if (!allowed) {
+      throw new HttpException(
+        { field: 'repoId', message: 'rescan_rate_limited' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const pulls = await this.prisma.pullRequest.findMany({
       where: { repositoryId, state: PullRequestState.OPEN },
       select: {
         id: true,
         headSha: true,
-        latestScan: { select: { rulesetVersion: true } },
+        latestScan: { select: { rulesetVersion: true, aiStatus: true } },
+        scans: {
+          where: { status: { in: SCAN_IN_FLIGHT } },
+          select: { id: true },
+          take: 1,
+        },
       },
     });
 
     let enqueued = 0;
     let skippedUpToDate = 0;
+    let skippedInFlight = 0;
 
     for (const pull of pulls) {
       // No head sha means there is no commit to check out — nothing a scan
       // could run against.
       if (!pull.headSha) {
+        continue;
+      }
+      // Same rule as a single PR's rescan, which answers 409 instead.
+      const blocker = rescanBlocker({
+        staticInFlight: pull.scans.length > 0,
+        latestAiStatus: pull.latestScan?.aiStatus,
+      });
+      if (blocker) {
+        skippedInFlight += 1;
         continue;
       }
       if (staleOnly && pull.latestScan?.rulesetVersion === RULESET_VERSION) {
@@ -767,8 +801,13 @@ export class ReposService {
       staleOnly,
       enqueued,
       skippedUpToDate,
+      skippedInFlight,
     });
-    return new RescanResponseDto({ enqueued, skippedUpToDate });
+    return new RescanResponseDto({
+      enqueued,
+      skippedUpToDate,
+      skippedInFlight,
+    });
   }
 
   private async findScanConfigOrThrow(

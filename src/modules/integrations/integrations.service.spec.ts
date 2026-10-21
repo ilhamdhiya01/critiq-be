@@ -46,6 +46,9 @@ function setup(integration: Record<string, unknown> | null) {
     integration: {
       findUnique: jest.fn().mockResolvedValue(integration),
       delete: jest.fn().mockResolvedValue({}),
+      upsert: jest
+        .fn()
+        .mockResolvedValue({ state: IntegrationState.PENDING_APPROVAL }),
     },
   };
   const githubAppService = {
@@ -62,7 +65,7 @@ function setup(integration: Record<string, unknown> | null) {
   const service = new IntegrationsService(
     prisma as unknown as PrismaService,
     {} as EncryptionService,
-    {} as ConfigService,
+    { get: () => 'critiq-app' } as unknown as ConfigService,
     githubAppService as unknown as GithubAppService,
     {} as GitlabApiService,
     logger as unknown as Logger,
@@ -156,5 +159,37 @@ describe('IntegrationsService.listGithubCandidates', () => {
     expect(
       githubAppService.listInstallationRepositories,
     ).not.toHaveBeenCalled();
+  });
+});
+
+// A non-owner only requests the install: GitHub returns no installation.
+describe('IntegrationsService.markGithubPendingApproval', () => {
+  it('records the request as pending approval', async () => {
+    const { service, prisma, realtime } = setup(null);
+    await service.markGithubPendingApproval('org_1', 'user_1');
+    expect(prisma.integration.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          organizationId: 'org_1',
+          source: Provider.GITHUB,
+          state: IntegrationState.PENDING_APPROVAL,
+          connectedByUserId: 'user_1',
+        }) as unknown,
+      }),
+    );
+    expect(realtime.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'integration.updated',
+        state: IntegrationState.PENDING_APPROVAL,
+      }),
+    );
+  });
+
+  // Requesting access to another GitHub org must not break the one
+  // already connected.
+  it('leaves an existing installation alone', async () => {
+    const { service, prisma } = setup({ installationId: '169099670' });
+    await service.markGithubPendingApproval('org_1', 'user_1');
+    expect(prisma.integration.upsert).not.toHaveBeenCalled();
   });
 });

@@ -148,6 +148,58 @@ describe('CommentIngestService', () => {
     });
   });
 
+  // comment-sync stored the provider id first; GitHub's `created` for our
+  // own comment then arrives. Not an edit: the Critiq text stays as written.
+  it('ignores the created echo of a comment already linked', async () => {
+    const { service, prisma } = setup();
+    prisma.pullComment.findUnique.mockResolvedValue({
+      id: 'c1',
+      origin: CommentOrigin.CRITIQ,
+      kind: CommentKind.GENERAL,
+      parentId: 'root',
+      body: 'udah mas',
+    });
+    await expect(
+      service.ingest(
+        event({
+          body: providerBody('Ilham', 'udah mas', 'c1', 'ini udah di cek ?'),
+        }),
+      ),
+    ).resolves.toBe('linked');
+    expect(prisma.pullComment.update).not.toHaveBeenCalled();
+  });
+
+  // A general reply goes to GitHub quoting its root; an edit made there
+  // must not bring Critiq's quote back into the text.
+  it('drops the quote Critiq added when a GitHub reply is edited', async () => {
+    const { service, prisma } = setup();
+    prisma.pullComment.findUnique.mockResolvedValue({
+      id: 'c1',
+      origin: CommentOrigin.CRITIQ,
+      kind: CommentKind.GENERAL,
+      parentId: 'root',
+      body: 'udah mas',
+    });
+    await service.ingest(
+      event({
+        action: 'edited',
+        body: providerBody(
+          'Ilham',
+          'udah mas, sudah dicek',
+          'c1',
+          'ini udah di cek ?',
+        ).replace(/\n/g, '\r\n'),
+      }),
+    );
+    expect(prisma.pullComment.update).toHaveBeenCalledWith({
+      where: { id: 'c1' },
+      data: {
+        body: 'udah mas, sudah dicek',
+        editedAt: expect.any(Date) as Date,
+      },
+    });
+  });
+
   it('marks a deleted comment', async () => {
     const { service, prisma } = setup();
     prisma.pullComment.findUnique.mockResolvedValue({ id: 'c1' });

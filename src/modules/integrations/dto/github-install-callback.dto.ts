@@ -4,14 +4,21 @@ import {
   IsNumberString,
   IsOptional,
   IsString,
+  ValidateIf,
 } from 'class-validator';
 
 // Field names mirror GitHub's actual query string wire format exactly
 // (snake_case), matching this module's established convention
 // (see connect-gitlab.dto.ts).
 export class GithubInstallCallbackDto {
+  // Absent on setup_action=request: a non-owner only requested the install
+  // from the GitHub organization's owner, so nothing is installed yet.
+  @ValidateIf(
+    (dto: GithubInstallCallbackDto) =>
+      dto.setup_action !== 'request' || dto.installation_id !== undefined,
+  )
   @IsNumberString()
-  installation_id!: string;
+  installation_id?: string;
 
   @IsIn(['install', 'update', 'request'])
   setup_action!: 'install' | 'update' | 'request';
