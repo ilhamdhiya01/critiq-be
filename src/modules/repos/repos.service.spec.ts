@@ -688,19 +688,25 @@ describe('ReposService branch list cache', () => {
 describe('ReposService.rescanOpenPulls', () => {
   // An open PR as rescanOpenPulls reads it: `scans` holds an unfinished
   // static scan, if any.
-  const openPull = (
-    id: string,
-    {
-      aiStatus = AiScanStatus.DONE,
-      staticInFlight = false,
-      rulesetVersion = 'old',
-    } = {},
-  ) => ({
-    id,
-    headSha: `sha_${id}`,
-    latestScan: { rulesetVersion, aiStatus },
-    scans: staticInFlight ? [{ id: `scan_${id}` }] : [],
-  });
+  interface OpenPullState {
+    aiStatus: AiScanStatus | null;
+    staticInFlight: boolean;
+    rulesetVersion: string;
+  }
+  const openPull = (id: string, state: Partial<OpenPullState> = {}) => {
+    const { aiStatus, staticInFlight, rulesetVersion }: OpenPullState = {
+      aiStatus: AiScanStatus.DONE,
+      staticInFlight: false,
+      rulesetVersion: 'old',
+      ...state,
+    };
+    return {
+      id,
+      headSha: `sha_${id}`,
+      latestScan: { rulesetVersion, aiStatus },
+      scans: staticInFlight ? [{ id: `scan_${id}` }] : [],
+    };
+  };
 
   // PR #26 critiq-fe: two clicks while the AI was still reviewing started
   // three reviews of the same commit.
