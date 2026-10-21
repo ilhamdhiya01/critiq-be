@@ -16,10 +16,10 @@ import { AiScanStatus, ScanStatus } from '../../generated/prisma/enums';
 import { AiScanService } from '../ai/scan/ai-scan.service';
 import { ScansService } from '../scans/scans.service';
 import { toApiAiStatus } from '../scans/dto/ai-scan-fields';
+import { AI_IN_FLIGHT } from '../scans/scan-in-flight';
 import { PullSummaryDto } from './dto/pull-summary.dto';
 
 const REGENERATE_WINDOW_SECONDS = 120;
-const IN_FLIGHT: AiScanStatus[] = [AiScanStatus.QUEUED, AiScanStatus.RUNNING];
 // Statuses that name a missing organization setting — an Admin can fix them
 // after the scan, so GET summary checks them against the settings now.
 const CONFIGURATION_STATUSES: AiScanStatus[] = [
@@ -155,7 +155,7 @@ export class PullSummaryService {
         HttpStatus.PRECONDITION_FAILED,
       );
     }
-    if (scan.aiStatus && IN_FLIGHT.includes(scan.aiStatus)) {
+    if (scan.aiStatus && AI_IN_FLIGHT.includes(scan.aiStatus)) {
       throw new ConflictException({
         field: 'pullId',
         message: 'ai_in_progress',

@@ -1,4 +1,4 @@
-import { HttpStatus } from '@nestjs/common';
+import { ConflictException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -259,6 +259,20 @@ describe('PullSummaryService.regenerate', () => {
       true,
     );
     expect(aiScanService.maybeEnqueue).not.toHaveBeenCalled();
+  });
+
+  // Forced, it is a rescan: rescan's ai_in_progress answer reaches the
+  // caller unchanged.
+  it('passes on rescan’s refusal when forced', async () => {
+    const { service, scansService } = setup();
+    const refusal = new ConflictException({
+      field: 'pullId',
+      message: 'ai_in_progress',
+    });
+    scansService.requestRescan.mockRejectedValue(refusal);
+    await expect(
+      service.regenerate('org_1', 'repo_1', 'pull_1', 'u_1', true),
+    ).rejects.toBe(refusal);
   });
 
   it('409s while a run is in flight', async () => {

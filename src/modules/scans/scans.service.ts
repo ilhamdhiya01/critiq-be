@@ -57,14 +57,13 @@ import {
   ScanRequestedDto,
   ScanStatusDto,
 } from './dto/scan.dto';
+import { rescanBlocker, SCAN_IN_FLIGHT } from './scan-in-flight';
 
 const SCAN_HISTORY_LIMIT = 20;
 const RESCAN_WINDOW_SECONDS = 30;
 // How far into the waiting list queuePosition looks. Past this the FE just
 // shows "queued" — scanning an unbounded list on every poll is not worth it.
 const QUEUE_POSITION_SCAN_LIMIT = 1000;
-
-const IN_FLIGHT: ScanStatus[] = [ScanStatus.QUEUED, ScanStatus.RUNNING];
 
 @Injectable()
 export class ScansService {
@@ -153,14 +152,15 @@ export class ScansService {
     // caller's slot. Two requests racing past this check are still caught
     // by the limiter below: only one gets the slot.
     const inFlight = await this.prisma.scan.findFirst({
-      where: { pullId, status: { in: IN_FLIGHT } },
+      where: { pullId, status: { in: SCAN_IN_FLIGHT } },
       select: { id: true },
     });
-    if (inFlight) {
-      throw new ConflictException({
-        field: 'pullId',
-        message: 'scan_in_progress',
-      });
+    const blocker = rescanBlocker({
+      staticInFlight: inFlight !== null,
+      latestAiStatus: pull.latestScan?.aiStatus,
+    });
+    if (blocker) {
+      throw new ConflictException({ field: 'pullId', message: blocker });
     }
 
     const allowed = await this.rateLimiter.tryAcquire(
@@ -208,7 +208,7 @@ export class ScansService {
     scanId: string,
   ): Promise<ScanStatusDto> {
     const scan = await this.findScanOrThrow(organizationId, scanId);
-    const inFlight = IN_FLIGHT.includes(scan.status);
+    const inFlight = SCAN_IN_FLIGHT.includes(scan.status);
     const [progress, queuePosition] = await Promise.all([
       inFlight ? this.readProgress(scan.id) : null,
       scan.status === ScanStatus.QUEUED
@@ -369,7 +369,7 @@ export class ScansService {
       return active;
     }
     const scans = await this.prisma.scan.findMany({
-      where: { pullId: { in: pullIds }, status: { in: IN_FLIGHT } },
+      where: { pullId: { in: pullIds }, status: { in: SCAN_IN_FLIGHT } },
       orderBy: { createdAt: 'desc' },
       select: { id: true, pullId: true, status: true },
     });
@@ -486,6 +486,7 @@ export class ScansService {
         repositoryId: true,
         headSha: true,
         provider: true,
+        latestScan: { select: { aiStatus: true } },
       },
     });
     if (

@@ -4,15 +4,20 @@ import { Logger } from 'winston';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import {
+  AiScanStatus,
   IntegrationState,
   Provider,
+  PullRequestState,
   ReviewPolicy,
+  ScanStatus,
 } from '../../generated/prisma/enums';
+import { RULESET_VERSION } from '../../queue/rules/rules.constants';
 import { ScanQueueService } from '../../queue/scan-queue.service';
 import { GithubAppService } from '../integrations/github-app.service';
 import { GitlabApiService } from '../integrations/gitlab-api.service';
 import { ReposService } from './repos.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 
 jest.mock('../../common/realtime/realtime.publisher', () => ({
   RealtimePublisher: class {},
@@ -123,16 +128,21 @@ function setup() {
     reviewChanged: jest.fn(),
     commentChanged: jest.fn(),
   };
+  const scanQueue = {
+    enqueue: jest.fn().mockResolvedValue({ scanId: 'scan_new' }),
+  };
+  const rateLimiter = { tryAcquire: jest.fn().mockResolvedValue(true) };
   const service = new ReposService(
     prisma as unknown as PrismaService,
     { decrypt: () => 'token' } as unknown as EncryptionService,
     {} as GithubAppService,
     gitlab as unknown as GitlabApiService,
     {} as ConfigService,
-    {} as ScanQueueService,
+    scanQueue as unknown as ScanQueueService,
     redis as unknown as Redis,
     logger as unknown as Logger,
     realtime as unknown as RealtimePublisher,
+    rateLimiter as unknown as RateLimiterService,
   );
   jest
     .spyOn(
@@ -140,7 +150,17 @@ function setup() {
       'installWebhook',
     )
     .mockResolvedValue({ status: 'installed' });
-  return { realtime, service, gitlab, tx, prisma, logger, redis };
+  return {
+    realtime,
+    service,
+    gitlab,
+    tx,
+    prisma,
+    logger,
+    redis,
+    scanQueue,
+    rateLimiter,
+  };
 }
 
 const branches = (...list: string[]) => list.map((name) => ({ name }));
@@ -662,5 +682,108 @@ describe('ReposService branch list cache', () => {
       branches: ['main', 'develop', 'staging'],
     });
     expect(redis.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('ReposService.rescanOpenPulls', () => {
+  // An open PR as rescanOpenPulls reads it: `scans` holds an unfinished
+  // static scan, if any.
+  const openPull = (
+    id: string,
+    {
+      aiStatus = AiScanStatus.DONE,
+      staticInFlight = false,
+      rulesetVersion = 'old',
+    } = {},
+  ) => ({
+    id,
+    headSha: `sha_${id}`,
+    latestScan: { rulesetVersion, aiStatus },
+    scans: staticInFlight ? [{ id: `scan_${id}` }] : [],
+  });
+
+  // PR #26 critiq-fe: two clicks while the AI was still reviewing started
+  // three reviews of the same commit.
+  it('leaves PRs whose scan or AI review is still running alone', async () => {
+    const { service, prisma, scanQueue } = setup();
+    prisma.pullRequest.findMany.mockResolvedValue([
+      openPull('p_ai_running', { aiStatus: AiScanStatus.RUNNING }),
+      openPull('p_ai_queued', { aiStatus: AiScanStatus.QUEUED }),
+      openPull('p_static', { staticInFlight: true }),
+      openPull('p_done'),
+      openPull('p_ai_failed', { aiStatus: AiScanStatus.FAILED }),
+    ]);
+
+    await expect(
+      service.rescanOpenPulls(ORG, 'repo_1', false),
+    ).resolves.toEqual({
+      enqueued: 2,
+      skippedUpToDate: 0,
+      skippedInFlight: 3,
+    });
+    expect(
+      scanQueue.enqueue.mock.calls.map(
+        ([input]: [{ pullId: string }]) => input.pullId,
+      ),
+    ).toEqual(['p_done', 'p_ai_failed']);
+  });
+
+  it('reads only unfinished static scans of open PRs', async () => {
+    const { service, prisma } = setup();
+    await service.rescanOpenPulls(ORG, 'repo_1', false);
+    expect(prisma.pullRequest.findMany).toHaveBeenCalledWith({
+      where: { repositoryId: 'repo_1', state: PullRequestState.OPEN },
+      select: expect.objectContaining({
+        scans: {
+          where: { status: { in: [ScanStatus.QUEUED, ScanStatus.RUNNING] } },
+          select: { id: true },
+          take: 1,
+        },
+      }) as object,
+    });
+  });
+
+  it('still counts PRs already on the current ruleset with stale=1', async () => {
+    const { service, prisma, scanQueue } = setup();
+    prisma.pullRequest.findMany.mockResolvedValue([
+      openPull('p_current', { rulesetVersion: RULESET_VERSION }),
+      openPull('p_old'),
+    ]);
+    await expect(service.rescanOpenPulls(ORG, 'repo_1', true)).resolves.toEqual(
+      {
+        enqueued: 1,
+        skippedUpToDate: 1,
+        skippedInFlight: 0,
+      },
+    );
+    expect(scanQueue.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows one rescan per repository per 30 seconds', async () => {
+    const { service, prisma, rateLimiter, scanQueue } = setup();
+    prisma.pullRequest.findMany.mockResolvedValue([openPull('p_done')]);
+    rateLimiter.tryAcquire.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    await service.rescanOpenPulls(ORG, 'repo_1', false);
+    await expect(
+      service.rescanOpenPulls(ORG, 'repo_1', false),
+    ).rejects.toMatchObject({
+      status: 429,
+      response: { field: 'repoId', message: 'rescan_rate_limited' },
+    });
+    expect(rateLimiter.tryAcquire).toHaveBeenCalledWith(
+      'ratelimit:rescan:repo:repo_1',
+      30,
+    );
+    expect(scanQueue.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  // The limiter is not consulted for a repository of another org.
+  it('404s before taking the slot for a repository of another org', async () => {
+    const { service, rateLimiter } = setup();
+    await expect(
+      service.rescanOpenPulls('org_other', 'repo_1', false),
+    ).rejects.toThrow('Repository not found.');
+    expect(rateLimiter.tryAcquire).not.toHaveBeenCalled();
   });
 });
