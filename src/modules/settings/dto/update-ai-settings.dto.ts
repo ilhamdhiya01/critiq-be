@@ -9,6 +9,8 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { AI_PROVIDER_NAMES } from '../../ai/ai-models.constants';
+import type { AiProviderName } from '../../ai/ai-provider.interface';
 
 // Every field optional (partial update). For apiKey the three states mean
 // different things, so they are kept distinct end to end:
@@ -16,11 +18,9 @@ import {
 //   ""        → delete that provider's key
 //   null / absent → keep whatever is stored
 export class UpdateAiSettingsDto {
-  // 'google' is accepted by validation on purpose so the service can answer
-  // 422 provider_unavailable instead of a generic 400.
   @IsOptional()
-  @IsIn(['anthropic', 'openai', 'openai_compatible', 'google'])
-  provider?: 'anthropic' | 'openai' | 'openai_compatible' | 'google';
+  @IsIn(AI_PROVIDER_NAMES)
+  provider?: AiProviderName;
 
   @IsOptional()
   @IsString()

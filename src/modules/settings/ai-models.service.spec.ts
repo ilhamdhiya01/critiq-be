@@ -1,4 +1,3 @@
-import { UnprocessableEntityException } from '@nestjs/common';
 import type Redis from 'ioredis';
 import { Logger } from 'winston';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -192,12 +191,18 @@ describe('AiModelsService.listForOrg', () => {
     });
   });
 
-  it('answers 422 provider_unavailable for google', async () => {
-    const { service, factory } = setup();
-    await expect(service.listForOrg(ORG, 'google')).rejects.toBeInstanceOf(
-      UnprocessableEntityException,
+  it('lists google models with the stored key', async () => {
+    const { service, factory, adapter } = setup();
+    adapter.listModels.mockResolvedValue([model('gemini-3.8-flash', null)]);
+    await expect(service.listForOrg(ORG, 'google')).resolves.toMatchObject({
+      provider: 'google',
+      source: 'live',
+      models: [{ id: 'gemini-3.8-flash', recommended: false }],
+    });
+    expect(factory.forModelListing).toHaveBeenCalledWith(
+      ORG,
+      expect.objectContaining({ provider: 'google' }),
     );
-    expect(factory.forModelListing).not.toHaveBeenCalled();
   });
 
   it('still answers when Redis is down', async () => {

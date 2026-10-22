@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AnthropicProvider } from './adapters/anthropic.provider';
+import { GoogleProvider } from './adapters/google.provider';
 import { OpenAiCompatibleProvider } from './adapters/openai-compatible.provider';
 import { OpenAiProvider } from './adapters/openai.provider';
 import { AiError } from './ai-error';
@@ -41,6 +42,8 @@ export function createAiProvider(
       return new OpenAiProvider(config);
     case 'openai_compatible':
       return new OpenAiCompatibleProvider(config);
+    case 'google':
+      return new GoogleProvider(config);
   }
 }
 

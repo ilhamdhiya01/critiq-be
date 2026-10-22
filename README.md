@@ -236,7 +236,7 @@ src/
     rules/         # 6 toggleable Critical rules
     activity/      # audit log queries
     insights/
-    ai/            # AI provider adapters (anthropic, openai, openai_compatible), factory, SSRF guard
+    ai/            # AI provider adapters (anthropic, openai, openai_compatible, google), factory, SSRF guard
     settings/      # AI provider settings + test connection; later notifications, members
     integrations/  # GitHub App / GitLab org-level access token lifecycle, webhook ingestion
   common/

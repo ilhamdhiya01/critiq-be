@@ -1,4 +1,3 @@
-import { toAiError } from '../ai-error';
 import {
   AiModelInfo,
   AiProviderConfig,
@@ -44,13 +43,13 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
       return await this.completeWithTools(req);
     } catch (error) {
       if (!rejectsTools(error)) {
-        throw toAiError(error);
+        throw this.mapError(error);
       }
     }
     try {
       return await this.completeJsonMode(req);
     } catch (error) {
-      throw toAiError(error);
+      throw this.mapError(error);
     }
   }
 
@@ -62,7 +61,7 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
       return { model: this.config.model };
     } catch (error) {
       if ((error as { status?: unknown }).status !== 404) {
-        throw toAiError(error);
+        throw this.mapError(error);
       }
     }
     try {
@@ -76,7 +75,7 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
       );
       return { model: response.model };
     } catch (error) {
-      throw toAiError(error);
+      throw this.mapError(error);
     }
   }
 
@@ -86,7 +85,7 @@ export class OpenAiCompatibleProvider extends OpenAiProvider {
     try {
       return await listChatModels(this.client, false);
     } catch (error) {
-      throw toAiError(error);
+      throw this.mapError(error);
     }
   }
 

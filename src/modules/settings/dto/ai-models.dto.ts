@@ -1,27 +1,18 @@
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
-import { AiProviderName } from '../../ai/ai-provider.interface';
-
-// 'google' passes validation so the service can answer 422
-// provider_unavailable, as PUT settings/ai does.
-const PROVIDERS = [
-  'anthropic',
-  'openai',
-  'openai_compatible',
-  'google',
-] as const;
-type ProviderParam = (typeof PROVIDERS)[number];
+import { AI_PROVIDER_NAMES } from '../../ai/ai-models.constants';
+import type { AiProviderName } from '../../ai/ai-provider.interface';
 
 // GET …/settings/ai/models?provider= — with the stored key.
 export class ListAiModelsQueryDto {
-  @IsIn(PROVIDERS)
-  provider!: ProviderParam;
+  @IsIn(AI_PROVIDER_NAMES)
+  provider!: AiProviderName;
 }
 
 // POST …/settings/ai/models — with a key/base URL typed in the form, before
 // saving. Nothing here is persisted.
 export class PreviewAiModelsDto {
-  @IsIn(PROVIDERS)
-  provider!: ProviderParam;
+  @IsIn(AI_PROVIDER_NAMES)
+  provider!: AiProviderName;
 
   @IsOptional()
   @IsString()

@@ -37,8 +37,6 @@ const INPUT_ERRORS: readonly AiErrorCode[] = [
   'base_url_required',
 ];
 
-type ProviderParam = AiProviderName | 'google';
-
 // Newest first where the provider dates its models (Anthropic, OpenAI);
 // undated ones after, in the provider's own order.
 function newestFirst(models: AiModelInfo[]): AiModelInfo[] {
@@ -82,9 +80,8 @@ export class AiModelsService {
   // asks the provider again at once.
   async listForOrg(
     organizationId: string,
-    provider: ProviderParam,
+    name: AiProviderName,
   ): Promise<AiModelsDto> {
-    const name = this.availableOrThrow(provider);
     const credential = await this.prisma.aiCredential.findUnique({
       where: {
         organizationId_provider: {
@@ -114,7 +111,7 @@ export class AiModelsService {
     organizationId: string,
     dto: PreviewAiModelsDto,
   ): Promise<AiModelsDto> {
-    const name = this.availableOrThrow(dto.provider);
+    const name = dto.provider;
     const allowed = await this.rateLimiter.tryConsume(
       `ratelimit:ai-models:org:${organizationId}`,
       PREVIEW_LIMIT_PER_HOUR,
@@ -130,16 +127,6 @@ export class AiModelsService {
       apiKey: dto.apiKey,
       baseUrl: dto.baseUrl,
     });
-  }
-
-  private availableOrThrow(provider: ProviderParam): AiProviderName {
-    if (provider === 'google') {
-      throw new UnprocessableEntityException({
-        field: 'provider',
-        message: 'provider_unavailable',
-      });
-    }
-    return provider;
   }
 
   private async fetch(

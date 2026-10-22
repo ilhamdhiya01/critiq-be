@@ -3,7 +3,8 @@
 // ever talks to this interface; which SDK sits behind it is the adapter's
 // business, chosen per organization by AiProviderFactory.
 
-export type AiProviderName = 'anthropic' | 'openai' | 'openai_compatible';
+export type AiProviderName =
+  'anthropic' | 'openai' | 'openai_compatible' | 'google';
 
 // JSON Schema for the one tool the model must call. Plain object on purpose:
 // every adapter translates it into its own vendor's tool format.

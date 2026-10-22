@@ -7,7 +7,7 @@ import { AiProviderName } from './ai-provider.interface';
 // names in the v1.5.1 prompt (claude-sonnet-4-5, claude-opus-4-1) — see
 // CLAUDE.md "Hal usang".
 export interface ProviderCatalogEntry {
-  id: AiProviderName | 'google';
+  id: AiProviderName;
   label: string;
   available: boolean;
   defaultModel?: string | null;
@@ -42,7 +42,13 @@ export const AI_PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     keyOptional: true,
     testedModels: ['llama-3.1-70b-instruct', 'qwen2.5-coder-32b-instruct'],
   },
-  { id: 'google', label: 'Google', available: false },
+  {
+    id: 'google',
+    label: 'Google',
+    available: true,
+    defaultModel: 'gemini-3.8-flash',
+    models: ['gemini-3.8-flash', 'gemini-4-argon', 'gemini-3.5-flash-lite'],
+  },
 ];
 
 // Models tested to review well in Critiq — the picker's "recommended"
@@ -50,6 +56,7 @@ export const AI_PROVIDER_CATALOG: ProviderCatalogEntry[] = [
 // pricier gpt-4.1 for OpenAI). openai_compatible: gpt-4o-mini, proven
 // through SumoPod (claude-sonnet-5 through the same gateway leaves required
 // fields out about one answer in five), plus the self-hosted models tested.
+// google: none yet — no Gemini model has been tried on real reviews.
 export const RECOMMENDED_MODELS: Record<AiProviderName, readonly string[]> = {
   anthropic: [
     'claude-sonnet-5',
@@ -62,6 +69,7 @@ export const RECOMMENDED_MODELS: Record<AiProviderName, readonly string[]> = {
     'llama-3.1-70b-instruct',
     'qwen2.5-coder-32b-instruct',
   ],
+  google: [],
 };
 
 export function defaultModelFor(provider: AiProviderName): string | null {
@@ -75,6 +83,7 @@ const TO_ENUM: Record<AiProviderName, AiProviderId> = {
   anthropic: AiProviderId.ANTHROPIC,
   openai: AiProviderId.OPENAI,
   openai_compatible: AiProviderId.OPENAI_COMPATIBLE,
+  google: AiProviderId.GOOGLE,
 };
 
 export const AI_PROVIDER_NAMES = Object.keys(TO_ENUM) as AiProviderName[];
