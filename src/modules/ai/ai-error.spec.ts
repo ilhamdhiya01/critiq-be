@@ -54,4 +54,15 @@ describe('sanitizeProviderMessage', () => {
   it('caps the message at 300 characters', () => {
     expect(sanitizeProviderMessage('x'.repeat(1000))).toHaveLength(300);
   });
+
+  // Google keys start with AIza (split so the secret rules never see one).
+  it('masks a Google API key', () => {
+    const key = 'AIza' + 'TestOnlyNotARealGoogleKey0000000000';
+    const sanitized = sanitizeProviderMessage(
+      `API key not valid: ${key}. Please pass a valid API key.`,
+    );
+    expect(sanitized).toBe(
+      'API key not valid: AIza***. Please pass a valid API key.',
+    );
+  });
 });

@@ -1,5 +1,6 @@
 import { TEST_REQUEST } from '../ai-test-fixture';
 import { AnthropicProvider } from './anthropic.provider';
+import { GEMINI_OPENAI_BASE_URL, GoogleProvider } from './google.provider';
 import { OpenAiCompatibleProvider } from './openai-compatible.provider';
 import { OpenAiProvider } from './openai.provider';
 
@@ -538,5 +539,114 @@ describe('listModels', () => {
     ]);
     // `created: 0` is "unknown", not 1970.
     expect(models[0].createdAt).toBeNull();
+  });
+});
+
+describe('GoogleProvider', () => {
+  const provider = new GoogleProvider({
+    model: 'gemini-3.8-flash',
+    apiKey: 'k',
+    baseUrl: null,
+  });
+
+  // The host is Google's, never the organization's — no SSRF surface.
+  it('always talks to the Gemini OpenAI endpoint', () => {
+    new GoogleProvider({
+      model: 'm',
+      apiKey: 'k',
+      baseUrl: 'https://attacker.example.com/v1',
+    });
+    expect(mockOpenAiConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: GEMINI_OPENAI_BASE_URL }),
+    );
+  });
+
+  it('sends the tool schema as is, without strict mode', async () => {
+    mockChatCreate.mockResolvedValue(toolCallResponse(TOOL_INPUT));
+
+    const result = await provider.complete(TEST_REQUEST);
+
+    expect(result.toolInput).toEqual(TOOL_INPUT);
+    const [params] = mockChatCreate.mock.calls[0] as [
+      {
+        tools: { function: { strict?: boolean; parameters: unknown } }[];
+        max_tokens: number;
+      },
+    ];
+    expect(params.tools[0].function.strict).toBeUndefined();
+    expect(params.tools[0].function.parameters).toBe(TEST_REQUEST.tool.schema);
+    expect(params.max_tokens).toBe(TEST_REQUEST.maxTokens);
+  });
+
+  it('falls back to JSON mode when Gemini rejects the function schema', async () => {
+    mockChatCreate
+      .mockRejectedValueOnce(
+        httpError(400, 'Invalid function_declarations[0].parameters'),
+      )
+      .mockResolvedValueOnce({
+        model: 'gemini-3.8-flash',
+        choices: [{ message: { content: JSON.stringify(TOOL_INPUT) } }],
+        usage: { prompt_tokens: 500, completion_tokens: 80 },
+      });
+
+    const result = await provider.complete(TEST_REQUEST);
+
+    expect(result.structuredOutput).toBe('json_mode');
+    expect(result.toolInput).toEqual(TOOL_INPUT);
+  });
+
+  // Google rejects a wrong key with 400, not 401.
+  it.each([
+    httpError(400, '400 API key not valid. Please pass a valid API key.'),
+    Object.assign(httpError(400, '400 status code (no body)'), {
+      error: { details: [{ reason: 'API_KEY_INVALID' }] },
+    }),
+  ])('reports a rejected key as auth_failed (%#)', async (error) => {
+    mockChatCreate.mockRejectedValue(error);
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'auth_failed',
+      status: 400,
+    });
+  });
+
+  it('keeps any other 400 a bad request', async () => {
+    mockChatCreate.mockRejectedValue(httpError(400, 'Model is not found'));
+    await expect(provider.complete(TEST_REQUEST)).rejects.toMatchObject({
+      code: 'bad_request',
+    });
+  });
+
+  it('maps a rejected key on healthcheck and model listing too', async () => {
+    const rejected = httpError(400, 'API key not valid.');
+    mockModelsList.mockRejectedValueOnce(rejected);
+    await expect(provider.healthcheck()).rejects.toMatchObject({
+      code: 'auth_failed',
+    });
+    mockModelsList.mockReturnValueOnce(failingPages(rejected));
+    await expect(provider.listModels()).rejects.toMatchObject({
+      code: 'auth_failed',
+    });
+  });
+
+  it('lists Gemini chat models by their bare name', async () => {
+    mockModelsList.mockReturnValue(
+      pages([
+        { id: 'models/gemini-3.8-flash', created: 0 },
+        { id: 'models/gemini-3.5-flash-lite', created: 0 },
+        { id: 'models/gemini-embedding-001', created: 0 },
+        { id: 'models/gemini-3.8-flash-preview-tts', created: 0 },
+        { id: 'models/gemini-3.8-flash-image', created: 0 },
+        { id: 'models/gemini-live-3.8-flash', created: 0 },
+        { id: 'models/imagen-4.0-generate', created: 0 },
+        { id: 'models/gemma-3-27b-it', created: 0 },
+      ]),
+    );
+
+    const models = await provider.listModels();
+
+    expect(models.map((model) => [model.id, model.label])).toEqual([
+      ['gemini-3.8-flash', 'gemini-3.8-flash'],
+      ['gemini-3.5-flash-lite', 'gemini-3.5-flash-lite'],
+    ]);
   });
 });

@@ -6,6 +6,7 @@ import { AiModule } from '../modules/ai/ai.module';
 import { AiScanModule } from '../modules/ai/scan/ai-scan.module';
 import { IntegrationsModule } from '../modules/integrations/integrations.module';
 import { PullsModule } from '../modules/pulls/pulls.module';
+import { AiOrphanReaper } from './ai-orphan-reaper';
 import { AiScanProcessor } from './ai-scan.processor';
 import { QueueModule } from './queue.module';
 import { CommentSyncProcessor } from './comment-sync.processor';
@@ -40,6 +41,7 @@ import { ScanProcessor } from './scan.processor';
   providers: [
     ScanProcessor,
     AiScanProcessor,
+    AiOrphanReaper,
     ReviewSyncProcessor,
     CommentSyncProcessor,
     InvitationEmailProcessor,

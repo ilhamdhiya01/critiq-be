@@ -67,3 +67,18 @@ describe('AiProviderFactory.forModelListing', () => {
     );
   });
 });
+
+describe('AiProviderFactory.for — google', () => {
+  // The Gemini endpoint is fixed in the adapter: a base URL stored on the
+  // credential is neither used nor checked.
+  it('builds the Gemini adapter without a base URL check', async () => {
+    jest.mocked(assertSafeBaseUrl).mockClear();
+    const { factory } = setup();
+    const adapter = await factory.for('org_1', {
+      provider: 'google',
+      model: 'gemini-3.8-flash',
+    });
+    expect(adapter.id).toBe('google');
+    expect(assertSafeBaseUrl).not.toHaveBeenCalled();
+  });
+});

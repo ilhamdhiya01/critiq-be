@@ -154,7 +154,7 @@ export class OpenAiProvider implements AiProvider {
     try {
       return await this.completeWithTools(req);
     } catch (error) {
-      throw toAiError(error);
+      throw this.mapError(error);
     }
   }
 
@@ -165,7 +165,7 @@ export class OpenAiProvider implements AiProvider {
       });
       return { model: model.id };
     } catch (error) {
-      throw toAiError(error);
+      throw this.mapError(error);
     }
   }
 
@@ -173,8 +173,15 @@ export class OpenAiProvider implements AiProvider {
     try {
       return await listChatModels(this.client, true);
     } catch (error) {
-      throw toAiError(error);
+      throw this.mapError(error);
     }
+  }
+
+  // Every SDK or network error leaves the adapter through here. A vendor
+  // with its own error conventions overrides it while the raw error, with
+  // its body, is still in hand.
+  protected mapError(error: unknown): AiError {
+    return toAiError(error);
   }
 
   // Current OpenAI models take max_completion_tokens; older OpenAI-shaped
@@ -184,6 +191,17 @@ export class OpenAiProvider implements AiProvider {
     max_tokens?: number;
   } {
     return { max_completion_tokens: maxTokens };
+  }
+
+  // The one function the model must call. OpenAI-shaped servers enforce it
+  // with strict mode; a server that rejects strict schemas overrides this.
+  protected toolFunction(req: AiRequest): OpenAI.FunctionDefinition {
+    return {
+      name: req.tool.name,
+      description: req.tool.description,
+      parameters: toStrictSchema(req.tool.schema),
+      strict: true,
+    };
   }
 
   protected async completeWithTools(req: AiRequest): Promise<AiResult> {
@@ -196,17 +214,7 @@ export class OpenAiProvider implements AiProvider {
           { role: 'system', content: req.system },
           { role: 'user', content: req.user },
         ],
-        tools: [
-          {
-            type: 'function',
-            function: {
-              name: req.tool.name,
-              description: req.tool.description,
-              parameters: toStrictSchema(req.tool.schema),
-              strict: true,
-            },
-          },
-        ],
+        tools: [{ type: 'function', function: this.toolFunction(req) }],
         tool_choice: { type: 'function', function: { name: req.tool.name } },
       },
       { timeout: req.timeoutMs },

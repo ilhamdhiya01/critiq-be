@@ -701,6 +701,7 @@ enum AiProviderId {
   ANTHROPIC
   OPENAI
   OPENAI_COMPATIBLE
+  GOOGLE
 }
 
 // One organization-owned credential per provider (v1.5.1 langkah 1).

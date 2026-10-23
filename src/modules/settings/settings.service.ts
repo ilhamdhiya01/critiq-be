@@ -166,10 +166,6 @@ export class SettingsService {
     actorUserId: string,
     dto: UpdateAiSettingsDto,
   ): Promise<AiSettingsDto> {
-    if (dto.provider === 'google') {
-      unprocessable('provider_unavailable');
-    }
-
     const organization = await this.prisma.organization.findUniqueOrThrow({
       where: { id: organizationId },
       select: { aiProvider: true, aiModel: true, aiConsentAt: true },
@@ -377,10 +373,6 @@ export class SettingsService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    if (dto.provider === 'google') {
-      unprocessable('provider_unavailable');
-    }
-
     const startedAt = Date.now();
     let result: AiTestResultDto;
     try {

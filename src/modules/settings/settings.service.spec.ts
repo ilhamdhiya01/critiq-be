@@ -29,6 +29,8 @@ const ORG = 'org_1';
 const ADMIN = 'u_admin';
 const ANTHROPIC_KEY = 'sk-ant-test-0000000000004Kd2';
 const OPENAI_KEY = 'sk-openai-test-00000000009zX1';
+// Split so the secret rules never see a whole key in this file.
+const GOOGLE_KEY = 'AIza' + 'TestOnlyNotARealGoogleKey0000Gk7Q';
 
 interface CredentialRow {
   organizationId: string;
@@ -321,16 +323,28 @@ describe('SettingsService — AI settings', () => {
     });
   });
 
-  // Acceptance 13.
-  it('lists google as unavailable and refuses to select it', async () => {
+  // Was "soon" (acceptance 13) until Gemini support (22 Oct 2026).
+  it('offers google, which needs a key like openai', async () => {
     const { service } = setup();
     const settings = await service.getAi(ORG);
     expect(settings.providers).toContainEqual(
-      expect.objectContaining({ id: 'google', available: false }),
+      expect.objectContaining({ id: 'google', available: true }),
     );
     await expect(
       service.updateAi(ORG, ADMIN, { provider: 'google' }),
-    ).rejects.toMatchObject(unprocessable('provider_unavailable'));
+    ).rejects.toMatchObject(unprocessable('api_key_required'));
+
+    const selected = await service.updateAi(ORG, ADMIN, {
+      provider: 'google',
+      apiKey: GOOGLE_KEY,
+    });
+    expect(selected.provider).toBe('google');
+    expect(selected.model).toBe('gemini-3.8-flash');
+    expect(selected.credentials.google).toEqual({
+      hasKey: true,
+      last4: 'Gk7Q',
+    });
+    expect(JSON.stringify(selected)).not.toContain(GOOGLE_KEY);
   });
 });
 

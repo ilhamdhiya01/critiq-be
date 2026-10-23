@@ -35,11 +35,12 @@ const RETRYABLE: ReadonlySet<AiErrorCode> = new Set<AiErrorCode>([
 const MAX_PROVIDER_MESSAGE = 300;
 
 // Provider error bodies sometimes echo the credential back ("Incorrect API
-// key provided: sk-…"). Everything that leaves an adapter — logs, the test
-// endpoint's response — goes through this first.
+// key provided: sk-…"; Google keys start with AIza). Everything that leaves
+// an adapter — logs, the test endpoint's response — goes through this first.
 export function sanitizeProviderMessage(message: string): string {
   return message
     .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, 'AIza***')
     .replace(/Bearer\s+[^\s"',]+/gi, 'Bearer ***')
     .slice(0, MAX_PROVIDER_MESSAGE);
 }
