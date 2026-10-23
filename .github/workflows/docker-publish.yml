@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - development
+      - staging
       - main
 
 jobs:
@@ -26,22 +27,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # development -> :dev (what the dev VPS pulls, see `deploy` below).
-      # main (default branch) -> :latest + :sha-<full sha> — this is what
-      # production pulls.
+      # development -> :dev, staging -> :staging, main -> :latest (what each
+      # environment's stack pulls, see `deploy` below). staging and main also
+      # get :sha-<full sha>, so production can run the exact image that was
+      # tested on staging.
       - name: Extract metadata (app image)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/critiq-be
           tags: |
-            type=raw,value=dev,enable=${{ github.ref_name != 'main' }}
+            type=raw,value=dev,enable=${{ github.ref_name == 'development' }}
+            type=raw,value=staging,enable=${{ github.ref_name == 'staging' }}
             type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
-            type=sha,format=long,enable=${{ github.ref_name == 'main' }}
+            type=sha,format=long,enable=${{ github.ref_name != 'development' }}
 
       # Mirrors the app image's tags with a `-migrator` suffix (e.g.
-      # `dev-migrator`, `latest-migrator`) — docker-compose.yml's `migrate`
-      # service pulls this exact suffix pattern.
+      # `dev-migrator`, `staging-migrator`, `latest-migrator`) —
+      # docker-compose.yml's `migrate` service pulls this exact suffix
+      # pattern.
       - name: Extract metadata (migrator image)
         id: meta-migrator
         uses: docker/metadata-action@v5
@@ -50,9 +54,10 @@ jobs:
           flavor: |
             suffix=-migrator
           tags: |
-            type=raw,value=dev,enable=${{ github.ref_name != 'main' }}
+            type=raw,value=dev,enable=${{ github.ref_name == 'development' }}
+            type=raw,value=staging,enable=${{ github.ref_name == 'staging' }}
             type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
-            type=sha,format=long,enable=${{ github.ref_name == 'main' }}
+            type=sha,format=long,enable=${{ github.ref_name != 'development' }}
 
       # Required for the arm64 half of the multi-platform build below —
       # the runner itself is amd64, so building for arm64 needs QEMU
@@ -89,33 +94,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Runs only after both images are pushed. SSHes into the VPS and pulls the
-  # tag matching this branch (`dev` for development, `latest` for main), then
-  # recreates the stack. `up -d` re-runs the one-off `migrate` job because
-  # `app` depends on it — `prisma migrate deploy` is idempotent, so that's
-  # safe. Secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY (repo → Settings →
-  # Secrets and variables → Actions).
+  # Runs only after both images are pushed. SSHes into the VPS and, in the
+  # folder of this branch's environment (vars.DEPLOY_DIR — development,
+  # staging, production each have their own stack, database and Redis),
+  # pulls the matching tag and recreates the stack. `up -d` re-runs the
+  # one-off `migrate` job because `app` depends on it — `prisma migrate
+  # deploy` is idempotent, so that's safe. An environment without
+  # DEPLOY_DIR (production until it exists) is not deployed at all, so a
+  # push to main can never land on another environment's stack. Secrets:
+  # VPS_HOST, VPS_USER, VPS_SSH_KEY (repo → Settings → Secrets and
+  # variables → Actions); DEPLOY_DIR is an environment variable, an
+  # absolute path (`~` is not expanded inside the quotes below).
   deploy:
     name: Deploy to VPS
     needs: build-and-push
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name }}
     steps:
       - name: Pull and restart on VPS
+        if: ${{ vars.DEPLOY_DIR != '' }}
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: IMAGE_TAG
+          envs: IMAGE_TAG,DEPLOY_DIR
           script: |
             set -e
-            cd ~/critiq/critiq-be
+            cd "$DEPLOY_DIR"
             export IMAGE_TAG="${IMAGE_TAG}"
             docker compose pull
             docker compose up -d --remove-orphans
             docker compose ps
             docker image prune -f
         env:
-          IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'dev' }}
+          IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || github.ref_name == 'staging' && 'staging' || 'dev' }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
