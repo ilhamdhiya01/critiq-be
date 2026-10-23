@@ -40,6 +40,8 @@ const FAILED_HINTS: Record<string, string> = {
     'The AI model spent its whole output budget on reasoning before answering. Regenerating will fail the same way — split the pull request, or an Admin can choose another model in Settings → AI Provider.',
   output_truncated:
     'The AI answer was cut off at the output token limit. Regenerating will fail the same way — an Admin can choose another model in Settings → AI Provider.',
+  worker_lost:
+    'The AI review stopped before finishing (the worker running it went away). Regenerate to run it again.',
 };
 
 function kb(bytes: number): string {

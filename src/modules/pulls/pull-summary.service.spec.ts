@@ -221,6 +221,21 @@ describe('PullSummaryService.getSummary', () => {
     expect(summary.error?.hint).toMatch(/can regenerate it/);
   });
 
+  // Marked by the AI orphan reaper: nothing about the diff failed.
+  it('explains a review whose worker went away', async () => {
+    const { service } = setup(
+      latestScan({
+        aiStatus: AiScanStatus.FAILED,
+        aiErrorCode: 'worker_lost',
+        aiSummary: null,
+      }),
+    );
+    const summary = await service.getSummary('org_1', 'repo_1', 'pull_1');
+    expect(summary.error).toMatchObject({ code: 'worker_lost' });
+    expect(summary.error?.hint).toMatch(/stopped before finishing/);
+    expect(summary.error?.hint).toMatch(/Regenerate to run it again/);
+  });
+
   it('404s a PR from another organization', async () => {
     const { service } = setup();
     await expect(
