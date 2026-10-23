@@ -14,8 +14,9 @@ services:
       # developer's Mac already runs two native (non-Docker) Postgres
       # instances bound to 5432 and 5433. This mapping only affects host
       # access (psql, Studio); the compose-internal address app/migrate use
-      # is still db:5432 (container port unchanged).
-      - '127.0.0.1:5442:5432'
+      # is still db:5432 (container port unchanged). DB_PORT overrides it
+      # where several stacks share one host (staging: 5443).
+      - '127.0.0.1:${DB_PORT:-5442}:5432'
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
@@ -91,7 +92,9 @@ services:
     env_file:
       - .env
     ports:
-      - '127.0.0.1:3001:3001'
+      # APP_PORT: the host side only, for nginx (staging: 3011). The app
+      # still listens on 3001 inside its container.
+      - '127.0.0.1:${APP_PORT:-3001}:3001'
     healthcheck:
       test:
         [
