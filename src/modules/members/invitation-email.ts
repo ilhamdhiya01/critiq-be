@@ -7,6 +7,19 @@ const ROLE_LABEL: Record<Role, string> = {
   VIEWER: 'Viewer',
 };
 
+// What the role lets the recipient do — context for an invitation they
+// may not have expected.
+const ROLE_DESCRIPTION: Record<Role, string> = {
+  ADMIN: 'Manage repositories, integrations, members and settings.',
+  REVIEWER:
+    'Review pull requests, approve or request changes, and comment on code.',
+  VIEWER: 'Read-only access to pull requests, findings and activity.',
+};
+
+const ABOUT_CRITIQ =
+  'Critiq reviews pull request diffs and flags critical issues — the approve and merge decision stays with your team.';
+const IGNORE_NOTE = "If you weren't expecting this, you can ignore this email.";
+
 // Organization and inviter names are user-written: escaped for the HTML
 // part, so they cannot inject markup or links into the email.
 function escapeHtml(value: string): string {
@@ -27,6 +40,7 @@ export function renderInvitationEmail(input: {
   expiresAt: Date;
 }): MailMessage {
   const role = ROLE_LABEL[input.role];
+  const roleDescription = ROLE_DESCRIPTION[input.role];
   const who = input.inviterName ?? 'An admin';
   const expires = input.expiresAt.toUTCString();
   // A header: no line breaks from the user-written name.
@@ -34,19 +48,67 @@ export function renderInvitationEmail(input: {
   const text = [
     `${who} invited you to join ${input.organizationName} on Critiq as ${role}.`,
     '',
+    `${role}: ${roleDescription}`,
+    '',
     `Accept the invitation: ${input.url}`,
     '',
     `This link works once and expires on ${expires}.`,
-    "If you weren't expecting this, you can ignore this email.",
+    '',
+    ABOUT_CRITIQ,
+    IGNORE_NOTE,
   ].join('\n');
+
+  const org = escapeHtml(input.organizationName);
+  const inviter = escapeHtml(who);
+  const url = escapeHtml(input.url);
+  // Email clients ignore stylesheets, flex and grid: layout is tables with
+  // inline styles, and no remote images (often blocked by default).
   const html = `<!doctype html>
 <html>
-  <body style="font-family: -apple-system, Segoe UI, sans-serif; color: #111; line-height: 1.5;">
-    <p>${escapeHtml(who)} invited you to join <strong>${escapeHtml(input.organizationName)}</strong> on Critiq as <strong>${role}</strong>.</p>
-    <p>
-      <a href="${escapeHtml(input.url)}" style="display: inline-block; padding: 10px 18px; background: #4f46e5; color: #fff; text-decoration: none; border-radius: 6px;">Accept invitation</a>
-    </p>
-    <p style="color: #555; font-size: 13px;">This link works once and expires on ${escapeHtml(expires)}.<br />If you weren't expecting this, you can ignore this email.</p>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 0; background: #f4f4f5;">
+    <div style="display: none; max-height: 0; overflow: hidden; opacity: 0;">${inviter} invited you to ${org} on Critiq.</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #f4f4f5;">
+      <tr>
+        <td align="center" style="padding: 32px 16px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 560px; font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #18181b;">
+            <tr>
+              <td style="padding: 0 4px 16px; font-size: 20px; font-weight: 700; color: #4f46e5; letter-spacing: -0.2px;">Critiq</td>
+            </tr>
+            <tr>
+              <td style="background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 32px;">
+                <h1 style="margin: 0 0 16px; font-size: 22px; line-height: 1.3; font-weight: 600; color: #18181b;">Join ${org} on Critiq</h1>
+                <p style="margin: 0 0 20px; font-size: 15px; line-height: 1.6; color: #3f3f46;">${inviter} invited you to join <strong>${org}</strong> as <strong>${role}</strong>.</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 24px;">
+                  <tr>
+                    <td style="background: #eef2ff; border-radius: 8px; padding: 12px 16px; font-size: 14px; line-height: 1.5; color: #3730a3;">
+                      <strong>${role}</strong> &middot; ${roleDescription}
+                    </td>
+                  </tr>
+                </table>
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 24px;">
+                  <tr>
+                    <td align="center" bgcolor="#4f46e5" style="border-radius: 8px;">
+                      <a href="${url}" style="display: inline-block; padding: 12px 24px; font-size: 15px; font-weight: 600; color: #ffffff; text-decoration: none; border-radius: 8px;">Accept invitation</a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin: 0 0 4px; font-size: 13px; line-height: 1.5; color: #71717a;">Button not working? Paste this link into your browser:</p>
+                <p style="margin: 0 0 20px; font-size: 13px; line-height: 1.5; word-break: break-all;"><a href="${url}" style="color: #4f46e5;">${url}</a></p>
+                <p style="margin: 0; padding-top: 16px; border-top: 1px solid #f4f4f5; font-size: 13px; line-height: 1.5; color: #71717a;">This link works once and expires on ${escapeHtml(expires)}.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 16px 4px 0; font-size: 12px; line-height: 1.5; color: #a1a1aa;">${escapeHtml(ABOUT_CRITIQ)}<br />${escapeHtml(IGNORE_NOTE)}</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>`;
   return { to: input.to, subject, text, html };

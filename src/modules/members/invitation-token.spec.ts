@@ -69,4 +69,39 @@ describe('renderInvitationEmail', () => {
     expect(message.subject).not.toMatch(/[\r\n]/);
     expect(message.text).toContain('An admin invited you');
   });
+
+  it('explains what the role can do, in both parts', () => {
+    const reviewer = email('Acme', 'Alex Winter');
+    expect(reviewer.html).toContain('Review pull requests');
+    expect(reviewer.text).toContain('Reviewer: Review pull requests');
+
+    const viewer = renderInvitationEmail({
+      to: 'kantor@perusahaan.com',
+      organizationName: 'Acme',
+      inviterName: null,
+      role: 'VIEWER',
+      url: 'https://critiq-dev.web.id/invite/tok',
+      expiresAt: new Date('2026-10-26T00:00:00Z'),
+    });
+    expect(viewer.html).toContain('Read-only access');
+    expect(viewer.text).toContain('Viewer: Read-only access');
+  });
+
+  // The button and a plain fallback link for clients that break buttons.
+  it('links the invitation from the button and as fallback text', () => {
+    const { html } = email('Acme', 'Alex Winter');
+    expect(
+      html.match(/href="https:\/\/critiq-dev\.web\.id\/invite\/tok"/g),
+    ).toHaveLength(2);
+    expect(html).toContain('>https://critiq-dev.web.id/invite/tok</a>');
+  });
+
+  it('escapes names in the preview text and heading too', () => {
+    const { html } = email('<b>Acme</b>', '<i>Alex</i>');
+    expect(html).not.toMatch(/<b>|<i>/);
+    expect(html).toContain('Join &lt;b&gt;Acme&lt;/b&gt; on Critiq');
+    expect(html).toContain(
+      '&lt;i&gt;Alex&lt;/i&gt; invited you to &lt;b&gt;Acme&lt;/b&gt; on Critiq.',
+    );
+  });
 });
