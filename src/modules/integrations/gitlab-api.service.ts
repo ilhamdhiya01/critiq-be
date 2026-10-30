@@ -6,8 +6,13 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
-import axios from 'axios';
+import axios, { InternalAxiosRequestConfig } from 'axios';
+import {
+  assertSafeOutboundUrl,
+  UnsafeUrlError,
+} from '../../common/net/safe-url';
 import { ProviderCommentError } from './provider-comment-error';
 import { ProviderMergeError } from './provider-merge-error';
 import { ProviderReviewError } from './provider-review-error';
@@ -88,9 +93,40 @@ const MR_DIFFS_HARD_CAP = 500;
 // ReposService can call GitLab directly without depending on the
 // integrations module's connect/disconnect responsibilities, and so there
 // is exactly one place mapGitlabRequestError can diverge from, not two.
+// Every request to a GitLab instance goes through this first: the Instance
+// URL is typed in by a tenant's Admin, so it must not reach Critiq's own
+// network (CLAUDE.md "Keamanan" — SSRF). Checked on every call, not only at
+// connect, so integrations saved before the check and DNS that changed
+// since are covered too. Redirects are not followed: a public host could
+// bounce the request inward.
+export function gitlabOutboundGuard(
+  allowlist: readonly string[],
+  lookup?: Parameters<typeof assertSafeOutboundUrl>[2],
+) {
+  return async (
+    config: InternalAxiosRequestConfig,
+  ): Promise<InternalAxiosRequestConfig> => {
+    const target = new URL(config.url ?? '', config.baseURL).toString();
+    await assertSafeOutboundUrl(target, allowlist, lookup);
+    config.maxRedirects = 0;
+    return config;
+  };
+}
+
 @Injectable()
 export class GitlabApiService {
-  constructor(private readonly http: HttpService) {}
+  // This module's HttpService serves GitLab only (IntegrationsModule), so
+  // the guard on its axios instance touches nothing else.
+  constructor(
+    private readonly http: HttpService,
+    configService: ConfigService,
+  ) {
+    this.http.axiosRef.interceptors.request.use(
+      gitlabOutboundGuard(
+        configService.get<string[]>('gitlab.instanceAllowlist') ?? [],
+      ),
+    );
+  }
 
   async fetchUser(instanceUrl: string, token: string): Promise<GitlabUser> {
     try {
@@ -666,6 +702,13 @@ export class GitlabApiService {
   }
 
   mapGitlabRequestError(error: unknown): never {
+    if (error instanceof UnsafeUrlError) {
+      throw new UnprocessableEntityException({
+        field: 'instance_url',
+        message: 'insecure_instance_url',
+        detail: error.message,
+      });
+    }
     // axios.isAxiosError() (not `instanceof AxiosError`) — `instanceof` can
     // silently return false here due to a dual-package-hazard between how
     // @nestjs/axios's internal HttpService loads axios (as ESM, `file://`
@@ -721,6 +764,10 @@ export class GitlabApiService {
 // GitLab's answer to a review call, as a ProviderReviewError: what failed
 // decides whether the review-sync queue retries.
 function toReviewError(error: unknown): ProviderReviewError {
+  // Refused before leaving Critiq (SSRF guard): retrying cannot help.
+  if (error instanceof UnsafeUrlError) {
+    return new ProviderReviewError('unknown', false, error.message);
+  }
   if (!axios.isAxiosError(error)) {
     return new ProviderReviewError(
       'unknown',
@@ -775,6 +822,10 @@ function toMergeError(error: unknown): ProviderMergeError {
 function toCommentError(error: unknown): ProviderCommentError {
   if (error instanceof ProviderCommentError) {
     return error;
+  }
+  // Refused before leaving Critiq (SSRF guard): retrying cannot help.
+  if (error instanceof UnsafeUrlError) {
+    return new ProviderCommentError('unknown', false, error.message);
   }
   if (!axios.isAxiosError(error)) {
     return new ProviderCommentError(

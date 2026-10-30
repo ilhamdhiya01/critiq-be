@@ -35,3 +35,21 @@ export class GithubInstallCallbackDto {
   @IsNotEmpty()
   state?: string;
 }
+
+// GitHub's OAuth web flow redirect after the installation ownership check.
+// `error` (e.g. access_denied) instead of `code` when the user declines.
+export class GithubAuthorizeCallbackDto {
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  code?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  error?: string;
+}

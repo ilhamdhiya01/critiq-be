@@ -40,8 +40,9 @@ export type IngestOutcome =
 
 // Comments written on GitHub/GitLab (v1.5.2), from the webhook — the other
 // half of the two-way sync. No provider call here: the webhook stays fast.
-// Isolation: the repository is resolved by the provider's own id, and every
-// read and write below is scoped to that repository's PR.
+// Isolation: the repository is the one the webhook authenticated (GitLab)
+// or the provider's global id (GitHub), and every read and write below is
+// scoped to that repository's PR.
 @Injectable()
 export class CommentIngestService {
   constructor(
@@ -50,12 +51,18 @@ export class CommentIngestService {
     private readonly realtime: RealtimePublisher,
   ) {}
 
-  async ingest(event: InboundComment): Promise<IngestOutcome> {
+  // `repositoryId`: the repository the webhook authenticated the delivery
+  // against — required for GitLab, whose project ids are not unique across
+  // organizations/instances. GitHub repository ids are global and one
+  // installation backs one organization, so the id lookup is unambiguous.
+  async ingest(
+    event: InboundComment,
+    repositoryId?: string,
+  ): Promise<IngestOutcome> {
     const repository = await this.prisma.repository.findFirst({
-      where: {
-        provider: event.provider,
-        externalId: event.repositoryExternalId,
-      },
+      where: repositoryId
+        ? { id: repositoryId }
+        : { provider: event.provider, externalId: event.repositoryExternalId },
       select: { id: true, organizationId: true },
     });
     if (!repository) {

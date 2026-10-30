@@ -11,6 +11,9 @@ export const validationSchema = Joi.object({
     .valid('error', 'warn', 'info', 'debug', 'verbose')
     .default('info'),
   DATABASE_URL: Joi.string().required(),
+  SESSION_COOKIE_SAMESITE: Joi.string()
+    .valid('lax', 'strict', 'none')
+    .optional(),
   GITHUB_CLIENT_ID: Joi.string().required(),
   GITHUB_CLIENT_SECRET: Joi.string().required(),
   GITHUB_REDIRECT_URL: Joi.string().uri().required(),
@@ -23,9 +26,11 @@ export const validationSchema = Joi.object({
   // now that the receiver endpoint actually exists and depends on it.
   GITHUB_APP_WEBHOOK_SECRET: Joi.string().required(),
   GITHUB_APP_SLUG: Joi.string().required(),
+  GITHUB_APP_AUTHORIZE_REDIRECT_URL: Joi.string().uri().allow('').optional(),
   GITLAB_CLIENT_ID: Joi.string().required(),
   GITLAB_CLIENT_SECRET: Joi.string().required(),
   GITLAB_REDIRECT_URL: Joi.string().uri().required(),
+  GITLAB_INSTANCE_ALLOWLIST: Joi.string().allow('').optional(),
   JWT_SECRET: Joi.string().min(32).required(),
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   FE_URL: Joi.string().uri().required(),

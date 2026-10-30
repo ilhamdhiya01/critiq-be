@@ -8,6 +8,7 @@ import { AuthService } from './auth.service';
 import { GithubStrategy } from './strategies/github.strategy';
 import { GitlabStrategy } from './strategies/gitlab.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { SessionCookieService } from './session-cookie';
 
 @Module({
   imports: [
@@ -22,7 +23,13 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, GithubStrategy, GitlabStrategy, JwtStrategy],
-  exports: [AuthService],
+  providers: [
+    AuthService,
+    GithubStrategy,
+    GitlabStrategy,
+    JwtStrategy,
+    SessionCookieService,
+  ],
+  exports: [AuthService, SessionCookieService],
 })
 export class AuthModule {}

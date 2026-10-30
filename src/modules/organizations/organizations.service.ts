@@ -1,10 +1,21 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { SlugService } from '../../common/slug/slug.service';
 import { Role } from '../../generated/prisma/enums';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
+
+// Any signed-in user can create organizations; bounded so it cannot be used
+// to flood the table (CLAUDE.md "Keamanan").
+const ORG_CREATE_RATE_LIMIT = 10;
+const ORG_CREATE_RATE_WINDOW_SECONDS = 3600;
 
 @Injectable()
 export class OrganizationsService {
@@ -12,6 +23,7 @@ export class OrganizationsService {
     private readonly prisma: PrismaService,
     private readonly slugService: SlugService,
     private readonly realtime: RealtimePublisher,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   async listForUser(userId: string) {
@@ -35,6 +47,17 @@ export class OrganizationsService {
   // should call `update()` (PATCH /orgs/:orgId) with the returned
   // organization id instead of calling `create()` again.
   async create(userId: string, dto: CreateOrganizationDto) {
+    const allowed = await this.rateLimiter.tryConsume(
+      `ratelimit:org-create:user:${userId}`,
+      ORG_CREATE_RATE_LIMIT,
+      ORG_CREATE_RATE_WINDOW_SECONDS,
+    );
+    if (!allowed) {
+      throw new HttpException(
+        { field: 'name', message: 'org_create_rate_limited' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     return this.prisma.$transaction(async (tx) => {
       const slug = await this.slugService.generateUniqueOrgSlug(tx, dto.name);
       const organization = await tx.organization.create({

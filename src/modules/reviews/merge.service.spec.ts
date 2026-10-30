@@ -224,6 +224,21 @@ describe('MergeService.merge', () => {
     });
   });
 
+  // `null` once skipped the Admin check (`null && …`) while still counting
+  // as an override (`null !== undefined`): a Reviewer merged over critical.
+  it('treats a null override as no override for a Reviewer', async () => {
+    const { service, github } = setup(withCritical());
+    await expect(
+      service.merge(ORG, REPO, 'pull_1', 'u_1', {
+        headSha: HEAD,
+        overrideCritical: null as unknown as undefined,
+      }),
+    ).rejects.toMatchObject({
+      response: { message: 'critical_findings' },
+    });
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
   it('lets an Admin merge over critical findings, with the reason audited', async () => {
     const { service, github, logger } = setup(withCritical(), Role.ADMIN);
     await service.merge(ORG, REPO, 'pull_1', 'u_1', {

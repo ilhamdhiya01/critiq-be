@@ -19,9 +19,9 @@ import { SlugService } from './slug/slug.service';
       transports: [
         // LOG_LEVEL is read straight from the environment rather than
         // ConfigService: this module is what *provides* ConfigModule, so
-        // nothing injectable exists yet at this point. Defaults to 'info',
-        // which includes PrismaService's per-query events — useful in a
-        // server, noise in a one-shot CLI script, hence the override.
+        // nothing injectable exists yet at this point. Defaults to 'info';
+        // 'debug' adds PrismaService's per-query events (without their
+        // parameters).
         new winston.transports.Console({
           level: process.env.LOG_LEVEL ?? 'info',
         }),

@@ -17,6 +17,7 @@ import { CreateReposDto } from './dto/create-repos.dto';
 import { OrgAuth } from '../../common/decorators/org-auth.decorator';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { Role } from '../../generated/prisma/enums';
+import { SessionCookieService } from '../auth/session-cookie';
 import { AuthService } from '../auth/auth.service';
 import type { JwtPayload } from '../auth/auth.service';
 
@@ -29,6 +30,7 @@ export class ReposController {
   constructor(
     private readonly reposService: ReposService,
     private readonly authService: AuthService,
+    private readonly sessionCookie: SessionCookieService,
   ) {}
 
   @Get()
@@ -137,13 +139,7 @@ export class ReposController {
         provider: req.user.provider,
         onboardingCompleted,
       });
-      // Kept in sync with auth.controller.ts's session cookie settings.
-      res.cookie('session', token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        maxAge: 24 * 60 * 60 * 1000,
-      });
+      this.sessionCookie.set(res, token);
     }
 
     return result;

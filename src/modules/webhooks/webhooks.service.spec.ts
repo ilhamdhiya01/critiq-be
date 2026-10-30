@@ -53,13 +53,15 @@ const repository = {
 
 function setup() {
   const prisma = {
-    repository: { findFirst: jest.fn() },
+    repository: { findFirst: jest.fn(), findMany: jest.fn() },
     integration: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findFirst: jest.fn().mockResolvedValue({ organizationId: 'org_1' }),
     },
   };
-  const encryptionService = { decrypt: jest.fn(() => GITLAB_SECRET) };
+  const encryptionService = {
+    decrypt: jest.fn((value: string): string => value && GITLAB_SECRET),
+  };
   const configService = { getOrThrow: jest.fn(() => GITHUB_SECRET) };
   const pullsService = {
     upsertFromWebhook: jest.fn().mockResolvedValue({
@@ -84,6 +86,12 @@ function setup() {
   const commentIngest = { ingest: jest.fn().mockResolvedValue('created') };
 
   prisma.repository.findFirst.mockResolvedValue(repository);
+  // GitLab looks up every repository with the project id (findMany); a test
+  // that sets findFirst's answer sets GitLab's too.
+  prisma.repository.findMany.mockImplementation(async () => {
+    const found: unknown = await prisma.repository.findFirst();
+    return found ? [found] : [];
+  });
 
   const realtime = {
     publish: jest.fn(),
@@ -110,6 +118,7 @@ function setup() {
     scanQueueService,
     redis,
     commentIngest,
+    encryptionService,
   };
 }
 
@@ -455,6 +464,33 @@ describe('WebhooksService — GitLab', () => {
     expect(pullsService.upsertFromWebhook).not.toHaveBeenCalled();
   });
 
+  // A GitLab project id is not unique across Critiq (two organizations, or
+  // two instances, can share it): the delivery belongs to the repository
+  // whose secret it carries, not to whichever row comes first.
+  it('routes a shared project id to the repository whose secret matches', async () => {
+    const { service, prisma, encryptionService, pullsService } = setup();
+    const other = {
+      ...repository,
+      id: 'repo_other_org',
+      organizationId: 'org_2',
+      encryptedWebhookSecret: 'encrypted-other',
+    };
+    prisma.repository.findMany.mockResolvedValue([other, repository]);
+    encryptionService.decrypt.mockImplementation((value: string) =>
+      value === 'encrypted-other' ? 'other-org-secret' : GITLAB_SECRET,
+    );
+    const { rawBody, headers } = gitlabRequest(gitlabPayload('open'));
+
+    await service.handleGitlabEvent(rawBody, headers);
+
+    expect(pullsService.upsertFromWebhook).toHaveBeenCalledWith(
+      'org_1',
+      'repo_1',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it('does not scan an `update` without new commits (no oldrev)', async () => {
     const { service, scanQueueService } = setup();
     const { rawBody, headers } = gitlabRequest(gitlabPayload('update'));
@@ -562,6 +598,7 @@ describe('WebhooksService — comments', () => {
         providerCommentId: 'github-issue:900',
         author: 'octo',
       }),
+      undefined,
     );
   });
 
@@ -607,6 +644,7 @@ describe('WebhooksService — comments', () => {
         path: 'src/a.ts',
         line: 12,
       }),
+      undefined,
     );
   });
 
@@ -659,6 +697,7 @@ describe('WebhooksService — comments', () => {
         providerThreadKey: 'gitlab-discussion:d1',
         pullExternalId: '3',
       }),
+      repository.id,
     );
   });
 

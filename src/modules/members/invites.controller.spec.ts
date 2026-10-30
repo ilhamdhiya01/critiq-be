@@ -1,12 +1,15 @@
+import type { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { Role } from '../../generated/prisma/enums';
 import { AuthService, type JwtPayload } from '../auth/auth.service';
 import { InvitesController } from './invites.controller';
 import { MembersService } from './members.service';
+import { SessionCookieService } from '../auth/session-cookie';
 
 // @nestjs/passport ships an ESM-only build this CommonJS Jest setup cannot
 // load; the guard is not what these tests are about.
 jest.mock('@nestjs/passport', () => ({ AuthGuard: () => class {} }));
+jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
 jest.mock('../auth/auth.service', () => ({ AuthService: class {} }));
 jest.mock('./members.service', () => ({ MembersService: class {} }));
 
@@ -28,6 +31,9 @@ describe('InvitesController.accept', () => {
     const controller = new InvitesController(
       members as unknown as MembersService,
       auth as unknown as AuthService,
+      new SessionCookieService({
+        get: () => undefined,
+      } as unknown as ConfigService),
     );
 
     const result = await controller.accept(

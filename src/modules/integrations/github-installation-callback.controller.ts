@@ -4,7 +4,11 @@ import type { Response } from 'express';
 import { IntegrationsService } from './integrations.service';
 import { GithubAppService } from './github-app.service';
 import { GithubInstallIntentService } from './github-install-intent.service';
-import { GithubInstallCallbackDto } from './dto/github-install-callback.dto';
+import {
+  GithubAuthorizeCallbackDto,
+  GithubInstallCallbackDto,
+} from './dto/github-install-callback.dto';
+import { GithubInstallVerificationService } from './github-install-verification.service';
 import { GithubInstallReturnTo } from '../../generated/prisma/enums';
 
 // Global route (no :orgId in the path — GitHub's fixed Setup URL, configured
@@ -28,6 +32,7 @@ export class GithubInstallationCallbackController {
     private readonly integrationsService: IntegrationsService,
     private readonly githubAppService: GithubAppService,
     private readonly githubInstallIntentService: GithubInstallIntentService,
+    private readonly verificationService: GithubInstallVerificationService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -82,23 +87,19 @@ export class GithubInstallationCallbackController {
       );
       return;
     }
-    const { orgId, orgSlug, userId, returnTo } = intent;
-    // FE routes: the onboarding wizard, or the org's Settings page
-    // (`app/[slug]/settings` — by slug, and the Integrations card lives on
-    // that page; it reads `?github=` and toasts). The old
-    // `/orgs/:orgId/settings/integrations` does not exist there: every
-    // install from Settings landed on a 404.
-    const redirectBase =
-      returnTo === GithubInstallReturnTo.SETUP
-        ? `${feUrl}/setup?step=2&orgId=${orgId}`
-        : `${feUrl}/${encodeURIComponent(orgSlug)}/settings`;
+    const redirectBase = this.redirectBaseFor(feUrl, intent);
     const separator = redirectBase.includes('?') ? '&' : '?';
 
-    // Requested from the GitHub organization's owner: nothing installed yet,
-    // so nothing to verify — record the pending request and say so.
-    if (!query.installation_id) {
+    // Requested from the GitHub organization's owner: nothing to connect
+    // yet — record the pending request and say so. Any installation_id on
+    // a request is ignored: binding one (even as pending) would let an org
+    // claim an installation it never proved it can see.
+    if (query.setup_action === 'request' || !query.installation_id) {
       try {
-        await this.integrationsService.markGithubPendingApproval(orgId, userId);
+        await this.integrationsService.markGithubPendingApproval(
+          intent.orgId,
+          intent.userId,
+        );
         res.redirect(`${redirectBase}${separator}github=pending_approval`);
       } catch {
         res.redirect(`${redirectBase}${separator}github=error`);
@@ -106,29 +107,93 @@ export class GithubInstallationCallbackController {
       return;
     }
 
+    // installation_id is only a claim (it can be spoofed): park it and let
+    // the user prove through GitHub's OAuth web flow that it is theirs.
     try {
-      const installation = await this.githubAppService.verifyInstallation(
-        query.installation_id,
+      const verificationState = await this.verificationService.begin({
+        orgId: intent.orgId,
+        orgSlug: intent.orgSlug,
+        userId: intent.userId,
+        returnTo: intent.returnTo,
+        installationId: query.installation_id,
+        setupAction: query.setup_action,
+      });
+      res.redirect(
+        this.githubAppService.userAuthorizationUrl(verificationState),
       );
-      await this.integrationsService.connectGithub(
-        orgId,
-        userId,
-        installation,
-        query.setup_action,
-      );
-
-      const statusParam =
-        query.setup_action === 'request'
-          ? 'github=pending_approval'
-          : 'github=connected';
-      res.redirect(`${redirectBase}${separator}${statusParam}`);
     } catch {
-      // Covers both verifyInstallation failures (installation_invalid /
-      // github_unreachable) and connectGithub's ConflictException
-      // (installation_in_use) — browser-navigated request, nothing on this
-      // leg of the flow can read a JSON error body, so redirect with a
-      // reason code rather than throw.
       res.redirect(`${redirectBase}${separator}github=error`);
     }
+  }
+
+  // GitHub's OAuth web flow returns here (one of the App's Callback URLs):
+  // the installation is connected only when the user who authorized can
+  // see it with their own token. Effective path:
+  // /api/v1/github/installations/authorize/callback.
+  @Get('authorize/callback')
+  async authorizeCallback(
+    @Query() query: GithubAuthorizeCallbackDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    const feUrl = this.configService.getOrThrow<string>('feUrl');
+    const pending = query.state
+      ? await this.verificationService.take(query.state)
+      : null;
+    if (!pending) {
+      res.redirect(`${feUrl}/?github=error&reason=state_expired`);
+      return;
+    }
+    const redirectBase = this.redirectBaseFor(feUrl, pending);
+    const separator = redirectBase.includes('?') ? '&' : '?';
+    const fail = (reason?: string) =>
+      res.redirect(
+        `${redirectBase}${separator}github=error${reason ? `&reason=${reason}` : ''}`,
+      );
+
+    // Declined on GitHub (error=access_denied) or no code at all.
+    if (!query.code) {
+      fail('authorization_required');
+      return;
+    }
+
+    try {
+      const owned = await this.githubAppService.userCanAccessInstallation(
+        query.code,
+        pending.installationId,
+      );
+      if (!owned) {
+        fail('installation_not_owned');
+        return;
+      }
+      const installation = await this.githubAppService.verifyInstallation(
+        pending.installationId,
+      );
+      await this.integrationsService.connectGithub(
+        pending.orgId,
+        pending.userId,
+        installation,
+        pending.setupAction,
+      );
+      res.redirect(`${redirectBase}${separator}github=connected`);
+    } catch {
+      // verifyInstallation (installation_invalid / github_unreachable), a
+      // failed code exchange, or connectGithub's installation_in_use — a
+      // browser-navigated request, so a reason-less redirect, not JSON.
+      fail();
+    }
+  }
+
+  // FE routes: the onboarding wizard, or the org's Settings page
+  // (`app/[slug]/settings` — by slug, and the Integrations card lives on
+  // that page; it reads `?github=` and toasts). The old
+  // `/orgs/:orgId/settings/integrations` does not exist there: every
+  // install from Settings landed on a 404.
+  private redirectBaseFor(
+    feUrl: string,
+    target: { orgId: string; orgSlug: string; returnTo: GithubInstallReturnTo },
+  ): string {
+    return target.returnTo === GithubInstallReturnTo.SETUP
+      ? `${feUrl}/setup?step=2&orgId=${target.orgId}`
+      : `${feUrl}/${encodeURIComponent(target.orgSlug)}/settings`;
   }
 }

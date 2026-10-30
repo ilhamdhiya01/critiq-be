@@ -18,7 +18,9 @@ services:
   # nothing outside the Compose network may reach Redis, but `pnpm
   # start:worker:dev` and `pnpm start:dev` run as plain Node processes and
   # reach it over localhost. Bound to 127.0.0.1 so it stays off the local
-  # network even on shared Wi-Fi.
+  # network even on shared Wi-Fi. REDIS_PORT (in .env.compose) moves the host
+  # side when 6379 is taken by another local stack; REDIS_URL in .env must
+  # use the same port.
   #
   # `db` deliberately gets no such mapping: a developer machine is likely to
   # already have Postgres on 5432 (this one does), so publishing the
@@ -26,4 +28,4 @@ services:
   # Postgres you actually want instead — see .env's comment block.
   redis:
     ports:
-      - '127.0.0.1:6379:6379'
+      - '127.0.0.1:${REDIS_PORT:-6379}:6379'

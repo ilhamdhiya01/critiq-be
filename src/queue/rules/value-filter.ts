@@ -337,6 +337,47 @@ function isWordSegmented(value: string): boolean {
   return digits / value.length < 0.2;
 }
 
+// A property read in code — `userToken = authentication.token` — rather than
+// a credential. isWordSegmented already rejects `res.accessToken` and
+// `response.data.token`, but needs two segments after the first word, so a
+// plain `authentication.token` slipped through as critical.
+//
+// Only for a code-style assignment (`=` or `:=`) to a key that is not
+// SCREAMING_SNAKE: an unquoted value after `=` in code is always an
+// expression, while in `.env` (`DB_PASSWORD=summer.holiday`, uppercase key)
+// and YAML (`password: summer.holiday`, `:`) it is a real string and must
+// stay a finding. Segments are capped at 40 characters and `eyJ` is
+// excluded so a dotted JWT is never mistaken for a property path.
+const MEMBER_ACCESS_PATTERN =
+  /^[A-Za-z_$][A-Za-z0-9_$]{0,39}(?:\.[A-Za-z_$][A-Za-z0-9_$]{0,39})+$/;
+const ENV_STYLE_KEY_PATTERN = /^[A-Z0-9_.-]+$/;
+
+function isCodeMemberAccess(candidate: SecretCandidate): boolean {
+  const { key, raw, value } = candidate;
+  if (
+    !key ||
+    ENV_STYLE_KEY_PATTERN.test(key) ||
+    !MEMBER_ACCESS_PATTERN.test(value) ||
+    value.startsWith('eyJ') ||
+    digitRatio(value) >= 0.2
+  ) {
+    return false;
+  }
+  const at = raw.indexOf(key);
+  if (at < 0) {
+    return false;
+  }
+  const after = raw
+    .slice(at + key.length)
+    .replace(/^["'`]/, '')
+    .trimStart();
+  const assignedInCode =
+    after.startsWith(':=') || (after.startsWith('=') && !/^=[=>]/.test(after));
+  // The value itself must be unquoted: a quoted `'auth.token'` is a string.
+  const unquoted = /^(?::=|=)\s*(.*)$/.exec(after)?.[1]?.startsWith(value);
+  return assignedInCode && unquoted === true;
+}
+
 function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
   const { value, key } = candidate;
 
@@ -345,6 +386,7 @@ function isStructurallyNotSecret(candidate: SecretCandidate): boolean {
   if (isTernaryBranch(candidate)) return true;
   if (isStateIdentifier(value)) return true;
   if (isWordSegmented(value)) return true;
+  if (isCodeMemberAccess(candidate)) return true;
   if (UUID_PATTERN.test(value)) return true;
   if (SEMVER_PATTERN.test(value)) return true;
   if (ISO_DATE_PATTERN.test(value)) return true;
