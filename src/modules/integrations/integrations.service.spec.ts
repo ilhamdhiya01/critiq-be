@@ -8,6 +8,7 @@ import { GithubAppService } from './github-app.service';
 import { GitlabApiService } from './gitlab-api.service';
 import { IntegrationsService } from './integrations.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
+import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 
 jest.mock('../../common/realtime/realtime.publisher', () => ({
   RealtimePublisher: class {},
@@ -27,6 +28,9 @@ jest.mock('../../generated/prisma/client', () => ({
 }));
 jest.mock('./github-app.service', () => ({ GithubAppService: class {} }));
 jest.mock('./gitlab-api.service', () => ({ GitlabApiService: class {} }));
+jest.mock('../../common/redis/rate-limiter.service', () => ({
+  RateLimiterService: class {},
+}));
 
 function githubIntegration(overrides: Record<string, unknown> = {}) {
   return {
@@ -56,6 +60,7 @@ function setup(integration: Record<string, unknown> | null) {
     listInstallationRepositories: jest.fn().mockResolvedValue([]),
   };
   const logger = { info: jest.fn(), warn: jest.fn() };
+  const rateLimiter = { tryConsume: jest.fn().mockResolvedValue(true) };
   const realtime = {
     publish: jest.fn(),
     scanChanged: jest.fn(),
@@ -70,8 +75,9 @@ function setup(integration: Record<string, unknown> | null) {
     {} as GitlabApiService,
     logger as unknown as Logger,
     realtime as unknown as RealtimePublisher,
+    rateLimiter as unknown as RateLimiterService,
   );
-  return { realtime, service, prisma, githubAppService, logger };
+  return { realtime, service, prisma, githubAppService, logger, rateLimiter };
 }
 
 describe('IntegrationsService.disconnectGithub', () => {
@@ -191,5 +197,27 @@ describe('IntegrationsService.markGithubPendingApproval', () => {
     const { service, prisma } = setup({ installationId: '169099670' });
     await service.markGithubPendingApproval('org_1', 'user_1');
     expect(prisma.integration.upsert).not.toHaveBeenCalled();
+  });
+});
+
+// Each connect makes Critiq call a URL the Admin chose (SSRF probing).
+describe('IntegrationsService.connectGitlab rate limit', () => {
+  it('answers 429 gitlab_connect_rate_limited before calling GitLab', async () => {
+    const { service, rateLimiter } = setup(null);
+    rateLimiter.tryConsume.mockResolvedValue(false);
+    await expect(
+      service.connectGitlab('org_1', 'user_1', {
+        instance_url: 'https://gitlab.com',
+        token: 'glpat-x',
+      }),
+    ).rejects.toMatchObject({
+      status: HttpStatus.TOO_MANY_REQUESTS,
+      response: { message: 'gitlab_connect_rate_limited' },
+    });
+    expect(rateLimiter.tryConsume).toHaveBeenCalledWith(
+      'ratelimit:gitlab-connect:org:org_1',
+      10,
+      3600,
+    );
   });
 });

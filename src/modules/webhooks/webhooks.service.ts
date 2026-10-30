@@ -139,13 +139,20 @@ export class WebhooksService {
     }
     const payload = parsed;
 
-    const repository = await this.prisma.repository.findFirst({
+    // A GitLab project id is not unique across Critiq: two organizations can
+    // connect the same project, and two GitLab instances can have the same
+    // numeric id. The repository is the one whose per-repo secret matches —
+    // not whichever row a findFirst happens to return, which let one org's
+    // connection make another org's deliveries fail and could route its
+    // comments into the wrong organization.
+    const candidates = await this.prisma.repository.findMany({
       where: {
         provider: Provider.GITLAB,
         externalId: String(payload.project.id),
       },
       include: { scanConfig: true },
     });
+    const providedToken = headers['x-gitlab-token'];
 
     // GitLab's secret is per-repo, so an unknown repo (or one whose secret
     // was never stored) means the delivery cannot be authenticated at all —
@@ -153,24 +160,31 @@ export class WebhooksService {
     // let an unauthenticated caller enumerate which project ids are
     // connected (401 vs 200), and a hook left behind on a disconnected repo
     // then gets auto-disabled by GitLab, which is the desired outcome.
-    if (!repository?.encryptedWebhookSecret) {
+    const withSecret = candidates.filter(
+      (candidate) => candidate.encryptedWebhookSecret,
+    );
+    if (withSecret.length === 0) {
       this.logger.warn('webhook.gitlab.rejected', {
-        reason: repository ? 'no_secret_configured' : 'unknown_repo',
+        reason: candidates.length > 0 ? 'no_secret_configured' : 'unknown_repo',
         projectId: payload.project.id,
       });
       return { kind: 'rejected' };
     }
 
-    const expectedSecret = this.encryptionService.decrypt(
-      repository.encryptedWebhookSecret,
-    );
-    const providedToken = headers['x-gitlab-token'];
-    if (
-      typeof providedToken !== 'string' ||
-      !this.safeCompare(providedToken, expectedSecret)
-    ) {
+    const repository =
+      typeof providedToken === 'string'
+        ? withSecret.find((candidate) =>
+            this.safeCompare(
+              providedToken,
+              this.encryptionService.decrypt(
+                candidate.encryptedWebhookSecret as string,
+              ),
+            ),
+          )
+        : undefined;
+    if (!repository) {
       this.logger.warn('webhook.gitlab.rejected', {
-        repositoryId: repository.id,
+        projectId: payload.project.id,
         reason: 'token_mismatch',
       });
       return { kind: 'rejected' };
@@ -181,6 +195,7 @@ export class WebhooksService {
         Provider.GITLAB,
         isGitlabNotePayload(parsed) ? fromGitlabNote(parsed) : undefined,
         this.headerString(headers, 'x-gitlab-event-uuid'),
+        repository.id,
       );
     }
     if (payload.object_kind !== 'merge_request') {
@@ -327,6 +342,9 @@ export class WebhooksService {
     provider: Provider,
     comment: InboundComment | null | undefined,
     deliveryId: string | undefined,
+    // The repository the delivery was authenticated against (GitLab), so
+    // ingest does not look it up again by a non-unique project id.
+    repositoryId?: string,
   ): Promise<WebhookOutcome> {
     if (comment === undefined) {
       this.logger.warn(`webhook.${provider.toLowerCase()}.rejected`, {
@@ -345,7 +363,10 @@ export class WebhooksService {
       return { kind: 'duplicate' };
     }
     try {
-      const outcome = await this.commentIngestService.ingest(comment);
+      const outcome = await this.commentIngestService.ingest(
+        comment,
+        repositoryId,
+      );
       return outcome === 'ignored'
         ? { kind: 'skipped', reason: 'untracked_pull' }
         : { kind: 'comment_recorded' };

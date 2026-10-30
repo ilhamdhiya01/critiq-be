@@ -53,6 +53,8 @@ import {
 
 const INVITE_RATE_LIMIT = 20;
 const INVITE_RATE_WINDOW_SECONDS = 3600;
+// Per user: anyone signed in can try links (CLAUDE.md "Keamanan").
+const INVITE_ACCEPT_RATE_LIMIT = 20;
 
 const INVITE_INCLUDE = {
   invitedBy: { select: { id: true, name: true, email: true } },
@@ -383,8 +385,14 @@ export class MembersService {
         name: invitation.organization.name,
         slug: invitation.organization.slug,
       },
+      // Public page: an inviter without a name is shown by masked email,
+      // never the full address.
       invitedBy: invitation.invitedBy
-        ? { name: displayName(invitation.invitedBy) }
+        ? {
+            name:
+              invitation.invitedBy.name ??
+              maskEmail(invitation.invitedBy.email),
+          }
         : null,
       role: toWireRole(invitation.role),
       email: maskEmail(invitation.email),
@@ -397,6 +405,17 @@ export class MembersService {
   // (decision 19 Oct 2026) — the mismatch is recorded. The claim is atomic,
   // so one link makes one member; an existing member does not use it up.
   async accept(token: string, userId: string): Promise<JoinedOrganization> {
+    const allowed = await this.rateLimiter.tryConsume(
+      `ratelimit:invite-accept:user:${userId}`,
+      INVITE_ACCEPT_RATE_LIMIT,
+      INVITE_RATE_WINDOW_SECONDS,
+    );
+    if (!allowed) {
+      throw new HttpException(
+        { field: 'token', message: 'invite_accept_rate_limited' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     const invitation = await this.findByToken(token);
     const now = new Date();
     const status = statusOf(invitation, now);

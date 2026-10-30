@@ -98,6 +98,17 @@ describe('CommentIngestService', () => {
     });
   });
 
+  // GitLab project ids are not unique across organizations: the webhook
+  // hands over the repository it authenticated, never re-resolved by id.
+  it('uses the repository the webhook authenticated', async () => {
+    const { service, prisma } = setup();
+    prisma.pullComment.create.mockResolvedValue({ id: 'c9' });
+    await service.ingest(event(), 'repo_1');
+    expect(prisma.repository.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'repo_1' } }),
+    );
+  });
+
   it('ignores a comment on a PR Critiq does not track', async () => {
     const { service, prisma, realtime } = setup();
     prisma.pullRequest.findUnique.mockResolvedValue(null);

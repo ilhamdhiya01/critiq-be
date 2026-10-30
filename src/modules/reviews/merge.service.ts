@@ -94,7 +94,10 @@ export class MergeService {
       },
       select: { role: true },
     });
-    if (dto.overrideCritical && membership.role !== Role.ADMIN) {
+    // One reading of the override for the role check, the blocker and the
+    // audit: `null` (or anything falsy past validation) is no override.
+    const override = dto.overrideCritical ?? undefined;
+    if (override && membership.role !== Role.ADMIN) {
       throw new ForbiddenException({
         field: 'overrideCritical',
         message: 'override_requires_admin',
@@ -103,8 +106,7 @@ export class MergeService {
 
     const blockers = await loadMergeBlockers(this.prisma, pull);
     const overridden =
-      dto.overrideCritical !== undefined &&
-      blockers.includes('critical_findings');
+      override !== undefined && blockers.includes('critical_findings');
     const remaining = blockers.filter(
       (blocker) => !(overridden && blocker === 'critical_findings'),
     );
@@ -190,7 +192,7 @@ export class MergeService {
       headSha: pull.headSha,
       deleteSourceBranch: dto.deleteSourceBranch === true,
       overrideCritical: overridden,
-      reason: overridden ? dto.overrideCritical?.reason : undefined,
+      reason: overridden ? override?.reason : undefined,
     });
 
     return {

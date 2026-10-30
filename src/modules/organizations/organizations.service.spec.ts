@@ -1,7 +1,8 @@
-import { NotFoundException } from '@nestjs/common';
+import { HttpStatus, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { SlugService } from '../../common/slug/slug.service';
+import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Role } from '../../generated/prisma/enums';
 import { OrganizationsService } from './organizations.service';
 
@@ -12,6 +13,9 @@ jest.mock('../../common/realtime/realtime.publisher', () => ({
   RealtimePublisher: class {},
 }));
 jest.mock('../../common/slug/slug.service', () => ({ SlugService: class {} }));
+jest.mock('../../common/redis/rate-limiter.service', () => ({
+  RateLimiterService: class {},
+}));
 
 const USER = 'user_1';
 const ORG = 'org_1';
@@ -52,12 +56,14 @@ function setup(existing: { id: string } | null = { id: ORG }) {
       return Promise.resolve();
     }),
   };
+  const rateLimiter = { tryConsume: jest.fn().mockResolvedValue(true) };
   const service = new OrganizationsService(
     prisma as unknown as PrismaService,
     slugs as unknown as SlugService,
     realtime as unknown as RealtimePublisher,
+    rateLimiter as unknown as RateLimiterService,
   );
-  return { service, prisma, tx, slugs, realtime, events };
+  return { service, prisma, tx, slugs, realtime, events, rateLimiter };
 }
 
 describe('OrganizationsService', () => {
@@ -74,6 +80,23 @@ describe('OrganizationsService', () => {
   });
 
   describe('create', () => {
+    it('is limited per user: 429 org_create_rate_limited', async () => {
+      const { service, prisma, rateLimiter } = setup();
+      rateLimiter.tryConsume.mockResolvedValue(false);
+      await expect(
+        service.create(USER, { name: 'Acme' }),
+      ).rejects.toMatchObject({
+        status: HttpStatus.TOO_MANY_REQUESTS,
+        response: { message: 'org_create_rate_limited' },
+      });
+      expect(rateLimiter.tryConsume).toHaveBeenCalledWith(
+        `ratelimit:org-create:user:${USER}`,
+        10,
+        3600,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
     it('makes the creator its active Admin', async () => {
       const { service, tx } = setup();
       const result = await service.create(USER, { name: 'Acme' });

@@ -406,6 +406,35 @@ describe('MembersService.preview / accept', () => {
     );
   });
 
+  // The preview is public: an inviter without a name must not expose
+  // their full email address.
+  it('masks the email of an inviter without a name', async () => {
+    const { service, prisma } = setup();
+    const row = invitationRow();
+    prisma.invitation.findUnique.mockResolvedValue({
+      ...row,
+      invitedBy: { ...row.invitedBy, name: null, email: 'alex@acme.io' },
+    });
+    const preview = await service.preview(token);
+    expect(preview.invitedBy?.name).not.toBe('alex@acme.io');
+    expect(preview.invitedBy?.name).toContain('***');
+  });
+
+  it('limits accepting per user: 429 invite_accept_rate_limited', async () => {
+    const { service, prisma, rateLimiter } = setup();
+    rateLimiter.tryConsume.mockResolvedValue(false);
+    await expect(service.accept(token, 'u_new')).rejects.toMatchObject({
+      status: 429,
+      response: { message: 'invite_accept_rate_limited' },
+    });
+    expect(rateLimiter.tryConsume).toHaveBeenCalledWith(
+      'ratelimit:invite-accept:user:u_new',
+      20,
+      3600,
+    );
+    expect(prisma.invitation.findUnique).not.toHaveBeenCalled();
+  });
+
   it('404s a malformed token without touching the database', async () => {
     const { service, prisma } = setup();
     await expect(service.preview('../x')).rejects.toMatchObject({

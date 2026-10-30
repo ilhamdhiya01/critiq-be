@@ -32,6 +32,15 @@ export default () => ({
     clientSecret: process.env.GITHUB_APP_CLIENT_SECRET,
     webhookSecret: process.env.GITHUB_APP_WEBHOOK_SECRET,
     slug: process.env.GITHUB_APP_SLUG,
+    // Where GitHub returns after the installation ownership check (the App's
+    // web-flow OAuth, CLAUDE.md "Kredensial code host → GitHub"). Must be one
+    // of the App's Callback URLs. Defaults to this backend's own route on
+    // the login callback's origin — FE and BE are same-origin.
+    authorizeRedirectUrl:
+      process.env.GITHUB_APP_AUTHORIZE_REDIRECT_URL ||
+      (process.env.GITHUB_REDIRECT_URL
+        ? `${new URL(process.env.GITHUB_REDIRECT_URL).origin}/api/v1/github/installations/authorize/callback`
+        : undefined),
   },
   gitlab: {
     // Identity-only login (PRD v1.4/D3): one fixed OAuth app on gitlab.com,
@@ -41,8 +50,20 @@ export default () => ({
     clientId: process.env.GITLAB_CLIENT_ID,
     clientSecret: process.env.GITLAB_CLIENT_SECRET,
     redirectUrl: process.env.GITLAB_REDIRECT_URL,
+    // Hosts a GitLab Instance URL may use over plain http:// or on a
+    // private/internal address. Everything else must be public https:// —
+    // see src/common/net/safe-url.ts.
+    instanceAllowlist: (process.env.GITLAB_INSTANCE_ALLOWLIST ?? '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
   },
   feUrl: process.env.FE_URL,
+  session: {
+    // `lax` wherever FE and BE are same-origin; `none` only for local dev
+    // across schemes (CLAUDE.md "Keamanan").
+    cookieSameSite: process.env.SESSION_COOKIE_SAMESITE || 'lax',
+  },
   // This server's own publicly-reachable base URL — distinct from feUrl
   // (the frontend's URL). Needed to tell GitLab where to POST webhook
   // events when a repo is connected (createRepos() builds
@@ -82,7 +103,7 @@ export default () => ({
     keepDeduped: process.env.AI_KEEP_DEDUPED === 'true',
     // Hosts an openai_compatible base URL may use over plain http:// or on
     // a private/internal address (self-hosted vLLM, Ollama). Everything else
-    // must be public https:// — see src/modules/ai/base-url-guard.ts.
+    // must be public https:// — see src/common/net/safe-url.ts.
     compatHttpAllowlist: (process.env.AI_COMPAT_HTTP_ALLOWLIST ?? '')
       .split(',')
       .map((host) => host.trim().toLowerCase())

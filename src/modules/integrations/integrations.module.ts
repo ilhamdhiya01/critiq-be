@@ -5,6 +5,7 @@ import { IntegrationsService } from './integrations.service';
 import { GithubAppService } from './github-app.service';
 import { GitlabApiService } from './gitlab-api.service';
 import { GithubInstallIntentService } from './github-install-intent.service';
+import { GithubInstallVerificationService } from './github-install-verification.service';
 import { GithubInstallationCallbackController } from './github-installation-callback.controller';
 
 @Module({
@@ -15,6 +16,7 @@ import { GithubInstallationCallbackController } from './github-installation-call
     GithubAppService,
     GitlabApiService,
     GithubInstallIntentService,
+    GithubInstallVerificationService,
   ],
   // Both are consumed directly by ReposModule (branch/scan-config lookups)
   // without going through IntegrationsService, so both must be exported.

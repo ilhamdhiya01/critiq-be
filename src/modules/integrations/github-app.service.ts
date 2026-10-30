@@ -55,6 +55,9 @@ const BRANCH_HARD_CAP = 500;
 const PR_FILES_PAGE_SIZE = 100;
 const PR_FILES_HARD_CAP = 500;
 const REQUEST_TIMEOUT_MS = 8000;
+// GET /user/installations, for the installation ownership check.
+const USER_INSTALLATIONS_PAGE_SIZE = 100;
+const USER_INSTALLATIONS_PAGE_CAP = 10;
 // A merge can take GitHub a while on a large repository.
 const MERGE_TIMEOUT_MS = 15_000;
 
@@ -78,13 +81,98 @@ export class GithubAppService {
   // get-installation-authentication.js directly before relying on this).
   private readonly appAuth: ReturnType<typeof createAppAuth>;
 
+  private readonly clientId: string;
+  private readonly clientSecret: string;
+  private readonly authorizeRedirectUrl: string;
+
   constructor(configService: ConfigService) {
+    this.clientId = configService.getOrThrow<string>('githubApp.clientId');
+    this.clientSecret = configService.getOrThrow<string>(
+      'githubApp.clientSecret',
+    );
+    this.authorizeRedirectUrl = configService.getOrThrow<string>(
+      'githubApp.authorizeRedirectUrl',
+    );
     this.appAuth = createAppAuth({
       appId: configService.getOrThrow<string>('githubApp.appId'),
       privateKey: configService.getOrThrow<string>('githubApp.privateKey'),
-      clientId: configService.getOrThrow<string>('githubApp.clientId'),
-      clientSecret: configService.getOrThrow<string>('githubApp.clientSecret'),
+      clientId: this.clientId,
+      clientSecret: this.clientSecret,
     });
+  }
+
+  // The App's web-flow OAuth page. The Setup URL's installation_id can be
+  // spoofed (GitHub's own docs say so), so a callback is only trusted once
+  // the user who came back proves, with their own token, that they can
+  // see that installation — see userCanAccessInstallation.
+  userAuthorizationUrl(state: string): string {
+    const params = new URLSearchParams({
+      client_id: this.clientId,
+      redirect_uri: this.authorizeRedirectUrl,
+      state,
+    });
+    return `https://github.com/login/oauth/authorize?${params.toString()}`;
+  }
+
+  // Exchanges the web-flow `code` for a user token and looks for the
+  // installation among the ones that user can access. The token is used
+  // for this check only: never stored or logged, and revoked afterwards
+  // (best effort — it expires on its own after 8 hours anyway).
+  async userCanAccessInstallation(
+    code: string,
+    installationId: string,
+  ): Promise<boolean> {
+    let userToken: string;
+    try {
+      const authentication = await this.appAuth({
+        type: 'oauth-user',
+        code,
+        redirectUrl: this.authorizeRedirectUrl,
+      });
+      userToken = authentication.token;
+    } catch (error) {
+      throw this.mapGithubRequestError(error);
+    }
+
+    try {
+      const wanted = Number(installationId);
+      for (let page = 1; page <= USER_INSTALLATIONS_PAGE_CAP; page += 1) {
+        const response = await request('GET /user/installations', {
+          per_page: USER_INSTALLATIONS_PAGE_SIZE,
+          page,
+          headers: { authorization: `token ${userToken}` },
+          request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        });
+        const { installations } = response.data;
+        if (installations.some((installation) => installation.id === wanted)) {
+          return true;
+        }
+        if (installations.length < USER_INSTALLATIONS_PAGE_SIZE) {
+          return false;
+        }
+      }
+      return false;
+    } catch (error) {
+      throw this.mapGithubRequestError(error);
+    } finally {
+      void this.revokeUserToken(userToken);
+    }
+  }
+
+  private async revokeUserToken(userToken: string): Promise<void> {
+    const basic = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString(
+      'base64',
+    );
+    try {
+      await request('DELETE /applications/{client_id}/token', {
+        client_id: this.clientId,
+        access_token: userToken,
+        headers: { authorization: `basic ${basic}` },
+        request: { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      });
+    } catch {
+      // Best effort: the token expires by itself.
+    }
   }
 
   // Confirms an installation_id from the callback is real and fetches the

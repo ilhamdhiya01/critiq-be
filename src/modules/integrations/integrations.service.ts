@@ -1,5 +1,7 @@
 import {
   ConflictException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   NotFoundException,
@@ -9,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RealtimePublisher } from '../../common/realtime/realtime.publisher';
 import { EncryptionService } from '../../common/encryption/encryption.service';
+import { RateLimiterService } from '../../common/redis/rate-limiter.service';
 import { Prisma } from '../../generated/prisma/client';
 import {
   CredentialKind,
@@ -35,6 +38,9 @@ const EXPIRING_SOON_THRESHOLD_DAYS = 14;
 // tell a group token from a personal one, per PRD §4 D3.
 const GROUP_TOKEN_USERNAME_PATTERN = /_bot/i;
 
+const GITLAB_CONNECT_RATE_LIMIT = 10;
+const GITLAB_CONNECT_RATE_WINDOW_SECONDS = 3600;
+
 @Injectable()
 export class IntegrationsService {
   constructor(
@@ -45,6 +51,7 @@ export class IntegrationsService {
     private readonly gitlabApiService: GitlabApiService,
     @Inject(WINSTON_MODULE_PROVIDER) private logger: Logger,
     private readonly realtime: RealtimePublisher,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   async list(organizationId: string): Promise<IntegrationResponseDto[]> {
@@ -60,6 +67,19 @@ export class IntegrationsService {
     connectedByUserId: string,
     dto: ConnectGitlabDto,
   ): Promise<IntegrationResponseDto> {
+    // Each attempt makes Critiq call a URL the Admin chose: bounded, so it
+    // cannot be used to probe hosts at volume (CLAUDE.md "Keamanan").
+    const allowed = await this.rateLimiter.tryConsume(
+      `ratelimit:gitlab-connect:org:${organizationId}`,
+      GITLAB_CONNECT_RATE_LIMIT,
+      GITLAB_CONNECT_RATE_WINDOW_SECONDS,
+    );
+    if (!allowed) {
+      throw new HttpException(
+        { field: 'instance_url', message: 'gitlab_connect_rate_limited' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     const instanceUrl = this.gitlabApiService.normalizeInstanceUrl(
       dto.instance_url,
     );

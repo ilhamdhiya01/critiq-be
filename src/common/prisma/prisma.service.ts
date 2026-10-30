@@ -30,9 +30,17 @@ export class PrismaService
   }
 
   onModuleInit() {
-    this.$on('query', (event) => {
-      this.logger.info(event);
-    });
+    // Only at LOG_LEVEL=debug, and never the bound parameters: they carry
+    // live secrets (a GitHub install intent's state, invitation token
+    // hashes) and personal data, and once went to every info log.
+    if (this.logger.isDebugEnabled()) {
+      this.$on('query', (event) => {
+        this.logger.debug('prisma.query', {
+          query: event.query,
+          durationMs: event.duration,
+        });
+      });
+    }
     this.$on('info', (event) => {
       this.logger.info(event);
     });
