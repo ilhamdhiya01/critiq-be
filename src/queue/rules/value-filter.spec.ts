@@ -157,6 +157,34 @@ describe('filterValue', () => {
 
     // v1.5.0 delta 2 §3.1: brackets are structural punctuation now, quoted
     // or not — the trade-off for rejecting operator strings and inline JSON.
+    // `userToken = authentication.token;` (github-app.service.ts) was
+    // flagged critical: one dot, two lowercase words.
+    it.each([
+      [
+        'userToken = authentication.token;',
+        'userToken',
+        'authentication.token',
+      ],
+      ['  const secret = session.secret', 'secret', 'session.secret'],
+      ['token := auth.accessToken', 'token', 'auth.accessToken'],
+      ['let apiKey = $config.apiKey;', 'apiKey', '$config.apiKey'],
+    ])('rejects a property read in code: %s', (raw, key, value) => {
+      expect(filterValue(candidate(value, { key, raw }))).toBe(
+        'not_secret_shaped',
+      );
+    });
+
+    // Unquoted values are real strings in .env and YAML, and a quoted one is
+    // a string anywhere.
+    it.each([
+      ['DB_PASSWORD=summer.holiday', 'DB_PASSWORD', 'summer.holiday'],
+      ['password: summer.holiday', 'password', 'summer.holiday'],
+      ["const password = 'summer.holiday';", 'password', 'summer.holiday'],
+      ['if (token == session.token) {', 'token', 'session.token'],
+    ])('keeps a dotted string credential: %s', (raw, key, value) => {
+      expect(filterValue(candidate(value, { key, raw }))).toBeNull();
+    });
+
     it('rejects a value containing brackets, even quoted', () => {
       const raw = "API_SECRET = 'Passw0rd(2026xyz'";
       expect(filterValue(candidate('Passw0rd(2026xyz', { raw }))).toBe(
