@@ -13,7 +13,7 @@ import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { AuthService, type JwtPayload } from '../auth/auth.service';
-import { setSessionCookie } from '../auth/session-cookie';
+import { SessionCookieService } from '../auth/session-cookie';
 import { AcceptedInviteDto, toWireRole } from './dto/members.dto';
 import { MembersService } from './members.service';
 
@@ -28,6 +28,7 @@ export class InvitesController {
   constructor(
     private readonly membersService: MembersService,
     private readonly authService: AuthService,
+    private readonly sessionCookie: SessionCookieService,
   ) {}
 
   // Public: the invite page shows it before the invitee signs in.
@@ -49,7 +50,7 @@ export class InvitesController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<AcceptedInviteDto> {
     const joined = await this.membersService.accept(token, req.user.sub);
-    setSessionCookie(
+    this.sessionCookie.set(
       res,
       this.authService.issueSessionToken({
         sub: req.user.sub,

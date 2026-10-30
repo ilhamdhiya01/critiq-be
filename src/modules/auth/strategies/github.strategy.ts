@@ -4,6 +4,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { Strategy, Profile } from 'passport-github2';
 import { AuthService } from '../auth.service';
 import { Provider } from '../../../generated/prisma/enums';
+import { OAuthCookieStateStore } from '../oauth-state.store';
 
 @Injectable()
 export class GithubStrategy extends PassportStrategy(Strategy, 'github') {
@@ -22,6 +23,9 @@ export class GithubStrategy extends PassportStrategy(Strategy, 'github') {
       // granted read/write access to the user's private repos via their
       // personal OAuth token — removed as part of the GitHub App migration.
       scope: ['user:email'],
+      // Login CSRF: the callback must come back to the browser that
+      // started it (CLAUDE.md "Keamanan").
+      store: new OAuthCookieStateStore(),
     });
   }
 

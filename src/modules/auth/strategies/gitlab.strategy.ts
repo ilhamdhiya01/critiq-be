@@ -6,6 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { Strategy } from 'passport-oauth2';
 import { AuthService } from '../auth.service';
 import { Provider } from '../../../generated/prisma/enums';
+import { OAuthCookieStateStore } from '../oauth-state.store';
 
 interface GitlabUserProfile {
   id: number;
@@ -35,6 +36,9 @@ export class GitlabStrategy extends PassportStrategy(Strategy, 'gitlab') {
       clientSecret: configService.getOrThrow<string>('gitlab.clientSecret'),
       callbackURL: configService.getOrThrow<string>('gitlab.redirectUrl'),
       scope: ['read_user'],
+      // Login CSRF: the callback must come back to the browser that
+      // started it (CLAUDE.md "Keamanan").
+      store: new OAuthCookieStateStore(),
     });
   }
 

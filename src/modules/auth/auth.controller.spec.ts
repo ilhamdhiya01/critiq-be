@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { Provider, Role } from '../../generated/prisma/enums';
 import { AuthController } from './auth.controller';
 import { AuthService, JwtPayload } from './auth.service';
+import { SessionCookieService } from './session-cookie';
 
 // @nestjs/passport and @nestjs/config ship ESM-only builds this CommonJS
 // Jest setup cannot load; the guards are not what these tests are about.
@@ -21,6 +22,9 @@ function setup() {
   const controller = new AuthController(
     auth as unknown as AuthService,
     config as unknown as ConfigService,
+    new SessionCookieService({
+      get: () => undefined,
+    } as unknown as ConfigService),
   );
   const res = {
     cookie: jest.fn(),

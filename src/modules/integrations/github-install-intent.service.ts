@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { Prisma } from '../../generated/prisma/client';
 import { GithubInstallReturnTo } from '../../generated/prisma/enums';
 
 const STATE_BYTES = 32;
@@ -55,15 +56,24 @@ export class GithubInstallIntentService {
   // request — and an intent whose organization is gone is treated as
   // invalid.
   async consume(state: string): Promise<ConsumedGithubInstallIntent | null> {
-    const intent = await this.prisma.githubInstallIntent.findUnique({
-      where: { state },
-    });
+    // delete returns the row it removed: one atomic read-and-consume, so two
+    // concurrent callbacks with the same state cannot both get it (the old
+    // find-then-delete answered the loser with a 500).
+    const intent = await this.prisma.githubInstallIntent
+      .delete({ where: { state } })
+      .catch((error: unknown) => {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2025'
+        ) {
+          return null;
+        }
+        throw error;
+      });
 
     if (!intent) {
       return null;
     }
-
-    await this.prisma.githubInstallIntent.delete({ where: { state } });
 
     if (intent.expiresAt.getTime() < Date.now()) {
       return null;

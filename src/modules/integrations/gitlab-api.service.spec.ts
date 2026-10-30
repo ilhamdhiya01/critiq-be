@@ -1,10 +1,18 @@
 import { HttpService } from '@nestjs/axios';
-import axios, { AxiosError, AxiosHeaders, AxiosRequestConfig } from 'axios';
+import { ConfigService } from '@nestjs/config';
+import axios, {
+  AxiosError,
+  AxiosHeaders,
+  AxiosRequestConfig,
+  InternalAxiosRequestConfig,
+} from 'axios';
 import { of, throwError } from 'rxjs';
-import { GitlabApiService } from './gitlab-api.service';
+import { UnsafeUrlError } from '../../common/net/safe-url';
+import { GitlabApiService, gitlabOutboundGuard } from './gitlab-api.service';
 
 // ESM-only package; the service only needs `get`, supplied below.
 jest.mock('@nestjs/axios', () => ({ HttpService: class {} }));
+jest.mock('@nestjs/config', () => ({ ConfigService: class {} }));
 
 function axiosError(status: number, data: unknown = {}): AxiosError {
   const headers = new AxiosHeaders();
@@ -18,8 +26,16 @@ function axiosError(status: number, data: unknown = {}): AxiosError {
 }
 
 function setup() {
-  const http = { get: jest.fn(), post: jest.fn(), put: jest.fn() };
-  const service = new GitlabApiService(http as unknown as HttpService);
+  const http = {
+    get: jest.fn(),
+    post: jest.fn(),
+    put: jest.fn(),
+    axiosRef: { interceptors: { request: { use: jest.fn() } } },
+  };
+  const service = new GitlabApiService(
+    http as unknown as HttpService,
+    { get: () => [] } as unknown as ConfigService,
+  );
   const lastParams = () =>
     (
       http.get.mock.calls.at(-1) as [
@@ -377,6 +393,68 @@ describe('GitlabApiService comments', () => {
       'https://gitlab.com/api/v4/projects/42/hooks/5',
       expect.objectContaining({ note_events: true, url: 'https://be/hook' }),
       expect.anything(),
+    );
+  });
+});
+
+// The Instance URL is typed in by a tenant's Admin: every request to it is
+// checked, so it cannot reach Critiq's own network (SSRF).
+describe('gitlabOutboundGuard', () => {
+  const lookup = (hostname: string) =>
+    Promise.resolve(
+      {
+        'gitlab.example.com': [{ address: '203.0.113.10', family: 4 }],
+        'internal.example.com': [{ address: '10.0.0.5', family: 4 }],
+        'gitlab.corp': [{ address: '10.0.0.6', family: 4 }],
+      }[hostname] ?? [],
+    );
+  const request = (url: string) =>
+    ({ url, headers: new AxiosHeaders() }) as InternalAxiosRequestConfig;
+
+  it('lets a public https instance through without following redirects', async () => {
+    const config = await gitlabOutboundGuard(
+      [],
+      lookup,
+    )(request('https://gitlab.example.com/api/v4/user'));
+    expect(config.maxRedirects).toBe(0);
+  });
+
+  it.each([
+    'http://gitlab.example.com/api/v4/user',
+    'https://127.0.0.1/api/v4/user',
+    'https://169.254.169.254/latest/meta-data',
+    'https://internal.example.com/api/v4/user',
+    'https://user:pass@gitlab.example.com/api/v4/user',
+  ])('refuses %s', async (url) => {
+    await expect(
+      gitlabOutboundGuard([], lookup)(request(url)),
+    ).rejects.toBeInstanceOf(UnsafeUrlError);
+  });
+
+  it('lets an allowlisted internal host through', async () => {
+    await expect(
+      gitlabOutboundGuard(
+        ['gitlab.corp'],
+        lookup,
+      )(request('http://gitlab.corp/api/v4/user')),
+    ).resolves.toBeDefined();
+  });
+
+  it('is registered on the service axios instance', () => {
+    const { http } = setup();
+    expect(http.axiosRef.interceptors.request.use).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 422 insecure_instance_url', () => {
+    const { service } = setup();
+    expect(() =>
+      service.mapGitlabRequestError(new UnsafeUrlError('URL must use https.')),
+    ).toThrow(
+      expect.objectContaining({
+        response: expect.objectContaining({
+          message: 'insecure_instance_url',
+        }) as unknown,
+      }) as Error,
     );
   });
 });

@@ -48,7 +48,10 @@ export function classifyProviderError(error: unknown): ProviderErrorKind {
     case 'github_unreachable':
     case 'instance_unreachable':
       return 'retryable';
+    // insecure_instance_url: the Instance URL points somewhere Critiq must
+    // not call (SSRF guard) — no retry fixes that.
     case 'provider_bad_request':
+    case 'insecure_instance_url':
       return 'rejected';
     default:
       return 'unknown';

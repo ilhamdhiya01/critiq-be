@@ -6,6 +6,7 @@ import {
   Post,
   Req,
   Res,
+  UseFilters,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
@@ -16,7 +17,11 @@ import { AuthService } from './auth.service';
 import type { JwtPayload } from './auth.service';
 import { ResponseMessage } from '../../common/decorators/response-message.decorator';
 import { SessionUserDto } from './dto/session-user.dto';
-import { clearSessionCookie, setSessionCookie } from './session-cookie';
+import { SessionCookieService } from './session-cookie';
+import {
+  OAuthCallbackGuard,
+  OAuthStateMismatchFilter,
+} from './oauth-callback.guard';
 
 interface AuthenticatedRequest extends Request {
   user: {
@@ -37,6 +42,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    private readonly sessionCookie: SessionCookieService,
   ) {}
 
   @Get('github')
@@ -47,7 +53,8 @@ export class AuthController {
   }
 
   @Get('github/callback')
-  @UseGuards(AuthGuard('github'))
+  @UseGuards(OAuthCallbackGuard('github'))
+  @UseFilters(OAuthStateMismatchFilter)
   githubCallback(@Req() req: AuthenticatedRequest, @Res() res: Response): void {
     // Deliberately uses @Res() (not `return`) because this endpoint is a
     // browser redirect flow (GitHub -> BE -> eventually FE + httpOnly
@@ -71,7 +78,8 @@ export class AuthController {
   }
 
   @Get('gitlab/callback')
-  @UseGuards(AuthGuard('gitlab'))
+  @UseGuards(OAuthCallbackGuard('gitlab'))
+  @UseFilters(OAuthStateMismatchFilter)
   gitlabCallback(@Req() req: AuthenticatedRequest, @Res() res: Response): void {
     this.handleOAuthCallback(req.user, res);
   }
@@ -83,7 +91,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ResponseMessage('Signed out')
   logout(@Res({ passthrough: true }) res: Response): { loggedOut: true } {
-    clearSessionCookie(res);
+    this.sessionCookie.clear(res);
     return { loggedOut: true };
   }
 
@@ -112,7 +120,7 @@ export class AuthController {
       onboardingCompleted: auth.onboardingCompleted,
     });
 
-    setSessionCookie(res, token);
+    this.sessionCookie.set(res, token);
 
     const feUrl = this.configService.getOrThrow<string>('feUrl');
     res.redirect(`${feUrl}`);

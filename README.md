@@ -166,6 +166,9 @@ pnpm test:cov      # test coverage
 | `GITLAB_CLIENT_SECRET`                         | GitLab.com OAuth App client secret                                                                                                                                                                        |
 | `GITLAB_REDIRECT_URL`                          | GitLab.com OAuth callback URL                                                                                                                                                                             |
 | `AI_COMPAT_HTTP_ALLOWLIST`                     | Optional, comma-separated hosts an `openai_compatible` base URL may use over plain `http://` or on a private/internal address (e.g. `vllm.internal,localhost`). Everything else must be public `https://` |
+| `GITLAB_INSTANCE_ALLOWLIST`                    | Optional, comma-separated hosts a GitLab Instance URL may use over plain `http://` or on a private/internal address. Everything else must be public `https://` (`insecure_instance_url`) |
+| `SESSION_COOKIE_SAMESITE`                      | `lax` (default), `strict` or `none`. Keep `lax` wherever FE and BE are same-origin; `none` only for local dev where FE and BE differ in scheme |
+| `GITHUB_APP_AUTHORIZE_REDIRECT_URL`            | Optional. Where GitHub returns after the installation ownership check; default `<origin of GITHUB_REDIRECT_URL>/api/v1/github/installations/authorize/callback`. Must be listed under the GitHub App's **Callback URL**s |
 
 > GitLab **repo access** credentials (instance URL + access token) are **not**
 > env vars — as of PRD v1.4 they're submitted per-organization by an Admin via
