@@ -1,3 +1,5 @@
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { AiError, sanitizeProviderMessage, toAiError } from './ai-error';
 
 function sdkError(props: Record<string, unknown>, message = 'boom'): Error {
@@ -23,6 +25,27 @@ describe('toAiError', () => {
     const error = toAiError(sdkError(props));
     expect(error.code).toBe(code);
     expect(error.retryable).toBe(retryable);
+  });
+
+  // The SDKs' own classes, not look-alikes: their `name` is 'Error', so a
+  // check on `name` alone missed them and a provider timeout became a 500.
+  it.each([
+    ['openai timeout', new OpenAI.APIConnectionTimeoutError(), 'timeout'],
+    [
+      'openai connection',
+      new OpenAI.APIConnectionError({ message: 'socket hang up' }),
+      'provider_unreachable',
+    ],
+    ['anthropic timeout', new Anthropic.APIConnectionTimeoutError(), 'timeout'],
+    [
+      'anthropic connection',
+      new Anthropic.APIConnectionError({ message: 'socket hang up' }),
+      'provider_unreachable',
+    ],
+  ])('maps the real SDK %s error', (_label, error, code) => {
+    const mapped = toAiError(error);
+    expect(mapped.code).toBe(code);
+    expect(mapped.retryable).toBe(true);
   });
 
   it('passes an AiError through', () => {

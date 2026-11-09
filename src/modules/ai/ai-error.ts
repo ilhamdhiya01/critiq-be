@@ -122,6 +122,21 @@ function networkCode(error: ErrorLike): string | null {
 // APIError and name their connection errors the same way) or the network
 // threw into an AiError. Anything unrecognisable is a bug on our side, not
 // a provider failure, and is rethrown untouched.
+// The SDKs' connection errors do not set `name`: openai and Anthropic both
+// leave APIConnectionError / APIConnectionTimeoutError as 'Error', so the
+// class name is the fallback. Matching on `name` alone once let every
+// provider timeout escape as a raw error — a 500 from Test connection
+// (Gemini past the 30 s fixture timeout, 9 Nov 2026) and an unrecognized
+// failure instead of a retried `timeout` in the worker.
+function errorName(error: ErrorLike): string {
+  if (typeof error.name === 'string' && error.name !== 'Error') {
+    return error.name;
+  }
+  const className = (error as { constructor?: { name?: unknown } }).constructor
+    ?.name;
+  return typeof className === 'string' ? className : '';
+}
+
 export function toAiError(error: unknown): AiError {
   if (error instanceof AiError) {
     return error;
@@ -130,7 +145,7 @@ export function toAiError(error: unknown): AiError {
     throw new Error(`Unexpected non-error thrown: ${String(error)}`);
   }
   const e = error as ErrorLike;
-  const name = typeof e.name === 'string' ? e.name : '';
+  const name = errorName(e);
   const message = typeof e.message === 'string' ? e.message : '';
   const status = typeof e.status === 'number' ? e.status : undefined;
   const make = (code: AiErrorCode) =>
